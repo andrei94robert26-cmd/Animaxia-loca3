@@ -55,6 +55,7 @@ jobs:
 
       - name: Start backend
         run: |
+          mkdir -p ../../reports
           npm start > ../../reports/backend.log 2>&1 &
           echo $! > /tmp/animaxia-backend.pid
 
