@@ -25,11 +25,6 @@ import { logger } from '../../utils/logger.js';
 import { query } from '../../db.js';
 
 const DDL_STATEMENTS = [
-  { column: 'content.shardid', sql: `ALTER TABLE content ADD COLUMN IF NOT EXISTS shardid INT NOT NULL DEFAULT 0` },
-  { column: 'searchdocs.shardid', sql: `ALTER TABLE searchdocs ADD COLUMN IF NOT EXISTS shardid INT NOT NULL DEFAULT 0` },
-  { column: 'vectorembeddings.shardid', sql: `ALTER TABLE vectorembeddings ADD COLUMN IF NOT EXISTS shardid INT NOT NULL DEFAULT 0` },
-  { sql: `CREATE INDEX IF NOT EXISTS idx_content_shardid ON content (shardid)` },
-  { sql: `CREATE INDEX IF NOT EXISTS idx_searchdocs_shardid ON searchdocs (shardid)` },
   { sql: `CREATE INDEX IF NOT EXISTS idx_vectorembeddings_shardid ON vectorembeddings (shardid)` },
 ];
 

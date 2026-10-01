@@ -10,7 +10,7 @@ import { rows } from './sql.js';
 
 const DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT UNIQUE NOT NULL,
     username TEXT NOT NULL,
     passwordhash TEXT NOT NULL,
@@ -18,68 +18,68 @@ const DDL_STATEMENTS = [
     role TEXT NOT NULL DEFAULT 'user',
     plan TEXT NOT NULL DEFAULT 'free',
     planexpiresat TIMESTAMPTZ,
-    preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    preferences TEXT NOT NULL DEFAULT '{}',
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     lastloginat TIMESTAMPTZ
   )`,
   `CREATE TABLE IF NOT EXISTS refreshtokens (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tokenhash TEXT UNIQUE NOT NULL,
     expiresat TIMESTAMPTZ NOT NULL,
     revoked BOOLEAN NOT NULL DEFAULT FALSE,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_refreshtokens_user ON refreshtokens (userid)`,
   `CREATE TABLE IF NOT EXISTS watchlist (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     contentid INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (userid, contentid)
   )`,
   `CREATE TABLE IF NOT EXISTS watchhistory (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     contentid INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
     progress INTEGER NOT NULL DEFAULT 0,
-    watchedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    watchedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (userid, contentid)
   )`,
   `CREATE TABLE IF NOT EXISTS comments (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     contentid INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     parentid INTEGER REFERENCES comments(id) ON DELETE CASCADE,
     body TEXT NOT NULL,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_comments_content ON comments (contentid, createdat DESC)`,
   `CREATE TABLE IF NOT EXISTS commentvotes (
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     commentid INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
     value SMALLINT NOT NULL,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (userid, commentid)
   )`,
   `CREATE TABLE IF NOT EXISTS contentlikes (
     contentid INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     value SMALLINT NOT NULL,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (contentid, userid)
   )`,
   `CREATE TABLE IF NOT EXISTS viewevents (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     contentid INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
     userid INTEGER REFERENCES users(id) ON DELETE SET NULL,
     event TEXT NOT NULL DEFAULT 'view',
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_viewevents_content ON viewevents (contentid)`,
   `CREATE INDEX IF NOT EXISTS idx_viewevents_created ON viewevents (createdat DESC)`,
   `CREATE TABLE IF NOT EXISTS subscriptions (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     plan TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
@@ -88,62 +88,57 @@ const DDL_STATEMENTS = [
     stripecustomerid TEXT,
     stripesubscriptionid TEXT,
     currentperiodend TIMESTAMPTZ,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions (userid, createdat DESC)`,
   `CREATE TABLE IF NOT EXISTS auditlogs (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     userid INTEGER REFERENCES users(id) ON DELETE SET NULL,
     action TEXT NOT NULL,
     ip TEXT,
-    meta JSONB,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    meta TEXT,
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_auditlogs_created ON auditlogs (createdat DESC)`,
   `CREATE TABLE IF NOT EXISTS aichats (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     contentid INTEGER REFERENCES content(id) ON DELETE CASCADE,
     userid INTEGER REFERENCES users(id) ON DELETE SET NULL,
     role TEXT NOT NULL,
     message TEXT NOT NULL,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_aichats_content ON aichats (contentid, createdat ASC)`,
   // Phase 6 (additive): one-shot password reset codes.
   `CREATE TABLE IF NOT EXISTS passwordresets (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     codehash TEXT NOT NULL,
     expiresat TIMESTAMPTZ NOT NULL,
     used BOOLEAN NOT NULL DEFAULT FALSE,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_passwordresets_user ON passwordresets (userid, createdat DESC)`,
   // FAZA 16 (Task 16-a): Neon FTS search docs — denormalized, queryable index table.
   `CREATE TABLE IF NOT EXISTS searchdocs (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     contentid INTEGER NOT NULL UNIQUE,
     externalid TEXT,
     type TEXT,
     title TEXT NOT NULL,
-    tsv tsvector,
+    tsv TEXT,
     year INTEGER,
-    rating DOUBLE PRECISION,
-    genres TEXT[] DEFAULT '{}',
-    actors TEXT[] DEFAULT '{}',
-    studios TEXT[] DEFAULT '{}',
+    rating REAL,
+    genres TEXT DEFAULT '{}',
+    actors TEXT DEFAULT '{}',
+    studios TEXT DEFAULT '{}',
     category TEXT,
-    syncedat TIMESTAMP DEFAULT NOW()
+    syncedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_searchdocs_tsv ON searchdocs USING GIN (tsv)`,
-  `CREATE INDEX IF NOT EXISTS idx_searchdocs_title_trgm ON searchdocs USING GIN (title gin_trgm_ops)`,
   `CREATE INDEX IF NOT EXISTS idx_searchdocs_year ON searchdocs (year)`,
-  `CREATE INDEX IF NOT EXISTS idx_searchdocs_type ON searchdocs (type)`,
-  `CREATE INDEX IF NOT EXISTS idx_searchdocs_genres ON searchdocs USING GIN (genres)`,
-  `CREATE INDEX IF NOT EXISTS idx_searchdocs_actors ON searchdocs USING GIN (actors)`,
   // FAZA 16: global dedup registry for every ingested external source.
   `CREATE TABLE IF NOT EXISTS contentsources (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     urlhash TEXT NOT NULL UNIQUE,
     url TEXT NOT NULL,
     originalurl TEXT,
@@ -152,55 +147,55 @@ const DDL_STATEMENTS = [
     externalid TEXT,
     addedby TEXT DEFAULT 'manual',
     hits INTEGER DEFAULT 1,
-    metadata JSONB DEFAULT '{}',
-    createdat TIMESTAMP DEFAULT NOW(),
-    lastseenat TIMESTAMP DEFAULT NOW()
+    metadata TEXT DEFAULT '{}',
+    createdat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    lastseenat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_contentsources_contentid ON contentsources (contentid)`,
   `CREATE INDEX IF NOT EXISTS idx_contentsources_kind ON contentsources (kind)`,
   // FAZA 16: ai/home stores moved from data/*.json into Neon.
   `CREATE TABLE IF NOT EXISTS aisettings (
     key TEXT PRIMARY KEY,
-    value JSONB NOT NULL,
-    updatedat TIMESTAMP DEFAULT NOW()
+    value TEXT NOT NULL,
+    updatedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS aienrichment (
     externalid TEXT PRIMARY KEY,
-    payload JSONB NOT NULL,
-    updatedat TIMESTAMP DEFAULT NOW()
+    payload TEXT NOT NULL,
+    updatedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS aitrailercache (
     cachekey TEXT PRIMARY KEY,
-    payload JSONB NOT NULL,
-    updatedat TIMESTAMP DEFAULT NOW()
+    payload TEXT NOT NULL,
+    updatedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   // FAZA 16: SVG thumbnail storage moved from disk into Neon.
   `CREATE TABLE IF NOT EXISTS thumbnailcache (
     file TEXT PRIMARY KEY,
     svg TEXT NOT NULL,
     contentid INTEGER,
-    createdat TIMESTAMP DEFAULT NOW()
+    createdat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   // FAZA 16: marathon playlists (future frontend surface).
   `CREATE TABLE IF NOT EXISTS marathons (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT UNIQUE,
     userid INTEGER,
     title TEXT NOT NULL,
     description TEXT,
-    items JSONB NOT NULL DEFAULT '[]',
-    createdat TIMESTAMP DEFAULT NOW()
+    items TEXT NOT NULL DEFAULT '[]',
+    createdat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_marathons_key ON marathons (key)`,
-  // FAZA 16-b (AI Hub): semantic-search embeddings (JSONB vectors, provider-tagged).
+  // FAZA 16-b (AI Hub): semantic-search embeddings (TEXT vectors, provider-tagged).
   `CREATE TABLE IF NOT EXISTS aisemantic (
     externalid TEXT PRIMARY KEY,
     contentid INTEGER,
     title TEXT,
-    embedding JSONB,
+    embedding TEXT,
     dims INTEGER,
     provider TEXT,
-    updatedat TIMESTAMP DEFAULT NOW()
+    updatedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_aisemantic_contentid ON aisemantic (contentid)`,
 ];
@@ -211,7 +206,6 @@ const DDL_STATEMENTS = [
  * database — the CREATE EXTENSION is purely defensive (fresh branches).
  */
 const BEST_EFFORT_STATEMENTS = [
-  'CREATE EXTENSION IF NOT EXISTS pg_trgm',
 ];
 
 /**

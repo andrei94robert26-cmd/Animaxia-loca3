@@ -75,6 +75,11 @@ jobs:
           set -o pipefail
           npm run test:providers 2>&1 | tee ../../reports/backend-providers.txt
 
+      - name: Minimal search 8 providers + year + dedup
+        run: |
+          set -o pipefail
+          node --test tests/minimal-search.test.mjs 2>&1 | tee ../../reports/minimal-search.txt
+
       - name: Upload backend report
         if: always()
         uses: actions/upload-artifact@v4

@@ -124,12 +124,12 @@ const memoStore = new Map(); // key → { at, value, promise }
 /** TTL memo with concurrent-call coalescing (never throws by itself). */
 function memo(key, ttlMs, producer) {
   const hit = memoStore.get(key);
-  if (hit && Date.now() - hit.at < ttlMs) return Promise.resolve(hit.value);
+  if (hit && Date.CURRENT_TIMESTAMP - hit.at < ttlMs) return Promise.resolve(hit.value);
   if (hit && hit.promise) return hit.promise;
   const promise = Promise.resolve()
     .then(producer)
     .then((value) => {
-      memoStore.set(key, { at: Date.now(), value, promise: null });
+      memoStore.set(key, { at: Date.CURRENT_TIMESTAMP, value, promise: null });
       return value;
     })
     .catch((err) => {
@@ -194,7 +194,7 @@ const lastRuns = new Map(); // key → ISO timestamp of the last main-endpoint c
 let settingsCache = { at: 0, map: new Map() };
 
 async function loadHubSettings() {
-  if (Date.now() - settingsCache.at < 30000) return settingsCache.map;
+  if (Date.CURRENT_TIMESTAMP - settingsCache.at < 30000) return settingsCache.map;
   const map = new Map();
   try {
     const stored = await rows(`SELECT key, value FROM aisettings WHERE key LIKE 'hub:%'`);
@@ -206,15 +206,15 @@ async function loadHubSettings() {
   } catch (err) {
     logger.warn(`[ai-hub] aisettings read failed (${err.message}) — defaults (all ON)`);
   }
-  settingsCache = { at: Date.now(), map };
+  settingsCache = { at: Date.CURRENT_TIMESTAMP, map };
   return map;
 }
 
 async function setAiEnabled(key, enabled) {
   const value = { enabled, updatedAt: new Date().toISOString() };
   await rows(
-    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+    `INSERT INTO aisettings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = CURRENT_TIMESTAMP`,
     [`hub:${key}`, jsonb(value)],
   );
   settingsCache = { at: 0, map: new Map() }; // invalidate
@@ -620,18 +620,18 @@ async function buildForecast(days) {
                 COALESCE(r.n, 0) AS recent, COALESCE(p.n, 0) AS previous
          FROM content c
          LEFT JOIN (
-           SELECT contentid, COUNT(*)::int AS n FROM viewevents
-           WHERE createdat > NOW() - $1::interval GROUP BY contentid
+           SELECT contentid, COUNT(*) AS n FROM viewevents
+           WHERE createdat > datetime('now', '-' || $1) GROUP BY contentid
          ) r ON r.contentid = c.id
          LEFT JOIN (
-           SELECT contentid, COUNT(*)::int AS n FROM viewevents
-           WHERE createdat <= NOW() - $1::interval AND createdat > NOW() - $2::interval
+           SELECT contentid, COUNT(*) AS n FROM viewevents
+           WHERE createdat <= datetime('now', '-' || $1) AND createdat > datetime('now', '-' || $2)
            GROUP BY contentid
          ) p ON p.contentid = c.id
          WHERE COALESCE(r.n, 0) > 0 OR COALESCE(p.n, 0) > 0`,
         [recentP, previousP],
       ),
-      one(`SELECT COUNT(*)::int AS n FROM viewevents WHERE createdat > NOW() - $1::interval`, [previousP]),
+      one(`SELECT COUNT(*) AS n FROM viewevents WHERE createdat > datetime('now', '-' || $1)`, [previousP]),
     ]);
 
     const eventsAnalyzed = Number(eventsRow?.n ?? 0);
@@ -674,8 +674,8 @@ async function buildForecast(days) {
            FROM content
            WHERE COALESCE(metadata->>'rating','') ~ '^[0-9.]+$' OR COALESCE(metadata->>'score','') ~ '^[0-9.]+$'
            ORDER BY GREATEST(
-             COALESCE(NULLIF(metadata->>'rating','')::float, 0),
-             COALESCE(NULLIF(metadata->>'score','')::float, 0)
+             COALESCE(NULLIF(metadata->>'rating',''), 0),
+             COALESCE(NULLIF(metadata->>'score',''), 0)
            ) DESC
            LIMIT 10`,
         ),
@@ -840,10 +840,13 @@ function ensureEmbedded() {
   if (embedLock) return embedLock;
   embedLock = (async () => {
     const pending = await rows(
-      `SELECT c.id, c.externalid, c.title, c.metadata
+      `SELECT c.id,
+               ('content:' || c.id) AS externalid,
+               c.title,
+               json_object('year', c.year) AS metadata
        FROM content c
-       LEFT JOIN aisemantic s ON s.externalid = c.externalid
-       WHERE s.externalid IS NULL OR s.title <> c.title
+       LEFT JOIN aisemantic s ON s.contentid = c.id
+       WHERE s.contentid IS NULL OR s.title <> c.title
        ORDER BY c.id
        LIMIT 500`,
     );
@@ -868,7 +871,7 @@ function ensureEmbedded() {
           entry.emb.dims,
           entry.emb.provider,
         );
-        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4}::jsonb,$${base + 5},$${base + 6},NOW())`;
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},CURRENT_TIMESTAMP)`;
       });
       await rows(
         `INSERT INTO aisemantic (externalid, contentid, title, embedding, dims, provider, updatedat)
@@ -879,7 +882,7 @@ function ensureEmbedded() {
            embedding = EXCLUDED.embedding,
            dims = EXCLUDED.dims,
            provider = EXCLUDED.provider,
-           updatedat = NOW()`,
+           updatedat = CURRENT_TIMESTAMP`,
         params,
       );
       embedded += embeddedRows.length;
@@ -948,7 +951,7 @@ async function semanticSearch(vector, { excludeContentId = null, limit = 12 }) {
   if (top.length === 0) return { results: [], dominant };
   // Hydrate type/thumbnail from content in one query.
   const ids = top.map((t) => t.contentId);
-  const info = await rows('SELECT id, type, thumbnail FROM content WHERE id = ANY($1::int[])', [ids]);
+  const info = await rows('SELECT id, type, thumbnail FROM content WHERE id IN (SELECT value FROM json_each($1))', [JSON.stringify(ids)]);
   const infoById = new Map(info.map((r) => [Number(r.id), r]));
   return {
     results: top.map((t) => ({
@@ -1014,9 +1017,9 @@ async function watchdogChecks() {
   // 2. DB latency (SELECT 1 timing).
   let dbMs = -1;
   try {
-    const t0 = Date.now();
+    const t0 = Date.CURRENT_TIMESTAMP;
     await query('SELECT 1');
-    dbMs = Date.now() - t0;
+    dbMs = Date.CURRENT_TIMESTAMP - t0;
   } catch (err) {
     dbMs = -1;
   }
@@ -1047,7 +1050,7 @@ async function watchdogChecks() {
   // 5. Ingest errors (miner_jobs failed) — best-effort.
   let failedJobs = null;
   try {
-    const row = await one(`SELECT COUNT(*)::int AS n FROM miner_jobs WHERE status = 'failed'`);
+    const row = await one(`SELECT COUNT(*) AS n FROM miner_jobs WHERE status = 'failed'`);
     failedJobs = Number(row?.n ?? 0);
     checks.push({
       name: 'ingest',
@@ -1062,7 +1065,7 @@ async function watchdogChecks() {
   let desync = null;
   try {
     const row = await one(
-      `SELECT (SELECT COUNT(*)::int FROM content) AS contentcount, (SELECT COUNT(*)::int FROM searchdocs) AS docscount`,
+      `SELECT (SELECT COUNT(*) FROM content) AS contentcount, (SELECT COUNT(*) FROM searchdocs) AS docscount`,
     );
     desync = Math.abs(Number(row?.contentcount ?? 0) - Number(row?.docscount ?? 0));
     checks.push({
@@ -1215,8 +1218,8 @@ async function buildMarathonSuggestions() {
          FROM content
          WHERE COALESCE(metadata->>'rating','') ~ '^[0-9.]+$' OR COALESCE(metadata->>'score','') ~ '^[0-9.]+$'
          ORDER BY GREATEST(
-           COALESCE(NULLIF(metadata->>'rating','')::float, 0),
-           COALESCE(NULLIF(metadata->>'score','')::float, 0)
+           COALESCE(NULLIF(metadata->>'rating',''), 0),
+           COALESCE(NULLIF(metadata->>'score',''), 0)
          ) DESC
          LIMIT 12`,
       );
@@ -1252,8 +1255,8 @@ async function buildMarathonSuggestions() {
         const recent = await rows(
           `SELECT id, externalid, title, thumbnail, metadata->>'year' AS year,
                   GREATEST(
-                    COALESCE(NULLIF(metadata->>'rating','')::float, 0),
-                    COALESCE(NULLIF(metadata->>'score','')::float, 0)
+                    COALESCE(NULLIF(metadata->>'rating',''), 0),
+                    COALESCE(NULLIF(metadata->>'score',''), 0)
                   ) AS rank
            FROM content
            WHERE metadata->>'year' IN ($1, $2)
@@ -1299,8 +1302,8 @@ const translateLimiter = userRateLimit({ scope: 'user', max: 10, windowMs: 60000
 /** Translator coverage across the library (cheap metadata scan). */
 async function translatorCoverage() {
   const [totalRow, translationRows] = await Promise.all([
-    one('SELECT COUNT(*)::int AS n FROM content'),
-    rows(`SELECT metadata->'translations' AS t FROM content WHERE metadata ? 'translations' AND metadata->'translations' <> '{}'::jsonb`),
+    one('SELECT COUNT(*) AS n FROM content'),
+    rows(`SELECT metadata->'translations' AS t FROM content WHERE metadata ? 'translations' AND metadata->'translations' <> '{}'`),
   ]);
   const byLang = {};
   let entries = 0;
@@ -1334,10 +1337,10 @@ async function buildHubStatus() {
     ] = await Promise.all([
       curatorScan().catch(() => null),
       buildForecast(7).catch(() => null),
-      one('SELECT COUNT(*)::int AS n FROM aisemantic').catch(() => null),
-      one('SELECT COUNT(*)::int AS n FROM content').catch(() => null),
+      one('SELECT COUNT(*) AS n FROM aisemantic').catch(() => null),
+      one('SELECT COUNT(*) AS n FROM content').catch(() => null),
       watchdogChecks().catch(() => null),
-      one('SELECT COUNT(*)::int AS n FROM marathons').catch(() => null),
+      one('SELECT COUNT(*) AS n FROM marathons').catch(() => null),
       translatorCoverage().catch(() => null),
     ]);
 
@@ -1466,7 +1469,7 @@ hubAiRouter.post('/curator/enrich', requireAuth, guard('curator'), wrap(async (r
     }
     // Shallow-merge ONLY the missing fields (existing values always win).
     await rows(
-      `UPDATE content SET metadata = metadata || $2::jsonb WHERE id = $1 RETURNING id`,
+      `UPDATE content SET metadata = metadata || $2 WHERE id = $1 RETURNING id`,
       [row.id, jsonb(add)],
     );
     // Invalidate the semantic row so the debounced re-embed picks up the new
@@ -1512,7 +1515,7 @@ hubAiRouter.post('/curator/merge', requireAuth, requireAdmin, guard('curator'), 
   // 2. Best-effort: keep user data (watchlist/history/views/likes/comments).
   const userDataMoves = [
     `INSERT INTO watchlist (userid, contentid, createdat)
-     SELECT userid, $1, NOW() FROM watchlist WHERE contentid = $2
+     SELECT userid, $1, CURRENT_TIMESTAMP FROM watchlist WHERE contentid = $2
      ON CONFLICT (userid, contentid) DO NOTHING`,
     `INSERT INTO watchhistory (userid, contentid, progress, watchedat)
      SELECT userid, $1, progress, watchedat FROM watchhistory WHERE contentid = $2
@@ -1563,7 +1566,7 @@ hubAiRouter.post('/semantic/query', guard('semantic'), wrap(async (req, res) => 
   await ensureEmbedded(); // first call embeds the library (max 500, incremental)
   const { vector, provider } = await embedText(text);
   const { results, dominant } = await semanticSearch(vector, { limit });
-  const countRow = await one('SELECT COUNT(*)::int AS n FROM aisemantic').catch(() => null);
+  const countRow = await one('SELECT COUNT(*) AS n FROM aisemantic').catch(() => null);
   return res.json({
     ok: true,
     results,
@@ -1590,8 +1593,8 @@ hubAiRouter.get('/semantic/status', wrap(async (req, res) => {
   // Best-effort auto-embed so embedded > 0 as soon as the index is inspected.
   await ensureEmbedded().catch((err) => logger.warn(`[ai-hub] status embed failed: ${err.message}`));
   const [embeddedRow, totalRow] = await Promise.all([
-    one('SELECT COUNT(*)::int AS n FROM aisemantic').catch(() => null),
-    one('SELECT COUNT(*)::int AS n FROM content').catch(() => null),
+    one('SELECT COUNT(*) AS n FROM aisemantic').catch(() => null),
+    one('SELECT COUNT(*) AS n FROM content').catch(() => null),
   ]);
   let lastAt = lastEmbedAt;
   if (!lastAt) {
@@ -1632,7 +1635,7 @@ hubAiRouter.post('/marathon/create', requireAuth, guard('marathon'), wrap(async 
   const marathonKey = `${req.user.id}:${suggestion.key}`;
   const saved = await one(
     `INSERT INTO marathons (key, userid, title, description, items)
-     VALUES ($1, $2, $3, $4, $5::jsonb)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (key) DO UPDATE SET
        title = EXCLUDED.title,
        description = EXCLUDED.description,
@@ -1747,7 +1750,7 @@ hubAiRouter.post('/translate', requireAuth, translateLimiter, guard('translator'
     `UPDATE content
        SET metadata = metadata || jsonb_build_object(
          'translations',
-         COALESCE(metadata->'translations', '{}'::jsonb) || jsonb_build_object($2::text, $3::text)
+         COALESCE(metadata->'translations', '{}') || jsonb_build_object($2, $3)
        )
      WHERE id = $1 RETURNING id`,
     [contentId, lang, translation],
@@ -1759,7 +1762,7 @@ hubAiRouter.post('/translate', requireAuth, translateLimiter, guard('translator'
   if (generatedFirst) {
     // Also keep the generated EN description so the title is no longer bare.
     await rows(
-      `UPDATE content SET metadata = metadata || jsonb_build_object('description', $2::text) WHERE id = $1 AND NOT (metadata ? 'overview' OR metadata ? 'synopsis' OR metadata ? 'description')`,
+      `UPDATE content SET metadata = metadata || jsonb_build_object('description', $2) WHERE id = $1 AND NOT (metadata ? 'overview' OR metadata ? 'synopsis' OR metadata ? 'description')`,
       [contentId, text],
     ).catch(() => {});
   }
