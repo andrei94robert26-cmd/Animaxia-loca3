@@ -248,7 +248,7 @@ export async function getContentById(id, opts = {}) {
 export async function getContentByExternalId(externalid) {
   const source = localDb.prepare(`
     SELECT contentId
-    FROM ContentSource
+    FROM contentsources
     WHERE originalUrl=? OR url=?
     ORDER BY id DESC
     LIMIT 1

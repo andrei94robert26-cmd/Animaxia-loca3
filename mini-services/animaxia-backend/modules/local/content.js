@@ -1,87 +1,154 @@
 import { localDb } from './sqlite.js';
 
-const columns = localDb.prepare("PRAGMA table_info(Content)").all();
-const names = new Set(columns.map(c => c.name));
+function detectYear(title, metadata = {}) {
+  const direct = Number(metadata?.year);
 
-const col = (...choices) => choices.find(c => names.has(c));
+  if (Number.isInteger(direct) && direct >= 1000 && direct <= 9999) {
+    return direct;
+  }
 
-const idCol = col('id');
-const externalCol = col('externalId', 'externalid');
-const typeCol = col('type');
-const titleCol = col('title');
-const thumbnailCol = col('thumbnail');
-const metadataCol = col('metadata');
-const updatedCol = col('updatedAt', 'updatedat');
-
-if (!idCol || !externalCol || !titleCol) {
-  throw new Error('Content schema incompatible: id/externalId/title lipsesc');
+  const match = String(title || '').match(/\b(19|20)\d{2}\b/);
+  return match ? Number(match[0]) : null;
 }
 
 function decode(row) {
   if (!row) return null;
 
-  if (metadataCol && typeof row[metadataCol] === 'string') {
-    try {
-      row.metadata = JSON.parse(row[metadataCol]);
-    } catch {
-      row.metadata = {};
-    }
+  const sources = [];
+
+  if (row.url) {
+    sources.push({
+      url: row.url,
+      type: /youtube\.com\/embed\//i.test(row.url)
+        ? 'youtube'
+        : row.embedcode === row.url
+          ? 'iframe'
+        : /\.m3u8(?:[?#]|$)|[?&]r_file=chunklist\.m3u8/i.test(row.url)
+          ? 'm3u8'
+          : /\.mp4(?:[?#]|$)/i.test(row.url)
+            ? 'mp4'
+            : 'video'
+    });
   }
 
-  return row;
+  if (row.embedcode && row.embedcode !== row.url) {
+    sources.push({
+      url: row.embedcode,
+      type: 'iframe'
+    });
+  }
+
+  return {
+    ...row,
+    metadata: {
+      year: row.year ?? null,
+      player: { sources }
+    }
+  };
 }
 
 export async function getLocalContentByExternalId(externalid) {
+  const source = localDb.prepare(`
+    SELECT contentId
+    FROM contentsources
+    WHERE originalUrl = ? OR url = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(externalid, externalid);
+
+  if (!source?.contentId) return null;
+
   return decode(
-    localDb.prepare(
-      `SELECT * FROM Content WHERE "${externalCol}" = ? LIMIT 1`
-    ).get(externalid)
+    localDb.prepare(`
+      SELECT id,title,year,url,embedcode
+      FROM Content
+      WHERE id=?
+      LIMIT 1
+    `).get(source.contentId)
   );
 }
 
 export async function upsertLocalContent({
   externalid,
-  type,
   title,
-  thumbnail,
-  metadata
+  metadata = {}
 }) {
   const existing = await getLocalContentByExternalId(externalid);
 
-  const values = {
-    externalid,
-    ...(typeCol ? { type: type ?? 'mined' } : {}),
-    title: title || externalid,
-    ...(thumbnailCol ? { thumbnail: thumbnail || '' } : {}),
-    ...(metadataCol ? { metadata: JSON.stringify(metadata || {}) } : {})
-  };
+  const sources = Array.isArray(metadata?.player?.sources)
+    ? metadata.player.sources
+    : [];
+
+  const first = sources[0] ?? null;
+
+  const embed = sources.find(s =>
+    ['iframe', 'youtube'].includes(String(s?.type || '').toLowerCase())
+  );
+
+  const year = detectYear(title, metadata);
+  const url = first?.url ?? existing?.url ?? null;
+  const embedcode = embed?.url ?? existing?.embedcode ?? null;
 
   if (existing) {
-    const entries = Object.entries(values)
-      .filter(([k]) => k !== externalCol);
-
-    const sql = entries.map(([k]) => `"${k}"=?`).join(',');
-
-    localDb.prepare(
-      `UPDATE Content SET ${sql}${updatedCol ? `,"${updatedCol}"=CURRENT_TIMESTAMP` : ''} WHERE "${idCol}"=?`
-    ).run(...entries.map(([,v]) => v), existing[idCol]);
+    localDb.prepare(`
+      UPDATE Content
+      SET title=?, year=?, url=?, embedcode=?
+      WHERE id=?
+    `).run(
+      title || existing.title,
+      year,
+      url,
+      embedcode,
+      existing.id
+    );
 
     return {
-      record: await getLocalContentByExternalId(externalid),
+      record: decode(
+        localDb.prepare(`
+          SELECT id,title,year,url,embedcode
+          FROM Content WHERE id=?
+        `).get(existing.id)
+      ),
       created: false
     };
   }
 
-  const entries = Object.entries(values);
-  const fields = entries.map(([k]) => `"${k}"`).join(',');
-  const marks = entries.map(() => '?').join(',');
+  const finalTitle = title || externalid || 'untitled';
 
-  localDb.prepare(
-    `INSERT INTO Content (${fields}) VALUES (${marks})`
-  ).run(...entries.map(([,v]) => v));
+  const result = localDb.prepare(`
+    INSERT INTO Content(title,year,url,embedcode)
+    VALUES(?,?,?,?)
+    ON CONFLICT DO NOTHING
+  `).run(finalTitle, year, url, embedcode);
+
+  let id;
+
+  if (Number(result.changes || 0) > 0) {
+    id = Number(result.lastInsertRowid);
+  } else {
+    const duplicate = localDb.prepare(`
+      SELECT id
+      FROM Content
+      WHERE lower(trim(title)) = lower(trim(?))
+        AND ifnull(year,-1) = ifnull(?,-1)
+        AND ifnull(url,'') = ifnull(?,'')
+        AND ifnull(embedcode,'') = ifnull(?,'')
+      LIMIT 1
+    `).get(finalTitle, year, url, embedcode);
+
+    if (!duplicate?.id)
+      throw new Error('Content duplicate detected but canonical row not found');
+
+    id = Number(duplicate.id);
+  }
 
   return {
-    record: await getLocalContentByExternalId(externalid),
+    record: decode(
+      localDb.prepare(`
+        SELECT id,title,year,url,embedcode
+        FROM Content WHERE id=?
+      `).get(id)
+    ),
     created: true
   };
 }
