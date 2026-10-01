@@ -44,7 +44,14 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", "mini-services/**", "animaxia-cloud/**", "animaxia-mobile/**", "tool-results/**", ".tmp/**", "agent-ctx/**", "docs/**", "animaxia-miner/**"]
+  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", "mini-services/**", "animaxia-cloud/**", "animaxia-mobile/**", "tool-results/**", ".tmp/**", "agent-ctx/**", "docs/**", "animaxia-miner/**",
+  "animaxia-30b/**",
+  "animaxia-clean/**",
+  "animaxia-searchflow/**",
+  "animaxia-searchfull/**",
+  "animaxia-searchopt/**",
+  "animaxia-searchrate/**",
+  "animaxia-player/**"]
 }, {
   // FAZA 29 (igienă, zero logică): aplicațiile surori livrate au propriul toolchain QA și
   // rămân neatinse per regula no-rewrite. Scope-uri config-level, zero bytes de cod modificați:
