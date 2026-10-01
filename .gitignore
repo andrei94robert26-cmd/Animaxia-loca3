@@ -10,11 +10,31 @@ build/
 db/*.db
 db/*.sqlite
 db/*.bak*
+db/custom.db*
 
 server.log
+dev.log
 *.log
 
-coverage/
-reports/
+backups/
+secrets/
+upload/
+download/
 
-.DS_Store
+tool-results/
+__pycache__/
+
+*.bak
+*.before-*
+*.before-sqlite*
+*.before-local*
+*.before-warning-clean*
+*.before-full-sqlite*
+
+animaxia-backend.before-*
+animaxia-clean/
+animaxia-cloud/
+animaxia-desktop/
+animaxia-edge/
+
+coverage/
