@@ -109,7 +109,22 @@ export async function initDb() {
       url TEXT,
       embedcode TEXT
     );
+  `);
 
+  const columns = new Set(
+    localDb.prepare("PRAGMA table_info(Content)").all().map((r) => String(r.name).toLowerCase())
+  );
+
+  if (!columns.has("year"))
+    localDb.exec("ALTER TABLE Content ADD COLUMN year INTEGER");
+
+  if (!columns.has("url"))
+    localDb.exec("ALTER TABLE Content ADD COLUMN url TEXT");
+
+  if (!columns.has("embedcode"))
+    localDb.exec("ALTER TABLE Content ADD COLUMN embedcode TEXT");
+
+  localDb.exec(`
     CREATE INDEX IF NOT EXISTS idx_content_title
       ON Content(title COLLATE NOCASE);
 
