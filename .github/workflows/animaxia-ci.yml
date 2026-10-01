@@ -75,6 +75,18 @@ jobs:
           set -o pipefail
           npm run test:providers 2>&1 | tee ../../reports/backend-providers.txt
 
+      - name: Debug YouTube search
+        run: |
+          BASE="http:""//127.0.0.1:4000"
+          echo "=== FLORIN ==="
+          curl -s "$BASE/api/search/advanced?q=Florin%20Cercel"
+          echo
+          echo "=== YEAR 2026 ==="
+          curl -s "$BASE/api/search/advanced?year=2026"
+          echo
+          echo "=== BACKEND LOG ==="
+          tail -n 150 ../../reports/backend.log
+
       - name: Minimal search 8 providers + year + dedup
         run: |
           set -o pipefail
