@@ -849,6 +849,15 @@ export async function mineUrl(rawUrl, { type, externalId } = {}) {
     try {
       const { body, finalUrl, contentType, bytesRead } = await fetchWithRedirects(parsed.toString());
       extraction = extractFromHtml(body, finalUrl, rawUrl, contentType, bytesRead, startedAt);
+
+      const ytId = youtubeIdFromUrl(rawUrl);
+      if (ytId && extraction.title === `YouTube video ${ytId}`) {
+        const enriched = await degradedYouTubeExtraction(rawUrl, ytId, startedAt);
+        if (enriched.title && enriched.title !== `YouTube video ${ytId}`) {
+          extraction.title = enriched.title;
+        }
+        if (enriched.thumbnail) extraction.thumbnail = enriched.thumbnail;
+      }
     } catch (err) {
       // YouTube watch pages are frequently throttled (429) from datacenter IPs.
       // The video id is in the source URL itself, so fall back to a URL-based
