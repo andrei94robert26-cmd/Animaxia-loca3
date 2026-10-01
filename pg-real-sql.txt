@@ -1,0 +1,1118 @@
+mini-services/animaxia-backend/modules/ai/ai.js:23: * thinking disabled, a 20s timeout and 1 retry, returning null on failure so
+mini-services/animaxia-backend/modules/ai/ai.js:234:       WHERE wh.userid = $1
+mini-services/animaxia-backend/modules/ai/ai.js:470:         WHERE contentid = $1 AND userid = $2
+mini-services/animaxia-backend/modules/ai/ai.js:508:        `INSERT INTO aichats (contentid, userid, role, message) VALUES ($1, $2, 'user', $3), ($1, $2, 'assistant', $4)`,
+mini-services/animaxia-backend/modules/ai/home.js:303:  tv: 'Serial TV',
+mini-services/animaxia-backend/modules/ai/home.js:498:        `INSERT INTO aienrichment (externalid, payload) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/home.js:499:         ON CONFLICT (externalid) DO UPDATE SET payload = EXCLUDED.payload, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/ai/home.js:618:    const now = Date.now();
+mini-services/animaxia-backend/modules/ai/home.js:789:      const row = await one('SELECT payload FROM aitrailercache WHERE cachekey = $1', [key]);
+mini-services/animaxia-backend/modules/ai/home.js:810:        `INSERT INTO aitrailercache (cachekey, payload) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/home.js:811:         ON CONFLICT (cachekey) DO UPDATE SET payload = EXCLUDED.payload, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/ai/home.js:848:    cached && Date.now() - new Date(cached.fetchedAt).getTime() < TRAILER_TTL_MS;
+mini-services/animaxia-backend/modules/ai/home.js:1170:      const row = await one('SELECT value FROM aisettings WHERE key = $1', ['home']);
+mini-services/animaxia-backend/modules/ai/home.js:1187:        `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/home.js:1188:         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/ai/hub.js:127:  if (hit && Date.now() - hit.at < ttlMs) return Promise.resolve(hit.value);
+mini-services/animaxia-backend/modules/ai/hub.js:132:      memoStore.set(key, { at: Date.now(), value, promise: null });
+mini-services/animaxia-backend/modules/ai/hub.js:197:  if (Date.now() - settingsCache.at < 30000) return settingsCache.map;
+mini-services/animaxia-backend/modules/ai/hub.js:209:  settingsCache = { at: Date.now(), map };
+mini-services/animaxia-backend/modules/ai/hub.js:216:    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/hub.js:217:     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/ai/hub.js:418:       WHERE COALESCE(a.metadata->>'url', '') <> ''
+mini-services/animaxia-backend/modules/ai/hub.js:419:         AND (a.metadata->>'url' = b.metadata->>'url'
+mini-services/animaxia-backend/modules/ai/hub.js:420:           OR a.metadata->>'url' = b.metadata->>'finalUrl'
+mini-services/animaxia-backend/modules/ai/hub.js:421:           OR a.metadata->>'finalUrl' = b.metadata->>'url'
+mini-services/animaxia-backend/modules/ai/hub.js:422:           OR (COALESCE(a.metadata->>'finalUrl','') <> '' AND a.metadata->>'finalUrl' = b.metadata->>'finalUrl'))
+mini-services/animaxia-backend/modules/ai/hub.js:432:        JOIN content c ON (c.metadata->>'url' = cs.url OR c.metadata->>'finalUrl' = cs.url)
+mini-services/animaxia-backend/modules/ai/hub.js:623:           SELECT contentid, COUNT(*)::int AS n FROM viewevents
+mini-services/animaxia-backend/modules/ai/hub.js:624:           WHERE createdat > NOW() - $1::interval GROUP BY contentid
+mini-services/animaxia-backend/modules/ai/hub.js:627:           SELECT contentid, COUNT(*)::int AS n FROM viewevents
+mini-services/animaxia-backend/modules/ai/hub.js:628:           WHERE createdat <= NOW() - $1::interval AND createdat > NOW() - $2::interval
+mini-services/animaxia-backend/modules/ai/hub.js:634:      one(`SELECT COUNT(*)::int AS n FROM viewevents WHERE createdat > NOW() - $1::interval`, [previousP]),
+mini-services/animaxia-backend/modules/ai/hub.js:669:          `SELECT id, title, thumbnail, type, metadata->>'rating' AS rating, metadata->>'score' AS score
+mini-services/animaxia-backend/modules/ai/hub.js:673:          `SELECT id, title, thumbnail, type, metadata->>'rating' AS rating, metadata->>'score' AS score
+mini-services/animaxia-backend/modules/ai/hub.js:675:           WHERE COALESCE(metadata->>'rating','') ~ '^[0-9.]+$' OR COALESCE(metadata->>'score','') ~ '^[0-9.]+$'
+mini-services/animaxia-backend/modules/ai/hub.js:677:             COALESCE(NULLIF(metadata->>'rating','')::float, 0),
+mini-services/animaxia-backend/modules/ai/hub.js:678:             COALESCE(NULLIF(metadata->>'score','')::float, 0)
+mini-services/animaxia-backend/modules/ai/hub.js:871:        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4}::jsonb,$${base + 5},$${base + 6},NOW())`;
+mini-services/animaxia-backend/modules/ai/hub.js:882:           updatedat = NOW()`,
+mini-services/animaxia-backend/modules/ai/hub.js:951:  const info = await rows('SELECT id, type, thumbnail FROM content WHERE id = ANY($1::int[])', [ids]);
+mini-services/animaxia-backend/modules/ai/hub.js:1017:    const t0 = Date.now();
+mini-services/animaxia-backend/modules/ai/hub.js:1019:    dbMs = Date.now() - t0;
+mini-services/animaxia-backend/modules/ai/hub.js:1050:    const row = await one(`SELECT COUNT(*)::int AS n FROM miner_jobs WHERE status = 'failed'`);
+mini-services/animaxia-backend/modules/ai/hub.js:1065:      `SELECT (SELECT COUNT(*)::int FROM content) AS contentcount, (SELECT COUNT(*)::int FROM searchdocs) AS docscount`,
+mini-services/animaxia-backend/modules/ai/hub.js:1214:        `SELECT id, externalid, title, thumbnail, metadata->>'year' AS year, metadata->>'rating' AS rating, metadata->>'score' AS score
+mini-services/animaxia-backend/modules/ai/hub.js:1216:         WHERE COALESCE(metadata->>'rating','') ~ '^[0-9.]+$' OR COALESCE(metadata->>'score','') ~ '^[0-9.]+$'
+mini-services/animaxia-backend/modules/ai/hub.js:1218:           COALESCE(NULLIF(metadata->>'rating','')::float, 0),
+mini-services/animaxia-backend/modules/ai/hub.js:1219:           COALESCE(NULLIF(metadata->>'score','')::float, 0)
+mini-services/animaxia-backend/modules/ai/hub.js:1247:        `SELECT DISTINCT metadata->>'year' AS y FROM content
+mini-services/animaxia-backend/modules/ai/hub.js:1248:         WHERE metadata->>'year' ~ '^[0-9]{4}$' ORDER BY y DESC LIMIT 2`,
+mini-services/animaxia-backend/modules/ai/hub.js:1253:          `SELECT id, externalid, title, thumbnail, metadata->>'year' AS year,
+mini-services/animaxia-backend/modules/ai/hub.js:1255:                    COALESCE(NULLIF(metadata->>'rating','')::float, 0),
+mini-services/animaxia-backend/modules/ai/hub.js:1256:                    COALESCE(NULLIF(metadata->>'score','')::float, 0)
+mini-services/animaxia-backend/modules/ai/hub.js:1259:           WHERE metadata->>'year' IN ($1, $2)
+mini-services/animaxia-backend/modules/ai/hub.js:1302:    one('SELECT COUNT(*)::int AS n FROM content'),
+mini-services/animaxia-backend/modules/ai/hub.js:1303:    rows(`SELECT metadata->'translations' AS t FROM content WHERE metadata ? 'translations' AND metadata->'translations' <> '{}'::jsonb`),
+mini-services/animaxia-backend/modules/ai/hub.js:1337:      one('SELECT COUNT(*)::int AS n FROM aisemantic').catch(() => null),
+mini-services/animaxia-backend/modules/ai/hub.js:1338:      one('SELECT COUNT(*)::int AS n FROM content').catch(() => null),
+mini-services/animaxia-backend/modules/ai/hub.js:1340:      one('SELECT COUNT(*)::int AS n FROM marathons').catch(() => null),
+mini-services/animaxia-backend/modules/ai/hub.js:1469:      `UPDATE content SET metadata = metadata || $2::jsonb WHERE id = $1 RETURNING id`,
+mini-services/animaxia-backend/modules/ai/hub.js:1474:    await rows('DELETE FROM aisemantic WHERE contentid = $1', [row.id]).catch(() => {});
+mini-services/animaxia-backend/modules/ai/hub.js:1510:  await rows('UPDATE contentsources SET contentid = $1 WHERE contentid = $2', [keepId, mergeId]);
+mini-services/animaxia-backend/modules/ai/hub.js:1515:     SELECT userid, $1, NOW() FROM watchlist WHERE contentid = $2
+mini-services/animaxia-backend/modules/ai/hub.js:1518:     SELECT userid, $1, progress, watchedat FROM watchhistory WHERE contentid = $2
+mini-services/animaxia-backend/modules/ai/hub.js:1520:    `UPDATE viewevents SET contentid = $1 WHERE contentid = $2`,
+mini-services/animaxia-backend/modules/ai/hub.js:1522:     SELECT $1, userid, value, createdat FROM contentlikes WHERE contentid = $2
+mini-services/animaxia-backend/modules/ai/hub.js:1524:    `UPDATE comments SET contentid = $1 WHERE contentid = $2`,
+mini-services/animaxia-backend/modules/ai/hub.js:1566:  const countRow = await one('SELECT COUNT(*)::int AS n FROM aisemantic').catch(() => null);
+mini-services/animaxia-backend/modules/ai/hub.js:1582:  const doc = await one('SELECT contentid, title, embedding, provider FROM aisemantic WHERE contentid = $1', [contentId]);
+mini-services/animaxia-backend/modules/ai/hub.js:1593:    one('SELECT COUNT(*)::int AS n FROM aisemantic').catch(() => null),
+mini-services/animaxia-backend/modules/ai/hub.js:1594:    one('SELECT COUNT(*)::int AS n FROM content').catch(() => null),
+mini-services/animaxia-backend/modules/ai/hub.js:1635:     VALUES ($1, $2, $3, $4, $5::jsonb)
+mini-services/animaxia-backend/modules/ai/hub.js:1640:     RETURNING id, key, userid, title, description, items, createdat`,
+mini-services/animaxia-backend/modules/ai/hub.js:1722:          'Ești translator profesionist de descrieri pentru filme, seriale și anime pentru platforma Animaxia. Traduci fidel textul primit în limba țintă, fără să adaugi detalii, păreri sau spoilere noi, maximum 400 de cuvinte. Răspunde DOAR cu textul tradus.',
+mini-services/animaxia-backend/modules/ai/hub.js:1748:       SET metadata = metadata || jsonb_build_object(
+mini-services/animaxia-backend/modules/ai/hub.js:1750:         COALESCE(metadata->'translations', '{}'::jsonb) || jsonb_build_object($2::text, $3::text)
+mini-services/animaxia-backend/modules/ai/hub.js:1752:     WHERE id = $1 RETURNING id`,
+mini-services/animaxia-backend/modules/ai/hub.js:1757:  await rows('DELETE FROM aisemantic WHERE contentid = $1', [contentId]).catch(() => {});
+mini-services/animaxia-backend/modules/ai/hub.js:1762:      `UPDATE content SET metadata = metadata || jsonb_build_object('description', $2::text) WHERE id = $1 AND NOT (metadata ? 'overview' OR metadata ? 'synopsis' OR metadata ? 'description')`,
+mini-services/animaxia-backend/modules/aicloud/admin.js:23:    const result = await rows(`SELECT COUNT(*)::int AS count FROM aiusagelogs`);
+mini-services/animaxia-backend/modules/aicloud/agent.js:197:       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+mini-services/animaxia-backend/modules/aicloud/agent.js:210:       WHERE userid = $1 ORDER BY createdat DESC, id DESC LIMIT $2`,
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:127:       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:173:    const now = Date.now();
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:249:  const nowWindow = minuteWindowKey(Date.now());
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:460:  const started = Date.now();
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:481:      const latencyMs = Date.now() - started;
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:528:  const latencyMs = Date.now() - started;
+mini-services/animaxia-backend/modules/aicloud/personal.js:53:       VALUES ($1,$2,$3::jsonb, NOW())
+mini-services/animaxia-backend/modules/aicloud/personal.js:55:         tastetags = EXCLUDED.tastetags, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/aicloud/personal.js:65:    const row = await one(`SELECT summary, tastetags, updatedat FROM aiprofiles WHERE userid = $1`, [userId]);
+mini-services/animaxia-backend/modules/aicloud/personal.js:85:       WHERE wh.userid = $1 ORDER BY wh.watchedat DESC LIMIT $2`,
+mini-services/animaxia-backend/modules/aicloud/personal.js:144:    (h) => h.watchedat && Date.now() - Date.parse(h.watchedat) < 7 * 24 * 3600 * 1000,
+mini-services/animaxia-backend/modules/aicloud/personal.js:230:  if (cached && Date.now() - cached.at < HOME_TTL_MS) {
+mini-services/animaxia-backend/modules/aicloud/personal.js:289:  homeCache.set(user.id, { at: Date.now(), payload });
+mini-services/animaxia-backend/modules/aicloud/rag-engine.js:94:       WHERE wh.userid = $1 ORDER BY wh.watchedat DESC LIMIT 12`,
+mini-services/animaxia-backend/modules/aicloud/router.js:79:      id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/aicloud/router.js:94:      createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/aicloud/router.js:99:      id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/aicloud/router.js:104:      toolsused JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/aicloud/router.js:105:      createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/aicloud/router.js:111:      tastetags JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/aicloud/router.js:114:      updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/aicloud/tools.js:122:       WHERE wh.userid = $1 ORDER BY wh.watchedat DESC LIMIT $2`,
+mini-services/animaxia-backend/modules/aicloud/tools.js:143:      `SELECT ve.contentid, COUNT(*)::int AS views, MAX(ve.createdat) AS lastview
+mini-services/animaxia-backend/modules/aicloud/tools.js:145:       WHERE ve.createdat > NOW() - $1::interval AND ve.event IN ('view','play')
+mini-services/animaxia-backend/modules/aicloud/tools.js:148:       LIMIT $2`,
+mini-services/animaxia-backend/modules/aicloud/tools.js:153:      const row = await rows(`SELECT id, title, type, thumbnail, metadata FROM content WHERE id = $1`, [t.contentid]);
+mini-services/animaxia-backend/modules/aicloud/tools.js:173:       ORDER BY cm.createdat DESC LIMIT $1`,
+mini-services/animaxia-backend/modules/aicloud/tools.js:256:  const started = Date.now();
+mini-services/animaxia-backend/modules/aicloud/tools.js:262:    const ms = Date.now() - started;
+mini-services/animaxia-backend/modules/aicloud/tools.js:266:    const ms = Date.now() - started;
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:229:         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:236:           updatedat = NOW()`,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:256:    let where = 'kind = $2';
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:259:      where += ' AND userid = $3';
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:262:      where += ' AND userid = $3';
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:276:      `SELECT refkey, kind, refid, userid, 1 - (embedding <=> $1::vector) AS score,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:280:       ORDER BY embedding <=> $1::vector
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:291:        `SELECT refkey, kind, refid, userid, 1 - (embedding <=> $1::vector) AS score,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:295:         ORDER BY embedding <=> $1::vector
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:312:    const found = await rows(`SELECT kind, COUNT(*)::int AS count FROM vectorembeddings GROUP BY kind`);
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:320:    await rows(`DELETE FROM vectorembeddings WHERE kind = $1`, [kind]);
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:533:        id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:540:        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:542:        createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:543:        updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:698:       WHERE wh.userid = $1 ORDER BY wh.watchedat DESC LIMIT 15`,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:713:       WHERE cl.userid = $1 AND cl.value = 1 ORDER BY cl.createdat DESC LIMIT 10`,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:739:       ORDER BY cm.createdat DESC LIMIT $1`,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:788:        refid: Date.now() % 2000000000,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:818:  const started = Date.now();
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:861:    took: Date.now() - started,
+mini-services/animaxia-backend/modules/ainew/common.js:137:    if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
+mini-services/animaxia-backend/modules/ainew/common.js:142:    memoStore.set(key, { at: Date.now(), ttl: ttlMs, value });
+mini-services/animaxia-backend/modules/ainew/common.js:176:       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+mini-services/animaxia-backend/modules/ainew/common.js:206:  if (Date.now() - settingsCache.at < 15000) return settingsCache.map;
+mini-services/animaxia-backend/modules/ainew/common.js:218:  settingsCache.at = Date.now();
+mini-services/animaxia-backend/modules/ainew/common.js:226:    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ainew/common.js:227:     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/ainew/companion.js:32:        WHERE r.contentid = $1
+mini-services/animaxia-backend/modules/ainew/companion.js:37:      `SELECT ROUND(AVG(rating)::numeric, 1) AS avg, COUNT(*) AS n FROM reviews WHERE contentid = $1`,
+mini-services/animaxia-backend/modules/ainew/curation.js:19:      `SELECT COUNT(*)::int AS n FROM viewevents
+mini-services/animaxia-backend/modules/ainew/curation.js:20:        WHERE contentid = $1 AND createdat > NOW() - INTERVAL '30 days'`,
+mini-services/animaxia-backend/modules/ainew/curation.js:37:        WHERE h.userid = $1 ORDER BY h.watchedat DESC LIMIT 20`,
+mini-services/animaxia-backend/modules/ainew/dubbing.js:134:            c.metadata->>'year' AS year
+mini-services/animaxia-backend/modules/ainew/dubbing.js:143:      LIMIT $1`,
+mini-services/animaxia-backend/modules/ainew/dubbing.js:167:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/ainew/dubbing.js:170:    if (Date.now() - t0 > TRANSLATE_BUDGET_MS) {
+mini-services/animaxia-backend/modules/ainew/dubbing.js:213:        WHERE s.contentid = $1 AND s.lang = 'en' ORDER BY s.id ASC LIMIT 1`,
+mini-services/animaxia-backend/modules/ainew/editor.js:5: * dicționar cuvinte-cheie→gen; selectia SQL reală pe metadata->genres și
+mini-services/animaxia-backend/modules/ainew/editor.js:6: * title ILIKE; salvare file-based data/ainew/playlists/<userId>.json
+mini-services/animaxia-backend/modules/ainew/editor.js:52:  'lungi', 'lung', 'scurte', 'scurt', 'serii', 'serie', 'filme', 'film', 'seriale',
+mini-services/animaxia-backend/modules/ainew/editor.js:53:  'serial', 'vreau', 'vreau', 'da-mi', 'dă-mi', 'listă', 'lista', 'playlist', 'make', 'me',
+mini-services/animaxia-backend/modules/ainew/editor.js:75:  if (/serial|serie|tv/.test(text)) types.push('tv');
+mini-services/animaxia-backend/modules/ainew/editor.js:183:          ${interpreted.genres.length > 0 ? `metadata->'genres' ?| $1::text[] OR` : ''}
+mini-services/animaxia-backend/modules/ainew/editor.js:184:          ${interpreted.keywords.length > 0 ? `title ILIKE ANY($2::text[]) OR` : ''}
+mini-services/animaxia-backend/modules/ainew/editor.js:187:        ${interpreted.types.length > 0 ? 'AND type = ANY($3::text[])' : ''}
+mini-services/animaxia-backend/modules/ainew/editor.js:188:        ORDER BY (metadata->>'rating') DESC NULLS LAST, id ASC
+mini-services/animaxia-backend/modules/ainew/editor.js:189:        LIMIT $4`,
+mini-services/animaxia-backend/modules/ainew/editor.js:208:          WHERE metadata->>'rating' IS NOT NULL
+mini-services/animaxia-backend/modules/ainew/editor.js:209:          ORDER BY (metadata->>'rating') DESC, id ASC LIMIT $1`,
+mini-services/animaxia-backend/modules/ainew/mood.js:5: * metadata->genres, amestec determinist cu seed; fallback onest pe top-rated
+mini-services/animaxia-backend/modules/ainew/mood.js:139:        WHERE metadata->'genres' ?| $1::text[]
+mini-services/animaxia-backend/modules/ainew/mood.js:140:        ORDER BY (metadata->>'rating') DESC NULLS LAST, id ASC
+mini-services/animaxia-backend/modules/ainew/mood.js:141:        LIMIT $2`,
+mini-services/animaxia-backend/modules/ainew/mood.js:158:          WHERE metadata->>'rating' IS NOT NULL
+mini-services/animaxia-backend/modules/ainew/mood.js:159:          ORDER BY (metadata->>'rating') DESC, id ASC
+mini-services/animaxia-backend/modules/ainew/mood.js:160:          LIMIT $1`,
+mini-services/animaxia-backend/modules/ainew/recap.js:85:        WHERE userid = $1 ORDER BY watchedat DESC LIMIT ${HISTORY_LIMIT}`,
+mini-services/animaxia-backend/modules/ainew/routes.js:73:    const t0 = Date.now();
+mini-services/animaxia-backend/modules/ainew/routes.js:78:      const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/ainew/routes.js:87:    const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/common.js:71:    if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
+mini-services/animaxia-backend/modules/aisuite/common.js:76:    memoStore.set(key, { at: Date.now(), ttl: ttlMs, value });
+mini-services/animaxia-backend/modules/aisuite/common.js:98:       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+mini-services/animaxia-backend/modules/aisuite/common.js:127:  if (Date.now() - settingsCache.at < 15000) return settingsCache.map;
+mini-services/animaxia-backend/modules/aisuite/common.js:139:  settingsCache.at = Date.now();
+mini-services/animaxia-backend/modules/aisuite/common.js:147:    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/aisuite/common.js:148:     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+mini-services/animaxia-backend/modules/aisuite/engines.js:3: * 18 motoare. Fiecare funcție returnează un payload JSON serializabil cu
+mini-services/animaxia-backend/modules/aisuite/engines.js:24:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:50:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:58:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:83:    recordRun('miner', { provider: 'provider', ms: Date.now() - t0, ok: false });
+mini-services/animaxia-backend/modules/aisuite/engines.js:86:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:105:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:117:        count(*) FILTER (WHERE metadata->>'overview' IS NOT NULL AND length(metadata->>'overview') >= 50) with_long_overview
+mini-services/animaxia-backend/modules/aisuite/engines.js:161:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:182:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:208:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:258:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:293:    { role: 'user', content: ` Rezumată în 3-4 fraze cele mai relevante 10 titluri de știri pentru publicul de entertainment/animaxia (filme, seriale, anime, gaming):\n${digestInput}` },
+mini-services/animaxia-backend/modules/aisuite/engines.js:296:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:329:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:338:        (SELECT count(*) FROM activityevents WHERE createdat > NOW() - INTERVAL '7 days') activity7d`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:341:    rows(`SELECT type, count(*) n FROM activityevents WHERE createdat > NOW() - INTERVAL '7 days' GROUP BY type ORDER BY n DESC LIMIT 8`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:342:    rows(`SELECT count(*) n FROM follows WHERE createdat > NOW() - INTERVAL '7 days'`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:357:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:389:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:407:    WHERE (metadata->>'rating')::numeric >= 7.5 AND type IN ('movie','tv')
+mini-services/animaxia-backend/modules/aisuite/engines.js:408:    ORDER BY (metadata->>'rating')::numeric DESC, id ASC LIMIT 30`);
+mini-services/animaxia-backend/modules/aisuite/engines.js:421:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:447:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:455:      `SELECT c.id, c.title, c.metadata FROM watchhistory h JOIN content c ON c.id = h.contentid WHERE h.userid = $1 ORDER BY h.watchedat DESC LIMIT 30`,
+mini-services/animaxia-backend/modules/aisuite/engines.js:470:    WHERE v.createdat > NOW() - INTERVAL '7 days'
+mini-services/animaxia-backend/modules/aisuite/engines.js:478:    WHERE type IN ('movie','tv') AND (metadata->>'rating')::numeric >= 7
+mini-services/animaxia-backend/modules/aisuite/engines.js:479:    ORDER BY (metadata->>'rating')::numeric DESC, id ASC LIMIT 120`);
+mini-services/animaxia-backend/modules/aisuite/engines.js:518:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:542:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:572:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:594:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:658:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:680:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:691:    rows(`SELECT date_trunc('day', createdat) AS bucket, count(*) n FROM aiusagelogs WHERE createdat > NOW() - INTERVAL '14 days' GROUP BY 1 ORDER BY 1`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:702:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:734:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:740:  const where = genre ? `WHERE c.metadata->'genres' @> $1::jsonb` : '';
+mini-services/animaxia-backend/modules/aisuite/engines.js:744:            (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days') views7d
+mini-services/animaxia-backend/modules/aisuite/engines.js:747:       ((COALESCE((c.metadata->>'rating')::numeric, 0) * 6)
+mini-services/animaxia-backend/modules/aisuite/engines.js:748:        + (LEAST((SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days'), 20) * 1.5)
+mini-services/animaxia-backend/modules/aisuite/engines.js:769:  const totalRow = genre ? await one(`SELECT count(*) n FROM content c WHERE c.metadata->'genres' @> $1::jsonb`, [JSON.stringify([genre])]) : await one(`SELECT count(*) n FROM content`);
+mini-services/animaxia-backend/modules/aisuite/engines.js:771:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:788:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:790:  const sample = await rows(`SELECT id, title, type, metadata, thumbnail, createdat FROM content ORDER BY random() LIMIT $1`, [cap]);
+mini-services/animaxia-backend/modules/aisuite/engines.js:812:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:852:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:862:        const started = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:864:        return { provider: p.name, ok: true, ms: Date.now() - started };
+mini-services/animaxia-backend/modules/aisuite/engines.js:871:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:925:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:955:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:981:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:983:  const withThumb = await rows(`SELECT id, title, thumbnail FROM content WHERE thumbnail IS NOT NULL AND thumbnail <> '' ORDER BY random() LIMIT $1`, [cap]);
+mini-services/animaxia-backend/modules/aisuite/engines.js:1006:                { role: 'system', content: 'Descrii poste de film/serial în română, maxim 15 cuvinte.' },
+mini-services/animaxia-backend/modules/aisuite/engines.js:1028:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:1051:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:1053:    rows(`SELECT contentid, count(*) n FROM viewevents WHERE createdat > NOW() - INTERVAL '7 days' GROUP BY contentid ORDER BY n DESC LIMIT 10`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:1054:    rows(`SELECT contentid, count(*) n FROM viewevents WHERE createdat > NOW() - INTERVAL '14 days' AND createdat <= NOW() - INTERVAL '7 days' GROUP BY contentid`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:1057:      FROM viewevents v, content c, jsonb_array_elements_text(c.metadata->'genres') g
+mini-services/animaxia-backend/modules/aisuite/engines.js:1058:      WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days'
+mini-services/animaxia-backend/modules/aisuite/engines.js:1060:    one(`SELECT count(*) FILTER (WHERE watchedat > NOW() - INTERVAL '7 days') last7, count(*) FILTER (WHERE watchedat > NOW() - INTERVAL '14 days' AND watchedat <= NOW() - INTERVAL '7 days') prev7 FROM watchhistory`),
+mini-services/animaxia-backend/modules/aisuite/engines.js:1063:        (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days') now_n,
+mini-services/animaxia-backend/modules/aisuite/engines.js:1064:        (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '14 days' AND v.createdat <= NOW() - INTERVAL '7 days') prev_n
+mini-services/animaxia-backend/modules/aisuite/engines.js:1089:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:1120:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:1136:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:1156:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:1167:    const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/engines.js:1172:    recordRun('feeds', { provider: 'provider', ms: Date.now() - t0, ok: false });
+mini-services/animaxia-backend/modules/aisuite/engines.js:1180:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/engines.js:1190:  const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/aisuite/routes.js:218:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/aisuite/routes.js:223:    recordRun(key, { provider: 'sql', ms: Date.now() - t0, ok: false });
+mini-services/animaxia-backend/modules/analytics/analytics.js:90:              COUNT(*) FILTER (WHERE v.event = 'view')::int AS views,
+mini-services/animaxia-backend/modules/analytics/analytics.js:91:              COUNT(*) FILTER (WHERE v.event = 'play')::int AS plays
+mini-services/animaxia-backend/modules/analytics/analytics.js:93:       WHERE v.createdat > NOW() - ($1::text)::interval
+mini-services/animaxia-backend/modules/analytics/analytics.js:97:     LIMIT $2`,
+mini-services/animaxia-backend/modules/analytics/analytics.js:113:    `SELECT * FROM content WHERE id = ANY($1::int[])`,
+mini-services/animaxia-backend/modules/analytics/analytics.js:139:         (SELECT COUNT(*)::int FROM users) AS users,
+mini-services/animaxia-backend/modules/analytics/analytics.js:140:         (SELECT COUNT(*)::int FROM content) AS content,
+mini-services/animaxia-backend/modules/analytics/analytics.js:141:         (SELECT COUNT(*)::int FROM comments) AS comments,
+mini-services/animaxia-backend/modules/analytics/analytics.js:142:         (SELECT COUNT(*) FILTER (WHERE event = 'view')::int FROM viewevents) AS views,
+mini-services/animaxia-backend/modules/analytics/analytics.js:143:         (SELECT COUNT(*) FILTER (WHERE event = 'play')::int FROM viewevents) AS plays`,
+mini-services/animaxia-backend/modules/analytics/analytics.js:146:      `SELECT to_char(date_trunc('day', createdat), 'YYYY-MM-DD') AS date, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/analytics/analytics.js:148:       WHERE createdat > NOW() - '14 days'::interval
+mini-services/animaxia-backend/modules/analytics/analytics.js:154:              COUNT(*) FILTER (WHERE v.event = 'view')::int AS views,
+mini-services/animaxia-backend/modules/analytics/analytics.js:155:              COUNT(*) FILTER (WHERE v.event = 'play')::int AS plays
+mini-services/animaxia-backend/modules/analytics/analytics.js:162:    rows(`SELECT plan, COUNT(*)::int AS count FROM users GROUP BY plan`),
+mini-services/animaxia-backend/modules/analytics/analytics.js:164:      `SELECT COUNT(DISTINCT userid)::int AS count
+mini-services/animaxia-backend/modules/analytics/analytics.js:166:       WHERE userid IS NOT NULL AND createdat > NOW() - '7 days'::interval`,
+mini-services/animaxia-backend/modules/analytics/analytics.js:234:    `INSERT INTO viewevents (contentid, userid, event) VALUES ($1, $2, $3)`,
+mini-services/animaxia-backend/modules/analytics/analytics.js:277:      `SELECT COUNT(*) FILTER (WHERE event = 'view')::int AS views,
+mini-services/animaxia-backend/modules/analytics/analytics.js:278:              COUNT(*) FILTER (WHERE event = 'play')::int AS plays,
+mini-services/animaxia-backend/modules/analytics/analytics.js:279:              COUNT(*) FILTER (WHERE event = 'complete')::int AS completed
+mini-services/animaxia-backend/modules/analytics/analytics.js:280:       FROM viewevents WHERE userid = $1`,
+mini-services/animaxia-backend/modules/analytics/analytics.js:284:      `SELECT to_char(date_trunc('day', createdat), 'YYYY-MM-DD') AS date, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/analytics/analytics.js:286:       WHERE userid = $1 AND createdat > NOW() - ($2::text)::interval
+mini-services/animaxia-backend/modules/analytics/analytics.js:292:      `SELECT ct.type AS type, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/analytics/analytics.js:295:       WHERE v.userid = $1 AND v.createdat > NOW() - ($2::text)::interval
+mini-services/animaxia-backend/modules/analytics/playerhub.js:61:      `SELECT COUNT(*)::int AS total,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:62:              COUNT(*) FILTER (WHERE createdat > NOW() - '1 day'::interval)::int AS last24h
+mini-services/animaxia-backend/modules/analytics/playerhub.js:65:    rows(`SELECT event AS kind, COUNT(*)::int AS count FROM viewevents GROUP BY event ORDER BY count DESC`),
+mini-services/animaxia-backend/modules/analytics/playerhub.js:67:      `SELECT v.contentid, c.title, c.type, c.thumbnail, COUNT(*)::int AS plays
+mini-services/animaxia-backend/modules/analytics/playerhub.js:76:      `SELECT COUNT(DISTINCT userid)::int AS count FROM viewevents
+mini-services/animaxia-backend/modules/analytics/playerhub.js:77:       WHERE userid IS NOT NULL AND createdat > NOW() - '1 day'::interval`,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:89:      one(`SELECT COUNT(*)::int AS total FROM subtitles`),
+mini-services/animaxia-backend/modules/analytics/playerhub.js:91:        `SELECT s.contentid, c.title, COUNT(*)::int AS tracks
+mini-services/animaxia-backend/modules/analytics/playerhub.js:114:      `SELECT COUNT(*)::int AS count FROM content c
+mini-services/animaxia-backend/modules/analytics/playerhub.js:115:       WHERE (jsonb_typeof(c.metadata->'player'->'sources') = 'array' AND jsonb_array_length(c.metadata->'player'->'sources') > 0)
+mini-services/animaxia-backend/modules/analytics/playerhub.js:116:          OR (jsonb_typeof(c.metadata->'sources') = 'array' AND jsonb_array_length(c.metadata->'sources') > 0)`,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:119:      `SELECT s->>'type' AS mode, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/analytics/playerhub.js:121:       CROSS JOIN LATERAL jsonb_array_elements(
+mini-services/animaxia-backend/modules/analytics/playerhub.js:123:           WHEN jsonb_typeof(c.metadata->'player'->'sources') = 'array' THEN c.metadata->'player'->'sources'
+mini-services/animaxia-backend/modules/analytics/playerhub.js:124:           WHEN jsonb_typeof(c.metadata->'sources') = 'array' THEN c.metadata->'sources'
+mini-services/animaxia-backend/modules/analytics/playerhub.js:125:           ELSE '[]'::jsonb
+mini-services/animaxia-backend/modules/analytics/playerhub.js:138:  const totalContentRow = await one(`SELECT COUNT(*)::int AS count FROM content`);
+mini-services/animaxia-backend/modules/analytics/playerhub.js:176:     WHERE h.userid = $1
+mini-services/animaxia-backend/modules/analytics/playerhub.js:204:      `SELECT COUNT(*)::int AS historycount,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:205:              COALESCE(ROUND(SUM(progress) / 60.0), 0)::int AS totalminutes,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:207:       FROM watchhistory WHERE userid = $1`,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:211:      `SELECT c.type AS type, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/analytics/playerhub.js:213:       WHERE h.userid = $1
+mini-services/animaxia-backend/modules/analytics/playerhub.js:219:       FROM watchhistory WHERE userid = $1
+mini-services/animaxia-backend/modules/analytics/playerhub.js:223:    one(`SELECT COUNT(*)::int AS count FROM watchlist WHERE userid = $1`, [userid]),
+mini-services/animaxia-backend/modules/analytics/playerhub.js:224:    one(`SELECT COUNT(*)::int AS count FROM viewevents WHERE userid = $1`, [userid]),
+mini-services/animaxia-backend/modules/analytics/playerhub.js:226:      `SELECT g.genre AS genre, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/analytics/playerhub.js:229:       CROSS JOIN LATERAL jsonb_array_elements_text(
+mini-services/animaxia-backend/modules/analytics/playerhub.js:230:         CASE WHEN jsonb_typeof(c.metadata->'genres') = 'array' THEN c.metadata->'genres' ELSE '[]'::jsonb END
+mini-services/animaxia-backend/modules/analytics/playerhub.js:232:       WHERE h.userid = $1
+mini-services/animaxia-backend/modules/analytics/playerhub.js:241:    `SELECT MAX(watchedat) AS last FROM watchhistory WHERE userid = $1`,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:250:      `SELECT COUNT(*)::int AS calls, MAX(createdat) AS last FROM aiusagelogs WHERE userid = $1`,
+mini-services/animaxia-backend/modules/ar10m/budget.js:62:  const now = Date.now();
+mini-services/animaxia-backend/modules/ar10m/budget.js:76:function pruneQpm(now = Date.now()) {
+mini-services/animaxia-backend/modules/ar10m/budget.js:151:    state.lastLevelAt = Date.now();
+mini-services/animaxia-backend/modules/ar10m/routes.js:73:    const now = Date.now();
+mini-services/animaxia-backend/modules/ar10m/routes.js:120:  if (Date.now() - e.at > ttlMs) {
+mini-services/animaxia-backend/modules/ar10m/routes.js:129:  ttlCache.set(key, { value, at: Date.now() });
+mini-services/animaxia-backend/modules/ar10m/routes.js:233:      `SELECT (SELECT COUNT(*) FROM ar10m.content)::int AS titles,
+mini-services/animaxia-backend/modules/ar10m/routes.js:234:              (SELECT COUNT(*) FROM ar10m.content_sources)::int AS sources,
+mini-services/animaxia-backend/modules/ar10m/routes.js:235:              (SELECT COUNT(*) FROM ar10m.content WHERE source_id IS NOT NULL)::int AS playable,
+mini-services/animaxia-backend/modules/ar10m/routes.js:250:  const users = await count('SELECT COUNT(*)::int AS n FROM public.users', 'stats:users');
+mini-services/animaxia-backend/modules/ar10m/routes.js:251:  const legacyTitles = await count('SELECT COUNT(*)::int AS n FROM public.content', 'stats:legacy');
+mini-services/animaxia-backend/modules/ar10m/routes.js:402:    batchId: `synthetic-${Date.now()}`,
+mini-services/animaxia-backend/modules/ar10m/routes.js:436:    const r = await primaryQuery('SELECT COUNT(*)::int AS n FROM ar10m.bench_catalog', [], { timeoutMs: 2_000 });
+mini-services/animaxia-backend/modules/ar10m/schema.js:32:  id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/ar10m/schema.js:37:  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/ar10m/schema.js:47:  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/ar10m/schema.js:48:  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/ar10m/schema.js:62:  id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/ar10m/schema.js:68:  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:8: *      `WHERE (normalized_title, id) > ($1,$2)` — trailing-% LIKE ONLY
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:66:  if (Date.now() - e.at > ttl) {
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:87:  cache.set(key, { value, at: Date.now(), negative: !!negative });
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:145:  const where = ["normalized_title LIKE $1 || '%'"];
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:149:    where.push(`substring(metadata->>'year' from '^[0-9]{4}') = $${params.length}`);
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:156:  const sql = `SELECT id, title, normalized_title, substring(metadata->>'year' from '^[0-9]{4}') AS year
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:170:  if (Date.now() < legacyState.skipUntil) return { rows: [], skipped: 'coloana-normalized-title-lipsa' };
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:178:      legacyState.skipUntil = Date.now() + LEGACY_SKIP_MS;
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:189:  const where = ["c.normalized_title LIKE $1 || '%'"];
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:337:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:344:    return { ...cached.value, cached: true, elapsedMs: Date.now() - t0 };
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:366:    elapsedMs: Date.now() - t0,
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:369:  recordLatency(Date.now() - t0);
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:383:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:395:    elapsedMs: Date.now() - t0,
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:398:  recordLatency(Date.now() - t0);
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:87:  msg = msg.replace(/(password[=:]\s*)[^\s;]+/gi, '$1***');
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:155:  entry.state.poolOpenedAt = Date.now();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:163:function breakerAllows(entry, now = Date.now()) {
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:185:  const now = Date.now();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:300:    lastWriteAt = Date.now();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:314:  const idleMs = st.lastUsedAt ? Date.now() - st.lastUsedAt : Infinity;
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:389:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:398:        const latency = Date.now() - t0;
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:418:    st.lastUsedAt = Date.now();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:508:    const t0 = Date.now();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:510:      const r = await executeOnSlot(s.slot, 'SELECT (SELECT COUNT(*) FROM ar10m.content)::int AS rows, pg_database_size(current_database())::bigint AS bytes', [], {
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:517:      results.push({ slot: s.slot, skipped: false, rows, spaceBytes: bytes, latencyMs: Date.now() - t0 });
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:532:  if (distCache.data && Date.now() - distCache.at < 60_000) return distCache.data;
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:534:    'SELECT shard_id, COUNT(*)::int AS rows FROM ar10m.content GROUP BY shard_id',
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:544:  distCache = { at: Date.now(), data };
+mini-services/animaxia-backend/modules/ar10m/thumbs.js:214:  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+mini-services/animaxia-backend/modules/ar10m/thumbs.js:215:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/ar10m/thumbs.js:232:        logger.info(`[ar10m/thumbs] imported ${id} ← youtube hqdefault (webp direct) în ${Date.now() - t0}ms`);
+mini-services/animaxia-backend/modules/ar10m/thumbs.js:260:    logger.info(`[ar10m/thumbs] imported ${id} ← ${detected.sourceType} (ffmpeg) în ${Date.now() - t0}ms`);
+mini-services/animaxia-backend/modules/cache/advancedCache.js:61:    const now = Date.now();
+mini-services/animaxia-backend/modules/cache/advancedCache.js:77:    if (entry.expiresAt <= Date.now()) {
+mini-services/animaxia-backend/modules/cache/advancedCache.js:106:    this.map.set(key, { value, expiresAt: Date.now() + ttl, tags });
+mini-services/animaxia-backend/modules/hub/hub.js:34: * All queries are parameterized ($1..$n) through modules/platform/sql.js
+mini-services/animaxia-backend/modules/hub/hub.js:80:const GENRES_ARRAY = `CASE WHEN jsonb_typeof(metadata->'genres') = 'array' THEN metadata->'genres' ELSE '[]'::jsonb END`;
+mini-services/animaxia-backend/modules/hub/hub.js:81:const ACTORS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'actors') = 'array' THEN metadata->'actors' ELSE '[]'::jsonb END`;
+mini-services/animaxia-backend/modules/hub/hub.js:82:const STUDIOS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'studios') = 'array' THEN metadata->'studios' ELSE '[]'::jsonb END`;
+mini-services/animaxia-backend/modules/hub/hub.js:83:const RATING_NUM = `CASE WHEN (metadata->>'rating') ~ '^[0-9]+\\.?[0-9]*$' THEN (metadata->>'rating')::numeric ELSE NULL END`;
+mini-services/animaxia-backend/modules/hub/hub.js:84:const YEAR_INT = `CASE WHEN (metadata->>'year') ~ '^[0-9]+$' THEN (metadata->>'year')::int ELSE NULL END`;
+mini-services/animaxia-backend/modules/hub/hub.js:122:    clauses.push(`type = ANY(${add(filters.types)}::text[])`);
+mini-services/animaxia-backend/modules/hub/hub.js:125:    // Exact case-insensitive match inside metadata.genres[] (ILIKE without wildcards).
+mini-services/animaxia-backend/modules/hub/hub.js:126:    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${GENRES_ARRAY}) g WHERE g ILIKE ${add(filters.genre)})`);
+mini-services/animaxia-backend/modules/hub/hub.js:135:    clauses.push(`title ILIKE '%' || ${add(filters.q)} || '%'`);
+mini-services/animaxia-backend/modules/hub/hub.js:138:    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${ACTORS_ARRAY}) a WHERE a ILIKE '%' || ${add(filters.actor)} || '%')`);
+mini-services/animaxia-backend/modules/hub/hub.js:141:    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${STUDIOS_ARRAY}) st WHERE st ILIKE '%' || ${add(filters.studio)} || '%')`);
+mini-services/animaxia-backend/modules/hub/hub.js:167:    sql = `ORDER BY (CASE WHEN title ILIKE ${q1} || '%' THEN 2 WHEN title ILIKE '%' || ${q2} || '%' THEN 1 ELSE 0 END) DESC, createdat DESC, id ASC`;
+mini-services/animaxia-backend/modules/hub/hub.js:176:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/hub/hub.js:218:    one(`SELECT COUNT(*)::int AS total FROM content ${where.sql}`, where.params),
+mini-services/animaxia-backend/modules/hub/hub.js:223:      rows(`SELECT type AS value, COUNT(*)::int AS count FROM content ${whereNoType.sql} GROUP BY type ORDER BY count DESC, value ASC`, whereNoType.params),
+mini-services/animaxia-backend/modules/hub/hub.js:224:      rows(`SELECT g AS value, COUNT(DISTINCT content.id)::int AS count
+mini-services/animaxia-backend/modules/hub/hub.js:225:            FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+mini-services/animaxia-backend/modules/hub/hub.js:228:      rows(`SELECT ${YEAR_INT} AS value, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/hub/hub.js:260:    tookMs: Date.now() - startedAt,
+mini-services/animaxia-backend/modules/hub/hub.js:269:    one('SELECT COUNT(*)::int AS n FROM content'),
+mini-services/animaxia-backend/modules/hub/hub.js:270:    rows('SELECT type AS value, COUNT(*)::int AS count FROM content GROUP BY type ORDER BY count DESC, value ASC'),
+mini-services/animaxia-backend/modules/hub/hub.js:273:           COUNT(*)::int AS rows,
+mini-services/animaxia-backend/modules/hub/hub.js:274:           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(thumbnail, '') <> '') / COUNT(*))::int AS pct_thumbnail,
+mini-services/animaxia-backend/modules/hub/hub.js:275:           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(metadata->>'overview', '') <> '') / COUNT(*))::int AS pct_overview,
+mini-services/animaxia-backend/modules/hub/hub.js:276:           ROUND(100.0 * COUNT(*) FILTER (WHERE jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_genres,
+mini-services/animaxia-backend/modules/hub/hub.js:278:             AND COALESCE(metadata->>'overview', '') <> ''
+mini-services/animaxia-backend/modules/hub/hub.js:279:             AND jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_complete
+mini-services/animaxia-backend/modules/hub/hub.js:282:    one('SELECT COUNT(*)::int AS total, COUNT(DISTINCT url)::int AS distinct_urls FROM contentsources'),
+mini-services/animaxia-backend/modules/hub/hub.js:283:    rows('SELECT kind AS value, COUNT(*)::int AS count FROM contentsources GROUP BY kind ORDER BY count DESC'),
+mini-services/animaxia-backend/modules/hub/hub.js:286:    rows(`SELECT metadata->>'source' AS value, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/hub/hub.js:287:          FROM content WHERE COALESCE(metadata->>'source', '') <> ''
+mini-services/animaxia-backend/modules/hub/hub.js:288:          GROUP BY metadata->>'source' ORDER BY count DESC, value ASC`),
+mini-services/animaxia-backend/modules/hub/hub.js:289:    one(`SELECT COUNT(*)::int AS total,
+mini-services/animaxia-backend/modules/hub/hub.js:290:                COUNT(*) FILTER (WHERE createdat > NOW() - INTERVAL '24 hours')::int AS last24h
+mini-services/animaxia-backend/modules/hub/hub.js:292:    rows(`SELECT c.id, c.title, c.type, c.thumbnail, COUNT(*)::int AS views
+mini-services/animaxia-backend/modules/hub/hub.js:296:    one('SELECT COUNT(*)::int AS n FROM users'),
+mini-services/animaxia-backend/modules/hub/hub.js:392:       SELECT ${YEAR_INT} AS year, COUNT(*)::int AS count
+mini-services/animaxia-backend/modules/hub/hub.js:408:     LIMIT $1`,
+mini-services/animaxia-backend/modules/hub/hub.js:433:       SELECT content.id, content.metadata->>'network' AS value
+mini-services/animaxia-backend/modules/hub/hub.js:434:       FROM content WHERE COALESCE(content.metadata->>'network', '') <> ''`
+mini-services/animaxia-backend/modules/hub/hub.js:439:       FROM content, jsonb_array_elements_text(${arrayExpr}) AS e
+mini-services/animaxia-backend/modules/hub/hub.js:443:       SELECT value, COUNT(DISTINCT id)::int AS count FROM exploded GROUP BY value
+mini-services/animaxia-backend/modules/hub/hub.js:456:     LIMIT $1`,
+mini-services/animaxia-backend/modules/hub/hub.js:520:       WHERE w.userid = $1
+mini-services/animaxia-backend/modules/hub/hub.js:524:       WHERE h.userid = $1
+mini-services/animaxia-backend/modules/hub/hub.js:525:       ORDER BY at DESC LIMIT $2`,
+mini-services/animaxia-backend/modules/hub/hub.js:549:     ORDER BY ae.createdat DESC, ae.id DESC LIMIT $1`,
+mini-services/animaxia-backend/modules/hub/hub.js:568:      `SELECT c.*, MAX(v.createdat) AS at, COUNT(*)::int AS views
+mini-services/animaxia-backend/modules/hub/hub.js:570:       GROUP BY c.id ORDER BY at DESC LIMIT $1`,
+mini-services/animaxia-backend/modules/hub/hub.js:585:       SELECT g AS genre, COUNT(DISTINCT content.id)::int AS count
+mini-services/animaxia-backend/modules/hub/hub.js:586:       FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+mini-services/animaxia-backend/modules/hub/hub.js:587:       GROUP BY g ORDER BY count DESC, g ASC LIMIT $1
+mini-services/animaxia-backend/modules/hub/hub.js:591:       FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+mini-services/animaxia-backend/modules/hub/hub.js:597:     LIMIT $1`,
+mini-services/animaxia-backend/modules/hub/hub.js:644:    `SELECT c.*, COUNT(*)::int AS views
+mini-services/animaxia-backend/modules/hub/hub.js:646:     WHERE v.createdat > NOW() - INTERVAL '7 days'
+mini-services/animaxia-backend/modules/hub/hub.js:648:     ORDER BY views DESC, c.id ASC LIMIT $1`,
+mini-services/animaxia-backend/modules/hub/hub.js:659:         WHERE id <> ANY($1::int[])
+mini-services/animaxia-backend/modules/hub/hub.js:661:                        AND COALESCE(metadata->>'overview', '') <> ''
+mini-services/animaxia-backend/modules/hub/hub.js:662:                        AND jsonb_array_length(${GENRES_ARRAY}) > 0
+mini-services/animaxia-backend/modules/hub/hub.js:665:         LIMIT $2`,
+mini-services/animaxia-backend/modules/miner/ai-index.js:45:         VALUES ($1, $2, $3, 0, $4, $5::vector, $6::jsonb, $7, $8)
+mini-services/animaxia-backend/modules/miner/ai-index.js:51:           updatedat = NOW()`,
+mini-services/animaxia-backend/modules/miner/ai-index.js:145:      `SELECT COUNT(*)::int AS docs FROM vectorembeddings WHERE tenantid = $1 AND kind = 'content'`,
+mini-services/animaxia-backend/modules/miner/core.js:77:    await rows(`INSERT INTO miner_logs (jobid, level, message) VALUES ($1, $2, $3)`, [
+mini-services/animaxia-backend/modules/miner/core.js:101:     VALUES ($1, $2, 'queued', $3, $4::jsonb, $5)`,
+mini-services/animaxia-backend/modules/miner/core.js:116:        `UPDATE miner_jobs SET status = 'running', startedat = NOW(), attempts = attempts + 1
+mini-services/animaxia-backend/modules/miner/core.js:117:         WHERE id = $1 AND status <> 'running' RETURNING *`,
+mini-services/animaxia-backend/modules/miner/core.js:121:        `UPDATE miner_jobs SET status = 'running', startedat = NOW(), attempts = attempts + 1
+mini-services/animaxia-backend/modules/miner/core.js:125:         ) RETURNING *`,
+mini-services/animaxia-backend/modules/miner/core.js:160:  const deadline = Date.now() + Math.max(1000, waitMs);
+mini-services/animaxia-backend/modules/miner/core.js:164:    if (Date.now() >= deadline) {
+mini-services/animaxia-backend/modules/miner/core.js:183:  const existing = await one(`SELECT * FROM miner_jobs WHERE id = $1`, [String(jobId)]);
+mini-services/animaxia-backend/modules/miner/core.js:191:    await rows(`UPDATE miner_jobs SET status = 'queued', error = NULL WHERE id = $1`, [String(jobId)]);
+mini-services/animaxia-backend/modules/miner/core.js:358:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/miner/core.js:361:    const durationMs = Date.now() - startedAt;
+mini-services/animaxia-backend/modules/miner/core.js:363:      `UPDATE miner_jobs SET status = 'done', result = $2::jsonb, error = NULL, finishedat = NOW() WHERE id = $1`,
+mini-services/animaxia-backend/modules/miner/core.js:396:    const durationMs = Date.now() - startedAt;
+mini-services/animaxia-backend/modules/miner/core.js:398:      `UPDATE miner_jobs SET status = 'failed', error = $2, finishedat = NOW() WHERE id = $1`,
+mini-services/animaxia-backend/modules/miner/core.js:424:     VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+mini-services/animaxia-backend/modules/miner/core.js:428:       lastsync = NOW()`,
+mini-services/animaxia-backend/modules/miner/core.js:442:     VALUES ($1, $2, $3, $4, $5, NOW())
+mini-services/animaxia-backend/modules/miner/core.js:446:       lastchecked = NOW()`,
+mini-services/animaxia-backend/modules/miner/core.js:500:  const row = await one(`SELECT * FROM miner_jobs WHERE id = $1`, [String(jobId)]);
+mini-services/animaxia-backend/modules/miner/core.js:502:  const logs = await rows(`SELECT level, message, ts FROM miner_logs WHERE jobid = $1 ORDER BY ts ASC LIMIT 100`, [String(jobId)]);
+mini-services/animaxia-backend/modules/miner/core.js:517:    const st = await rows(`SELECT status, COUNT(*)::int AS count FROM miner_jobs GROUP BY status`);
+mini-services/animaxia-backend/modules/miner/core.js:522:    const ty = await rows(`SELECT type, COUNT(*)::int AS count FROM miner_jobs GROUP BY type`);
+mini-services/animaxia-backend/modules/miner/core.js:530:              COUNT(*)::int AS sources,
+mini-services/animaxia-backend/modules/miner/core.js:531:              COUNT(*) FILTER (WHERE m.lastsync > NOW() - interval '1 day')::int AS synced24h
+mini-services/animaxia-backend/modules/miner/core.js:538:    const m = await one(`SELECT COUNT(*)::int AS total, COUNT(DISTINCT tenantid)::int AS tenants FROM miner_manifests`);
+mini-services/animaxia-backend/modules/miner/core.js:563:      `UPDATE miner_jobs SET status = 'failed', error = 'interrupted by restart', finishedat = NOW()
+mini-services/animaxia-backend/modules/miner/core.js:564:       WHERE status = 'running' RETURNING id`,
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:32:    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:37:    queuedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:45:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:51:    lastsync TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:57:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:61:    ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:65:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:71:    lastchecked TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/mobile/mobile.js:77:    `SELECT ${CONTENT_COLUMNS}, COUNT(v.id)::int AS views
+mini-services/animaxia-backend/modules/mobile/mobile.js:80:     WHERE v.createdat > NOW() - interval '7 days'
+mini-services/animaxia-backend/modules/mobile/mobile.js:83:     LIMIT $1`,
+mini-services/animaxia-backend/modules/mobile/mobile.js:87:  return rows(`SELECT ${CONTENT_COLUMNS} FROM content c ORDER BY c.createdat DESC, c.id DESC LIMIT $1`, [limit]);
+mini-services/animaxia-backend/modules/mobile/mobile.js:92:  return rows(`SELECT ${CONTENT_COLUMNS} FROM content c ORDER BY c.createdat DESC, c.id DESC LIMIT $1`, [limit]);
+mini-services/animaxia-backend/modules/mobile/mobile.js:98:    `SELECT ${CONTENT_COLUMNS} FROM content c WHERE c.type = $1 ORDER BY c.createdat DESC, c.id DESC LIMIT $2`,
+mini-services/animaxia-backend/modules/mobile/mobile.js:112:     WHERE h.userid = $1
+mini-services/animaxia-backend/modules/mobile/mobile.js:114:     LIMIT $2`,
+mini-services/animaxia-backend/modules/mobile/mobile.js:210:  const watchRow = await one(`SELECT COUNT(*)::int AS count FROM watchlist WHERE userid = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/observability/otel.js:15: *          serializare (body.sources?.length + body.mode — forma reală a
+mini-services/animaxia-backend/modules/observability/otel.js:76:  startedAt: Date.now(),
+mini-services/animaxia-backend/modules/observability/otel.js:244:export async function otelFlushNow() {
+mini-services/animaxia-backend/modules/observability/otel.js:254:  let observed = false; // one-shot: prima serializare JSON a răspunsului
+mini-services/animaxia-backend/modules/observability/otel.js:273:    req._otelStart = Date.now();
+mini-services/animaxia-backend/modules/observability/otel.js:278:        const endMs = Date.now();
+mini-services/animaxia-backend/modules/observability/otel.js:347:      const startMs = Date.now();
+mini-services/animaxia-backend/modules/observability/otel.js:373:        }, startMs, Date.now());
+mini-services/animaxia-backend/modules/observability/otel.js:379:          const endMs = Date.now();
+mini-services/animaxia-backend/modules/observability/otel.js:390:          const endMs = Date.now();
+mini-services/animaxia-backend/modules/ops/metrics.js:90:    this.startedAt = Date.now();
+mini-services/animaxia-backend/modules/ops/metrics.js:435:    this.startedAt = Date.now();
+mini-services/animaxia-backend/modules/perso/feed.js:114:        WHERE h.userid = $1
+mini-services/animaxia-backend/modules/perso/index.js:94:const bootAt = Date.now();
+mini-services/animaxia-backend/modules/perso/index.js:105:    uptimeSec: Math.round((Date.now() - bootAt) / 1000),
+mini-services/animaxia-backend/modules/perso/profile.js:172:        WHERE h.userid = $1
+mini-services/animaxia-backend/modules/perso/profile.js:214:        WHERE l.userid = $1
+mini-services/animaxia-backend/modules/perso/profile.js:241:        WHERE r.userid = $1
+mini-services/animaxia-backend/modules/perso/profiles.js:65:  const now = Date.now();
+mini-services/animaxia-backend/modules/perso/profiles.js:97:  if (typeof payload.exp !== 'number' || payload.exp * 1000 < Date.now()) {
+mini-services/animaxia-backend/modules/perso/reminders.js:4: * peste 3 zile), cu minute rămase estimate și memento „finalizează serialul"
+mini-services/animaxia-backend/modules/perso/reminders.js:73:  const now = Date.now();
+mini-services/animaxia-backend/modules/perso/reminders.js:116:  const now = Date.now();
+mini-services/animaxia-backend/modules/perso/reminders.js:123:        WHERE h.userid = $1
+mini-services/animaxia-backend/modules/perso/reminders.js:171:        ? { totalSeasons: seasons, note: `${seasons} ${seasons === 1 ? 'sezon' : 'sezoane'} în total — finalizează serialul` }
+mini-services/animaxia-backend/modules/perso/storage.js:203:    if (Date.now() - entry.computedAt > CACHE_TTL_MS) {
+mini-services/animaxia-backend/modules/perso/storage.js:214:    profileCache.set(key, { value, computedAt: Date.now(), hits: 0 });
+mini-services/animaxia-backend/modules/perso/storage.js:238:      oldestEntryAgeSec: oldest ? Math.round((Date.now() - oldest) / 1000) : null,
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:25:    id BIGSERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:29:    createdat TIMESTAMPTZ DEFAULT now(),
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:30:    updatedat TIMESTAMPTZ DEFAULT now()
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:34:    id BIGSERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:38:    addedat TIMESTAMPTZ DEFAULT now(),
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:43:    id BIGSERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/faza21-migrations.js:49:    createdat TIMESTAMPTZ DEFAULT now(),
+mini-services/animaxia-backend/modules/platform/migrations.js:13:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:21:    preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/platform/migrations.js:22:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/platform/migrations.js:26:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:31:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:35:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:38:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/platform/migrations.js:42:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:46:    watchedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/platform/migrations.js:50:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:55:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:62:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/platform/migrations.js:69:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/platform/migrations.js:73:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:77:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:82:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:91:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:95:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:100:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:104:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:109:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:114:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:119:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:124:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:136:    syncedat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:138:  `CREATE INDEX IF NOT EXISTS idx_searchdocs_tsv ON searchdocs USING GIN (tsv)`,
+mini-services/animaxia-backend/modules/platform/migrations.js:139:  `CREATE INDEX IF NOT EXISTS idx_searchdocs_title_trgm ON searchdocs USING GIN (title gin_trgm_ops)`,
+mini-services/animaxia-backend/modules/platform/migrations.js:142:  `CREATE INDEX IF NOT EXISTS idx_searchdocs_genres ON searchdocs USING GIN (genres)`,
+mini-services/animaxia-backend/modules/platform/migrations.js:143:  `CREATE INDEX IF NOT EXISTS idx_searchdocs_actors ON searchdocs USING GIN (actors)`,
+mini-services/animaxia-backend/modules/platform/migrations.js:146:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:156:    createdat TIMESTAMP DEFAULT NOW(),
+mini-services/animaxia-backend/modules/platform/migrations.js:157:    lastseenat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:165:    updatedat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:170:    updatedat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:175:    updatedat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:182:    createdat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:186:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/platform/migrations.js:192:    createdat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/migrations.js:203:    updatedat TIMESTAMP DEFAULT NOW()
+mini-services/animaxia-backend/modules/platform/scale.js:51:    const t0 = Date.now();
+mini-services/animaxia-backend/modules/platform/scale.js:53:    measured.dbLatencyMs = Date.now() - t0;
+mini-services/animaxia-backend/modules/platform/scale.js:64:    one('SELECT COUNT(*)::int AS n FROM content'),
+mini-services/animaxia-backend/modules/platform/scale.js:65:    one('SELECT COUNT(*)::int AS n FROM users'),
+mini-services/animaxia-backend/modules/platform/scale.js:66:    one('SELECT COUNT(*)::int AS n FROM searchdocs'),
+mini-services/animaxia-backend/modules/platform/scale.js:67:    one('SELECT COUNT(*)::int AS n FROM contentsources'),
+mini-services/animaxia-backend/modules/platform/shared-state.js:14: *     RETURNING tokens; INSERT … ON CONFLICT DO NOTHING when the row is new,
+mini-services/animaxia-backend/modules/platform/shared-state.js:50:      const now = Date.now();
+mini-services/animaxia-backend/modules/platform/shared-state.js:85:      updatedat TIMESTAMPTZ NOT NULL DEFAULT now()
+mini-services/animaxia-backend/modules/platform/shared-state.js:92:  // Atomic refill + consume in one statement; row lock serializes concurrent
+mini-services/animaxia-backend/modules/platform/shared-state.js:95:          SET tokens = GREATEST($4::real, LEAST($2::real, tokens + EXTRACT(EPOCH FROM (now() - updatedat)) * $3::real) - 1),
+mini-services/animaxia-backend/modules/platform/shared-state.js:96:              updatedat = now()
+mini-services/animaxia-backend/modules/platform/shared-state.js:97:          WHERE bucketkey = $1
+mini-services/animaxia-backend/modules/platform/shared-state.js:98:          RETURNING tokens`;
+mini-services/animaxia-backend/modules/platform/shared-state.js:115:           VALUES ($1, $2::real - 1, now())
+mini-services/animaxia-backend/modules/platform/shared-state.js:117:           RETURNING tokens`,
+mini-services/animaxia-backend/modules/platform/shared-state.js:135:        const r = await one(`SELECT COUNT(*)::int AS count FROM sharedlimits`);
+mini-services/animaxia-backend/modules/platform/sql.js:4: * helpers and JSONB (de)serialization matching the house column style
+mini-services/animaxia-backend/modules/platform/sql.js:32:/** Serialize a value for a JSONB column parameter. */
+mini-services/animaxia-backend/modules/platform/sql.js:55:/** Normalize an integer-ish column (SERIAL/NUMERIC from pg arrives as number). */
+mini-services/animaxia-backend/modules/platform/stress.js:46:  const now = Date.now();
+mini-services/animaxia-backend/modules/platform/stress.js:76:  while (Date.now() < deadline) {
+mini-services/animaxia-backend/modules/platform/stress.js:79:    const t0 = Date.now();
+mini-services/animaxia-backend/modules/platform/stress.js:84:      state.latencies.push(Date.now() - t0);
+mini-services/animaxia-backend/modules/platform/stress.js:99:  while (Date.now() < deadline) {
+mini-services/animaxia-backend/modules/platform/stress.js:102:    const t0 = Date.now();
+mini-services/animaxia-backend/modules/platform/stress.js:114:      state.latencies.push(Date.now() - t0);
+mini-services/animaxia-backend/modules/platform/stress.js:128:  const deadline = Date.now() + durationSec * 1000;
+mini-services/animaxia-backend/modules/platform/stress.js:129:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/platform/stress.js:161:  const durationMs = Date.now() - startedAt;
+mini-services/animaxia-backend/modules/player/hub.js:95:/** Serialize a playlist row (+ optional aggregated extras). */
+mini-services/animaxia-backend/modules/player/hub.js:117:     FROM playlists WHERE id = $1 AND userid = $2`,
+mini-services/animaxia-backend/modules/player/hub.js:158:       (SELECT COUNT(*)::int FROM playlists) AS playlists,
+mini-services/animaxia-backend/modules/player/hub.js:159:       (SELECT COUNT(*)::int FROM playlistitems) AS playlistitems,
+mini-services/animaxia-backend/modules/player/hub.js:160:       (SELECT COUNT(*)::int FROM subtitletracks) AS subtitletracks`,
+mini-services/animaxia-backend/modules/player/hub.js:164:    const mine = await one(`SELECT COUNT(*)::int AS count FROM playlists WHERE userid = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/player/hub.js:202:     WHERE h.userid = $1
+mini-services/animaxia-backend/modules/player/hub.js:204:     LIMIT $2`,
+mini-services/animaxia-backend/modules/player/hub.js:229:            (SELECT COUNT(*)::int FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemscount,
+mini-services/animaxia-backend/modules/player/hub.js:237:     WHERE p.userid = $1
+mini-services/animaxia-backend/modules/player/hub.js:261:  const countRow = await one(`SELECT COUNT(*)::int AS count FROM playlists WHERE userid = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/player/hub.js:270:    `INSERT INTO playlists (userid, title, description) VALUES ($1, $2, $3) RETURNING *`,
+mini-services/animaxia-backend/modules/player/hub.js:287:     WHERE pi.playlistid = $1
+mini-services/animaxia-backend/modules/player/hub.js:330:  sets.push(`updatedat = NOW()`);
+mini-services/animaxia-backend/modules/player/hub.js:333:    `UPDATE playlists SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+mini-services/animaxia-backend/modules/player/hub.js:345:  await one(`DELETE FROM playlists WHERE id = $1`, [playlist.id]);
+mini-services/animaxia-backend/modules/player/hub.js:358:  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/player/hub.js:363:    `SELECT id, position, addedat FROM playlistitems WHERE playlistid = $1 AND contentid = $2`,
+mini-services/animaxia-backend/modules/player/hub.js:371:    `SELECT COUNT(*)::int AS count FROM playlistitems WHERE playlistid = $1`,
+mini-services/animaxia-backend/modules/player/hub.js:384:     VALUES ($1, $2, (SELECT COALESCE(MAX(position), -1) + 1 FROM playlistitems WHERE playlistid = $1))
+mini-services/animaxia-backend/modules/player/hub.js:386:     RETURNING id, position, addedat`,
+mini-services/animaxia-backend/modules/player/hub.js:393:  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+mini-services/animaxia-backend/modules/player/hub.js:417:    `DELETE FROM playlistitems WHERE playlistid = $1 AND contentid = $2 RETURNING id`,
+mini-services/animaxia-backend/modules/player/hub.js:427:       WHERE playlistid = $1
+mini-services/animaxia-backend/modules/player/hub.js:435:  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+mini-services/animaxia-backend/modules/player/hub.js:453:    `SELECT contentid FROM playlistitems WHERE playlistid = $1`,
+mini-services/animaxia-backend/modules/player/hub.js:476:       FROM unnest($2::int[], $3::int[]) AS u(cid, pos)
+mini-services/animaxia-backend/modules/player/hub.js:477:       WHERE pi.playlistid = $1 AND pi.contentid = u.cid`,
+mini-services/animaxia-backend/modules/player/hub.js:481:  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+mini-services/animaxia-backend/modules/player/hub.js:494:  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/player/hub.js:498:    `SELECT progress, watchedat FROM watchhistory WHERE userid = $1 AND contentid = $2`,
+mini-services/animaxia-backend/modules/player/hub.js:530:  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/player/hub.js:535:     VALUES ($1, $2, $3, NOW())
+mini-services/animaxia-backend/modules/player/hub.js:537:     DO UPDATE SET progress = EXCLUDED.progress, watchedat = NOW()`,
+mini-services/animaxia-backend/modules/player/hub.js:547:       WHERE userid = $1 AND id NOT IN (
+mini-services/animaxia-backend/modules/player/hub.js:548:         SELECT id FROM watchhistory WHERE userid = $1
+mini-services/animaxia-backend/modules/player/hub.js:550:         LIMIT $2
+mini-services/animaxia-backend/modules/player/hub.js:565:    `DELETE FROM watchhistory WHERE userid = $1 AND contentid = $2 RETURNING id`,
+mini-services/animaxia-backend/modules/player/hub.js:578:  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/player/hub.js:582:    `SELECT id, label, lang FROM subtitletracks WHERE contentid = $1 ORDER BY lang ASC, id ASC`,
+mini-services/animaxia-backend/modules/player/hub.js:598:    `SELECT vtt FROM subtitletracks WHERE id = $1 AND contentid = $2`,
+mini-services/animaxia-backend/modules/player/hub.js:632:  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/player/hub.js:636:    `SELECT COUNT(*)::int AS count FROM subtitletracks WHERE contentid = $1`,
+mini-services/animaxia-backend/modules/player/hub.js:647:    `INSERT INTO subtitletracks (contentid, label, lang, vtt) VALUES ($1, $2, $3, $4) RETURNING id, label, lang`,
+mini-services/animaxia-backend/modules/player/hub.js:669:    `DELETE FROM subtitletracks WHERE id = $1 AND contentid = $2 RETURNING id, label, lang`,
+mini-services/animaxia-backend/modules/player/hub.js:690:       (SELECT COUNT(*)::int FROM playlists) AS playlists,
+mini-services/animaxia-backend/modules/player/hub.js:691:       (SELECT COUNT(*)::int FROM playlistitems) AS playlistitems,
+mini-services/animaxia-backend/modules/player/hub.js:692:       (SELECT COUNT(*)::int FROM subtitletracks) AS subtitletracks,
+mini-services/animaxia-backend/modules/player/hub.js:693:       (SELECT COUNT(*)::int FROM watchhistory) AS watchentries`,
+mini-services/animaxia-backend/modules/player/hub.js:721:      `SELECT COUNT(DISTINCT userid)::int AS count
+mini-services/animaxia-backend/modules/player/hub.js:723:       WHERE updatedat > NOW() - interval '7 days'`,
+mini-services/animaxia-backend/modules/player/subtitles.js:74:/** Serialize a subtitles row into the public track shape (no VTT body). */
+mini-services/animaxia-backend/modules/player/subtitles.js:244:      "$1.$2 --> $3.$4"
+mini-services/animaxia-backend/modules/player/subtitles.js:283:    `SELECT id, contentid, lang, label FROM subtitles WHERE contentid = $1 ORDER BY id ASC`,
+mini-services/animaxia-backend/modules/player/subtitles.js:291:        `SELECT externalid, title, metadata FROM content WHERE id = $1`,
+mini-services/animaxia-backend/modules/player/subtitles.js:370:  const row = await one(`SELECT id, vtt FROM subtitles WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/player/subtitles.js:402:  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/player/subtitles.js:408:     VALUES ($1, $2, $3, $4, $5)
+mini-services/animaxia-backend/modules/player/subtitles.js:411:     RETURNING id, contentid, lang, label, (xmax = 0) AS inserted`,
+mini-services/animaxia-backend/modules/player/subtitles.js:433:  const deleted = await one(`DELETE FROM subtitles WHERE id = $1 RETURNING id, contentid`, [id]);
+mini-services/animaxia-backend/modules/playerx/index.js:95:const bootAt = Date.now();
+mini-services/animaxia-backend/modules/playerx/index.js:197:      if (Date.now() - entry.storedAt > CACHE_TTL_MS) {
+mini-services/animaxia-backend/modules/playerx/index.js:211:      this.map.set(key, { value, storedAt: Date.now() });
+mini-services/animaxia-backend/modules/playerx/index.js:229:  const now = Date.now();
+mini-services/animaxia-backend/modules/playerx/index.js:242:  const now = Date.now();
+mini-services/animaxia-backend/modules/playerx/index.js:416:    uptimeSec: Math.round((Date.now() - bootAt) / 1000),
+mini-services/animaxia-backend/modules/premium/plans.js:16: *   serializeSubscription(row)
+mini-services/animaxia-backend/modules/premium/plans.js:116:/** Serialize a `subscriptions` table row for API responses (null-safe). */
+mini-services/animaxia-backend/modules/premium/plans.js:117:export function serializeSubscription(row) {
+mini-services/animaxia-backend/modules/premium/plans.js:147:    `SELECT * FROM subscriptions WHERE userid = $1 ORDER BY createdat DESC, id DESC LIMIT 1`,
+mini-services/animaxia-backend/modules/premium/plans.js:152:       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
+mini-services/animaxia-backend/modules/premium/plans.js:153:       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history`,
+mini-services/animaxia-backend/modules/premium/plans.js:159:    subscription: serializeSubscription(subscription),
+mini-services/animaxia-backend/modules/premium/plans.js:169:  const active = plan === 'free' || (Number.isFinite(expiresMs) && expiresMs > Date.now());
+mini-services/animaxia-backend/modules/premium/stripe.js:33:import { PLANS, serializeSubscription } from './plans.js';
+mini-services/animaxia-backend/modules/premium/stripe.js:56:  const cutoff = Date.now() - SANDBOX_SESSION_TTL_MS;
+mini-services/animaxia-backend/modules/premium/stripe.js:120:         VALUES ($1, $2, 'pending', 'stripe', $3)`,
+mini-services/animaxia-backend/modules/premium/stripe.js:134:     VALUES ($1, $2, 'pending', 'stripe-sandbox', $3)`,
+mini-services/animaxia-backend/modules/premium/stripe.js:157:    `SELECT * FROM subscriptions WHERE sessionid = $1 ORDER BY createdat DESC, id DESC LIMIT 1`,
+mini-services/animaxia-backend/modules/premium/stripe.js:191:    `UPDATE users SET plan = $2, planexpiresat = NOW() + ($3::text)::interval WHERE id = $1 RETURNING *`,
+mini-services/animaxia-backend/modules/premium/stripe.js:201:       SET status = 'active', currentperiodend = NOW() + ($2::text)::interval
+mini-services/animaxia-backend/modules/premium/stripe.js:202:       WHERE id = $1 RETURNING *`,
+mini-services/animaxia-backend/modules/premium/stripe.js:209:       VALUES ($1, $2, 'active', $3, $4, NOW() + ($5::text)::interval) RETURNING *`,
+mini-services/animaxia-backend/modules/premium/stripe.js:218:  return res.json({ ok: true, user: publicUser(userRow), subscription: serializeSubscription(sub) });
+mini-services/animaxia-backend/modules/premium/stripe.js:224:    `SELECT * FROM subscriptions WHERE userid = $1 AND status = 'active' ORDER BY createdat DESC, id DESC LIMIT 1`,
+mini-services/animaxia-backend/modules/premium/stripe.js:238:    sub = await one(`UPDATE subscriptions SET status = 'canceled' WHERE id = $1 RETURNING *`, [Number(sub.id)]);
+mini-services/animaxia-backend/modules/premium/stripe.js:240:  await rows(`UPDATE users SET plan = 'free', planexpiresat = NULL WHERE id = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/premium/stripe.js:245:  return res.json({ ok: true, subscription: serializeSubscription(sub) });
+mini-services/animaxia-backend/modules/search/flow.js:210:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/flow.js:255:  const waitedMs = Date.now() - entry.enqueuedAt;
+mini-services/animaxia-backend/modules/search/flow.js:270:    processedAt.push(Date.now());
+mini-services/animaxia-backend/modules/search/flow.js:299:    `[search-flow] QUEUE TIMEOUT — ${entry.kind} ${entry.describe} exceeded the request budget (waited > ${Date.now() - entry.enqueuedAt}ms, priority=${entry.priority}, shard=${entry.shardId})`,
+mini-services/animaxia-backend/modules/search/flow.js:315:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/flow.js:370:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/flow.js:400:      const now = Date.now();
+mini-services/animaxia-backend/modules/search/flow.js:504:      enqueuedAt: Date.now(),
+mini-services/animaxia-backend/modules/search/flow.js:505:      deadlineAt: deadlineFor(Date.now(), budgetMs), // request-budget deadline (per-entry override — FAZA 18)
+mini-services/animaxia-backend/modules/search/flow.js:528:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/opt.js:267:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/opt.js:388:      const settledAt = Date.now();
+mini-services/animaxia-backend/modules/search/opt.js:405:        `[search-opt] BATCH FAILED — ${batch.describe} (hash=${queryHash}) after ${Date.now() - batch.createdAt}ms — error propagates to ${batch.fanout} request(s), nothing cached: ${err?.message ?? err}`,
+mini-services/animaxia-backend/modules/search/opt.js:431:      const now = Date.now();
+mini-services/animaxia-backend/modules/search/opt.js:530:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:123:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:140:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:170:  if (entry.expiresAt <= Date.now()) {
+mini-services/animaxia-backend/modules/search/pipeline.js:184:  resultCache.set(key, { body, expiresAt: Date.now() + CACHE_TTL_MS });
+mini-services/animaxia-backend/modules/search/pipeline.js:236:    const now = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:320:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:334:    recordExecutorLatency(Date.now() - startedAt);
+mini-services/animaxia-backend/modules/search/pipeline.js:365:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:426:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/pipeline.js:501:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/rate.js:171:      sweepIdleUsers(Date.now(), true);
+mini-services/animaxia-backend/modules/search/rate.js:237:function burstWindowCount(now = Date.now()) {
+mini-services/animaxia-backend/modules/search/rate.js:279:      const now = Date.now();
+mini-services/animaxia-backend/modules/search/rate.js:334:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/rate.js:483:  user.lastCompletedAdvanced = Date.now();
+mini-services/animaxia-backend/modules/search/rate.js:484:  user.lastSeen = Date.now();
+mini-services/animaxia-backend/modules/search/rate.js:517:  const now = Date.now();
+mini-services/animaxia-backend/modules/search/search.js:55: * ILIKE). Combined score: ts_rank(tsv, q) * 2 + similarity(title, q) +
+mini-services/animaxia-backend/modules/search/search.js:56: * (title ILIKE 'q%' → +0.5). Empty q + filters → filter-only query (no text
+mini-services/animaxia-backend/modules/search/search.js:240:         syncedat = NOW()`;
+mini-services/animaxia-backend/modules/search/search.js:276:  const tuple = `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}::text[],${b(9)}::text[],${b(10)}::text[],${b(11)},${b(12)},NOW())`;
+mini-services/animaxia-backend/modules/search/search.js:323:      SELECT (SELECT COUNT(*)::int FROM content)   AS content_n,
+mini-services/animaxia-backend/modules/search/search.js:324:             (SELECT COUNT(*)::int FROM searchdocs) AS docs_n
+mini-services/animaxia-backend/modules/search/search.js:411:        await rows('DELETE FROM searchdocs WHERE contentid = ANY($1::int[])', [deleteIds]);
+mini-services/animaxia-backend/modules/search/search.js:415:          'SELECT id, externalid, type, title, metadata, thumbnail, createdat FROM content WHERE id = ANY($1::int[])',
+mini-services/animaxia-backend/modules/search/search.js:536:  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${P(genre)})`);
+mini-services/animaxia-backend/modules/search/search.js:539:    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${P(actor)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:542:    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${P(studio)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:556:      ` + CASE WHEN s.title ILIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
+mini-services/animaxia-backend/modules/search/search.js:565:    `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+mini-services/animaxia-backend/modules/search/search.js:578:      trigramClauses.push(`s.title ILIKE ${ph}`);
+mini-services/animaxia-backend/modules/search/search.js:584:      `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+mini-services/animaxia-backend/modules/search/search.js:608:  // Cursor mode: continuation params come FIRST ($1..$n), then LIMIT; the
+mini-services/animaxia-backend/modules/search/search.js:623:    if (genre) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${sub(genre)})`);
+mini-services/animaxia-backend/modules/search/search.js:625:    if (actor) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${sub(actor)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:626:    if (studio) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${sub(studio)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:641:        ` + CASE WHEN s.title ILIKE ${qParam} || '%' THEN 0.5 ELSE 0 END`;
+mini-services/animaxia-backend/modules/search/search.js:648:      const clauses = [q, ...words].map((candidate) => `s.title ILIKE ${sub(`%${candidate}%`)}`);
+mini-services/animaxia-backend/modules/search/search.js:664:       LIMIT $${cursorParams.length + 1}::int`;
+mini-services/animaxia-backend/modules/search/search.js:665:    // LIMIT is the placeholder right after the cursor params (::int — a bare
+mini-services/animaxia-backend/modules/search/search.js:741:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/search/search.js:758:    tookMs: Date.now() - startedAt,
+mini-services/animaxia-backend/modules/search/search.js:770:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/search/search.js:935:  const took = Date.now() - startedAt;
+mini-services/animaxia-backend/modules/search/search.js:955:              similarity(s.title, $1) AS sim
+mini-services/animaxia-backend/modules/search/search.js:958:       WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
+mini-services/animaxia-backend/modules/search/search.js:1003:      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(genres) AS value FROM searchdocs) t
+mini-services/animaxia-backend/modules/search/search.js:1007:      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(actors) AS value FROM searchdocs) t
+mini-services/animaxia-backend/modules/search/search.js:1012:      `SELECT category AS value, COUNT(*)::int AS count FROM searchdocs
+mini-services/animaxia-backend/modules/search/search.js:1016:      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(studios) AS value FROM searchdocs) t
+mini-services/animaxia-backend/modules/search/search.js:1063:  const nowMs = Date.now();
+mini-services/animaxia-backend/modules/search/search.js:1116:  const startedAt = Date.now();
+mini-services/animaxia-backend/modules/search/search.js:1142:  const durationMs = Date.now() - startedAt;
+mini-services/animaxia-backend/modules/search/search.js:1201:      one('SELECT COUNT(*)::int AS n FROM searchdocs'),
+mini-services/animaxia-backend/modules/search/search.js:1202:      one(`SELECT COUNT(*)::int AS n FROM pg_extension WHERE extname = 'pg_trgm'`),
+mini-services/animaxia-backend/modules/search/stress.js:470:           similarity(s.title, $1) AS sim
+mini-services/animaxia-backend/modules/search/stress.js:473:    WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
+mini-services/animaxia-backend/modules/search/stress.js:501:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/search/stress.js:921:      wallMs: Date.now() - t0,
+mini-services/animaxia-backend/modules/searchaccel/index.js:90:  bootAt: Date.now(),
+mini-services/animaxia-backend/modules/searchaccel/index.js:105:  if (Date.now() - entry.storedAt > TTL_MS) {
+mini-services/animaxia-backend/modules/searchaccel/index.js:123:  cache.set(sig, { body, storedAt: Date.now() });
+mini-services/animaxia-backend/modules/searchaccel/index.js:133:  const now = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:207:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:213:      return { ...cached.body, took: Date.now() - t0, originTook: cached.body.took, accel: 'hit' };
+mini-services/animaxia-backend/modules/searchaccel/index.js:243:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:246:      const ms = Date.now() - t0;
+mini-services/animaxia-backend/modules/searchaccel/index.js:249:      stats.warmer.lastPingAt = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:275:  stats.warm.lastRunAt = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:278:    const age = entry ? Date.now() - entry.storedAt : Infinity;
+mini-services/animaxia-backend/modules/searchaccel/index.js:298:  if (Date.now() - lastPiggybackWarmAt < PIGGYBACK_WARM_MS) return;
+mini-services/animaxia-backend/modules/searchaccel/index.js:299:  lastPiggybackWarmAt = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:308:  const now = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:321:  const now = Date.now();
+mini-services/animaxia-backend/modules/searchaccel/index.js:385:    uptimeSec: Math.round((Date.now() - stats.bootAt) / 1000),
+mini-services/animaxia-backend/modules/searchux/index.js:67:  bootAt: Date.now(),
+mini-services/animaxia-backend/modules/searchux/index.js:87:      if (Date.now() - entry.storedAt > TTL_MS) {
+mini-services/animaxia-backend/modules/searchux/index.js:101:      this.map.set(key, { value, storedAt: Date.now() });
+mini-services/animaxia-backend/modules/searchux/index.js:143:  const now = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:233:  const now = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:246:  const now = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:278:  reaperStats.lastRunAt = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:287:         AND query ILIKE '%similarity(a.title, b.title)%'
+mini-services/animaxia-backend/modules/searchux/index.js:288:         AND now() - query_start > $1::interval`,
+mini-services/animaxia-backend/modules/searchux/index.js:312:  reaperStats.lastScheduledAt = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:346:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:362:    const took = Date.now() - t0;
+mini-services/animaxia-backend/modules/searchux/index.js:374:      const took = Date.now() - t0;
+mini-services/animaxia-backend/modules/searchux/index.js:412:          merged.set(norm, { q: norm, count: item.count, lastAt: item.lastAt ?? Date.now(), source: 'accel' });
+mini-services/animaxia-backend/modules/searchux/index.js:434:  const t0 = Date.now();
+mini-services/animaxia-backend/modules/searchux/index.js:446:    return res.json({ ...cached, took: Date.now() - t0, cache: 'hit' });
+mini-services/animaxia-backend/modules/searchux/index.js:492:      res.json({ ...payload, took: Date.now() - t0, cache: 'miss' });
+mini-services/animaxia-backend/modules/searchux/index.js:531:    uptimeSec: Math.round((Date.now() - stats.bootAt) / 1000),
+mini-services/animaxia-backend/modules/security/security.js:22:  const now = Date.now();
+mini-services/animaxia-backend/modules/security/security.js:70:    const now = Date.now();
+mini-services/animaxia-backend/modules/security/security.js:123:  const now = Date.now();
+mini-services/animaxia-backend/modules/security/security.js:138:    if (entry.lockedUntil > Date.now()) {
+mini-services/animaxia-backend/modules/security/security.js:142:        retryAfterSec: Math.max(1, Math.ceil((entry.lockedUntil - Date.now()) / 1000)),
+mini-services/animaxia-backend/modules/security/security.js:151:    const now = Date.now();
+mini-services/animaxia-backend/modules/security/security.js:171:      if (entry.lockedUntil > Date.now()) locked += 1;
+mini-services/animaxia-backend/modules/security/security.js:193:      `INSERT INTO auditlogs (userid, action, ip, meta) VALUES ($1, $2, $3, $4::jsonb)`,
+mini-services/animaxia-backend/modules/security/security.js:206:  const total = await one(`SELECT COUNT(*)::int AS count FROM auditlogs`);
+mini-services/animaxia-backend/modules/security/security.js:218:  const where = action ? `WHERE a.action = $3` : '';
+mini-services/animaxia-backend/modules/security/security.js:225:     LIMIT $1 OFFSET $2`,
+mini-services/animaxia-backend/modules/security/security.js:230:      ? `SELECT COUNT(*)::int AS count FROM auditlogs WHERE action = $1`
+mini-services/animaxia-backend/modules/security/security.js:231:      : `SELECT COUNT(*)::int AS count FROM auditlogs`,
+mini-services/animaxia-backend/modules/sharding/migrations.js:12: * content/searchdoc/vector ids are SERIAL values < 1B, so their computed shard
+mini-services/animaxia-backend/modules/sharding/model.js:18: *     Math.floor(Number(id) / 1_000_000_000) % SHARDCOUNT. All current SERIAL
+mini-services/animaxia-backend/modules/sharding/model.js:95: * pre-FAZA-13 SERIAL ids are < 1B and therefore live on shard 0).
+mini-services/animaxia-backend/modules/sharding/model.js:130:  // 2. Content id — RANGE rule (all current SERIAL ids → shard 0).
+mini-services/animaxia-backend/modules/social/activity-events.js:10: * http://127.0.0.1:4010) with the serialized activity event; failures are
+mini-services/animaxia-backend/modules/social/activity-events.js:53:     VALUES ($1, $2, $3, $4, $5::jsonb)
+mini-services/animaxia-backend/modules/social/activity-events.js:54:     RETURNING id, createdat`,
+mini-services/animaxia-backend/modules/social/activity-events.js:60:    `SELECT id, username, avatar FROM users WHERE id = $1`,
+mini-services/animaxia-backend/modules/social/activity-events.js:66:      `SELECT id, title, type, thumbnail FROM content WHERE id = $1`,
+mini-services/animaxia-backend/modules/social/activity.js:10: * Every insert also fire-and-forget POSTs the serialized event to the
+mini-services/animaxia-backend/modules/social/activity.js:106:        `SELECT id, body FROM comments WHERE userid = $1 AND contentid = $2 ORDER BY id DESC LIMIT 1`,
+mini-services/animaxia-backend/modules/social/activity.js:139:      `SELECT followeeid FROM follows WHERE followerid = $1 ORDER BY id DESC LIMIT ${FOLLOWING_CAP}`,
+mini-services/animaxia-backend/modules/social/activity.js:145:    let where = 'ae.actorid = ANY($1::int[])';
+mini-services/animaxia-backend/modules/social/activity.js:148:      where += ' AND (ae.createdat, ae.id) < ($2::timestamptz, $3::int)';
+mini-services/animaxia-backend/modules/social/activity.js:187:      where = '(ae.createdat, ae.id) < ($1::timestamptz, $2::int)';
+mini-services/animaxia-backend/modules/social/aisocial.js:83:         WHERE f.followerid = $1
+mini-services/animaxia-backend/modules/social/aisocial.js:89:         WHERE f.followerid = $1
+mini-services/animaxia-backend/modules/social/aisocial.js:95:         WHERE f.followerid = $1
+mini-services/animaxia-backend/modules/social/aisocial.js:98:       WHERE c.id NOT IN (SELECT contentid FROM watchhistory WHERE userid = $1)
+mini-services/animaxia-backend/modules/social/aisocial.js:99:         AND c.id NOT IN (SELECT contentid FROM watchlist WHERE userid = $1)
+mini-services/animaxia-backend/modules/social/aisocial.js:110:                WHERE mine.userid = $1 AND theirs.userid = u.id) AS sharedtitles,
+mini-services/animaxia-backend/modules/social/aisocial.js:114:       WHERE f.followerid = $1
+mini-services/animaxia-backend/modules/social/aisocial.js:123:        `SELECT c.metadata FROM watchhistory wh JOIN content c ON c.id = wh.contentid WHERE wh.userid = $1 LIMIT 300`,
+mini-services/animaxia-backend/modules/social/aisocial.js:129:            `SELECT c.metadata FROM watchhistory wh JOIN content c ON c.id = wh.contentid WHERE wh.userid = $1 LIMIT 300`,
+mini-services/animaxia-backend/modules/social/aisocial.js:166:         AND c.id NOT IN (SELECT contentid FROM watchhistory WHERE userid = $1)
+mini-services/animaxia-backend/modules/social/aisocial.js:167:         AND c.id NOT IN (SELECT contentid FROM watchlist WHERE userid = $1)
+mini-services/animaxia-backend/modules/social/aisocial.js:215:    const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/social/aisocial.js:219:      `SELECT r.rating, r.body FROM reviews r WHERE r.contentid = $1 ORDER BY r.createdat DESC LIMIT 30`,
+mini-services/animaxia-backend/modules/social/comments.js:63:    `SELECT COUNT(*) FILTER (WHERE value = 1)::int AS likes,
+mini-services/animaxia-backend/modules/social/comments.js:64:            COUNT(*) FILTER (WHERE value = -1)::int AS dislikes
+mini-services/animaxia-backend/modules/social/comments.js:65:     FROM commentvotes WHERE commentid = $1`,
+mini-services/animaxia-backend/modules/social/comments.js:71:      `SELECT value FROM commentvotes WHERE commentid = $1 AND userid = $2`,
+mini-services/animaxia-backend/modules/social/comments.js:85:    `SELECT COUNT(*) FILTER (WHERE value = 1)::int AS likes,
+mini-services/animaxia-backend/modules/social/comments.js:86:            COUNT(*) FILTER (WHERE value = -1)::int AS dislikes
+mini-services/animaxia-backend/modules/social/comments.js:87:     FROM contentlikes WHERE contentid = $1`,
+mini-services/animaxia-backend/modules/social/comments.js:93:      `SELECT value FROM contentlikes WHERE contentid = $1 AND userid = $2`,
+mini-services/animaxia-backend/modules/social/comments.js:139:       WHERE c.contentid = $1 AND c.parentid IS NULL
+mini-services/animaxia-backend/modules/social/comments.js:141:       LIMIT $2`,
+mini-services/animaxia-backend/modules/social/comments.js:149:       WHERE c.contentid = $1 AND c.parentid IS NOT NULL
+mini-services/animaxia-backend/modules/social/comments.js:155:              COUNT(*) FILTER (WHERE v.value = 1)::int AS likes,
+mini-services/animaxia-backend/modules/social/comments.js:156:              COUNT(*) FILTER (WHERE v.value = -1)::int AS dislikes
+mini-services/animaxia-backend/modules/social/comments.js:159:       WHERE c.contentid = $1
+mini-services/animaxia-backend/modules/social/comments.js:168:           WHERE c.contentid = $1 AND v.userid = $2`,
+mini-services/animaxia-backend/modules/social/comments.js:239:      `SELECT id, contentid, parentid FROM comments WHERE id = $1`,
+mini-services/animaxia-backend/modules/social/comments.js:251:     VALUES ($1, $2, $3, $4)
+mini-services/animaxia-backend/modules/social/comments.js:252:     RETURNING *`,
+mini-services/animaxia-backend/modules/social/comments.js:282:    `SELECT id, contentid, userid, parentid FROM comments WHERE id = $1`,
+mini-services/animaxia-backend/modules/social/comments.js:293:  await rows(`DELETE FROM comments WHERE id = $1`, [commentId]);
+mini-services/animaxia-backend/modules/social/comments.js:318:  const comment = await one(`SELECT id FROM comments WHERE id = $1`, [commentId]);
+mini-services/animaxia-backend/modules/social/comments.js:322:    await rows(`DELETE FROM commentvotes WHERE commentid = $1 AND userid = $2`, [commentId, req.user.id]);
+mini-services/animaxia-backend/modules/social/comments.js:326:       VALUES ($1, $2, $3)
+mini-services/animaxia-backend/modules/social/comments.js:354:    await rows(`DELETE FROM contentlikes WHERE contentid = $1 AND userid = $2`, [contentId, req.user.id]);
+mini-services/animaxia-backend/modules/social/comments.js:358:       VALUES ($1, $2, $3)
+mini-services/animaxia-backend/modules/social/feed.js:102:       LIMIT $1`,
+mini-services/animaxia-backend/modules/social/feed.js:115:       LIMIT $1`,
+mini-services/animaxia-backend/modules/social/feed.js:122:       LIMIT $1`,
+mini-services/animaxia-backend/modules/social/feed.js:129:       LIMIT $1`,
+mini-services/animaxia-backend/modules/social/feed.js:152:      id: num(r.contentid), // contentlikes has no serial id — the content id keys the activity
+mini-services/animaxia-backend/modules/social/feed.js:189:function serializeActivity(item) {
+mini-services/animaxia-backend/modules/social/feed.js:250:  return res.json({ data: page.map(serializeActivity), nextCursor });
+mini-services/animaxia-backend/modules/social/feed.js:279:    `SELECT contentid FROM watchlist WHERE userid = $1
+mini-services/animaxia-backend/modules/social/feed.js:281:     SELECT contentid FROM watchhistory WHERE userid = $1`,
+mini-services/animaxia-backend/modules/social/feed.js:304:    data: page.map(serializeActivity),
+mini-services/animaxia-backend/modules/social/follows.js:71:    let filter = `u.id <> $1 AND NOT EXISTS (SELECT 1 FROM follows f WHERE f.followerid = $1 AND f.followeeid = u.id)`;
+mini-services/animaxia-backend/modules/social/follows.js:74:      filter += ` AND u.username ILIKE $2`;
+mini-services/animaxia-backend/modules/social/follows.js:80:              EXISTS (SELECT 1 FROM follows f2 WHERE f2.followerid = $1 AND f2.followeeid = u.id) AS isfollowing
+mini-services/animaxia-backend/modules/social/follows.js:107:      `SELECT id FROM follows WHERE followerid = $1 AND followeeid = $2`,
+mini-services/animaxia-backend/modules/social/follows.js:112:        `INSERT INTO follows (followerid, followeeid) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+mini-services/animaxia-backend/modules/social/follows.js:136:    await rows(`DELETE FROM follows WHERE followerid = $1 AND followeeid = $2`, [me, target]);
+mini-services/animaxia-backend/modules/social/follows.js:152:       WHERE EXISTS (SELECT 1 FROM follows f WHERE f.followerid = $1 AND f.followeeid = u.id)
+mini-services/animaxia-backend/modules/social/follows.js:170:              EXISTS (SELECT 1 FROM follows f3 WHERE f3.followerid = $1 AND f3.followeeid = u.id) AS isfollowing
+mini-services/animaxia-backend/modules/social/follows.js:172:       WHERE EXISTS (SELECT 1 FROM follows f WHERE f.followeeid = $1 AND f.followerid = u.id)
+mini-services/animaxia-backend/modules/social/follows.js:201:           (SELECT COUNT(*) FROM follows fa WHERE fa.followeeid = $1) AS followers,
+mini-services/animaxia-backend/modules/social/follows.js:202:           (SELECT COUNT(*) FROM follows fb WHERE fb.followerid = $1) AS following,
+mini-services/animaxia-backend/modules/social/follows.js:203:           (SELECT COUNT(*) FROM reviews r WHERE r.userid = $1) AS reviews,
+mini-services/animaxia-backend/modules/social/follows.js:204:           (SELECT COUNT(*) FROM comments cm WHERE cm.userid = $1) AS comments,
+mini-services/animaxia-backend/modules/social/follows.js:205:           (SELECT COUNT(*) FROM watchparties wp WHERE wp.hostid = $1) AS partieshosted`,
+mini-services/animaxia-backend/modules/social/follows.js:211:         WHERE r.userid = $1
+mini-services/animaxia-backend/modules/social/follows.js:221:         WHERE ae.actorid = $1
+mini-services/animaxia-backend/modules/social/follows.js:229:               EXISTS (SELECT 1 FROM follows f WHERE f.followerid = $1 AND f.followeeid = $2) AS isfollowing,
+mini-services/animaxia-backend/modules/social/follows.js:230:               EXISTS (SELECT 1 FROM follows f WHERE f.followerid = $2 AND f.followeeid = $1) AS followsme`,
+mini-services/animaxia-backend/modules/social/follows.js:241:          `SELECT c.metadata FROM watchhistory wh JOIN content c ON c.id = wh.contentid WHERE wh.userid = $1 LIMIT 200`,
+mini-services/animaxia-backend/modules/social/follows.js:245:          `SELECT c.metadata FROM watchhistory wh JOIN content c ON c.id = wh.contentid WHERE wh.userid = $1 LIMIT 200`,
+mini-services/animaxia-backend/modules/social/reviews.js:74:    `SELECT COUNT(*) AS count, COALESCE(AVG(rating), 0) AS avg FROM reviews WHERE contentid = $1`,
+mini-services/animaxia-backend/modules/social/reviews.js:78:    `SELECT rating, COUNT(*) AS count FROM reviews WHERE contentid = $1 GROUP BY rating`,
+mini-services/animaxia-backend/modules/social/reviews.js:109:      likeExpr = `EXISTS (SELECT 1 FROM reviewlikes rl2 WHERE rl2.reviewid = r.id AND rl2.userid = $2) AS liked`;
+mini-services/animaxia-backend/modules/social/reviews.js:116:       WHERE r.contentid = $1
+mini-services/animaxia-backend/modules/social/reviews.js:146:    const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/social/reviews.js:150:      `SELECT id FROM reviews WHERE userid = $1 AND contentid = $2`,
+mini-services/animaxia-backend/modules/social/reviews.js:156:          `UPDATE reviews SET rating = $3, title = $4, body = $5, updatedat = NOW()
+mini-services/animaxia-backend/modules/social/reviews.js:157:           WHERE id = $1 AND userid = $2
+mini-services/animaxia-backend/modules/social/reviews.js:158:           RETURNING id, rating, title, body, createdat, updatedat, contentid`,
+mini-services/animaxia-backend/modules/social/reviews.js:163:           VALUES ($1, $2, $3, $4, $5)
+mini-services/animaxia-backend/modules/social/reviews.js:164:           RETURNING id, rating, title, body, createdat, updatedat, contentid`,
+mini-services/animaxia-backend/modules/social/reviews.js:206:    const review = await one(`SELECT id, userid FROM reviews WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/reviews.js:211:    await rows(`DELETE FROM reviews WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/reviews.js:227:    const review = await one(`SELECT id FROM reviews WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/reviews.js:231:      `SELECT 1 AS x FROM reviewlikes WHERE userid = $1 AND reviewid = $2`,
+mini-services/animaxia-backend/modules/social/reviews.js:235:      await rows(`DELETE FROM reviewlikes WHERE userid = $1 AND reviewid = $2`, [me, id]);
+mini-services/animaxia-backend/modules/social/reviews.js:238:        `INSERT INTO reviewlikes (userid, reviewid) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+mini-services/animaxia-backend/modules/social/reviews.js:243:      `SELECT COUNT(*) AS likes FROM reviewlikes WHERE reviewid = $1`,
+mini-services/animaxia-backend/modules/social/reviews.js:263:      likeExpr = `EXISTS (SELECT 1 FROM reviewlikes rl2 WHERE rl2.reviewid = r.id AND rl2.userid = $1) AS liked`;
+mini-services/animaxia-backend/modules/social/social-migrations.js:22:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/social/social-migrations.js:25:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/social/social-migrations.js:31:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/social/social-migrations.js:37:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/social/social-migrations.js:38:    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/social/social-migrations.js:46:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/social/social-migrations.js:50:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/social/social-migrations.js:55:    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/social/social-migrations.js:56:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/social/social-migrations.js:61:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/social/social-migrations.js:68:    state JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/social/social-migrations.js:69:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/social/social-migrations.js:70:    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/social/social-migrations.js:77:    joinedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/social/social-migrations.js:82:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/social/social-migrations.js:86:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/social/watchparty.js:83:     WHERE wp.id = $1`,
+mini-services/animaxia-backend/modules/social/watchparty.js:115:     WHERE m.partyid = $1
+mini-services/animaxia-backend/modules/social/watchparty.js:131:    `SELECT role FROM watchpartymembers WHERE partyid = $1 AND userid = $2`,
+mini-services/animaxia-backend/modules/social/watchparty.js:141:      `UPDATE watchparties SET status = 'ended', updatedat = NOW()
+mini-services/animaxia-backend/modules/social/watchparty.js:142:       WHERE status = 'active' AND updatedat < NOW() - INTERVAL '24 hours'`,
+mini-services/animaxia-backend/modules/social/watchparty.js:164:    const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/social/watchparty.js:174:      `UPDATE watchparties SET status = 'ended', updatedat = NOW()
+mini-services/animaxia-backend/modules/social/watchparty.js:175:       WHERE hostid = $1 AND status = 'active'`,
+mini-services/animaxia-backend/modules/social/watchparty.js:183:         VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+mini-services/animaxia-backend/modules/social/watchparty.js:185:         RETURNING *`,
+mini-services/animaxia-backend/modules/social/watchparty.js:192:      `INSERT INTO watchpartymembers (partyid, userid, role) VALUES ($1, $2, 'host')
+mini-services/animaxia-backend/modules/social/watchparty.js:262:      `SELECT COUNT(*) AS c FROM watchpartymembers WHERE partyid = $1`,
+mini-services/animaxia-backend/modules/social/watchparty.js:269:       WHERE pm.partyid = $1
+mini-services/animaxia-backend/modules/social/watchparty.js:300:    const party = await one(`SELECT * FROM watchparties WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:307:        `INSERT INTO watchpartymembers (partyid, userid, role) VALUES ($1, $2, 'member')
+mini-services/animaxia-backend/modules/social/watchparty.js:311:      await rows(`UPDATE watchparties SET updatedat = NOW() WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:323:    const count = await one(`SELECT COUNT(*) AS c FROM watchpartymembers WHERE partyid = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:338:    const party = await one(`SELECT * FROM watchparties WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:344:    await rows(`DELETE FROM watchpartymembers WHERE partyid = $1 AND userid = $2`, [id, me]);
+mini-services/animaxia-backend/modules/social/watchparty.js:347:      await rows(`UPDATE watchparties SET status = 'ended', updatedat = NOW() WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:357:    await rows(`UPDATE watchparties SET updatedat = NOW() WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:372:    const party = await one(`SELECT * FROM watchparties WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:378:      `UPDATE watchparties SET state = $2::jsonb, updatedat = NOW() WHERE id = $1`,
+mini-services/animaxia-backend/modules/social/watchparty.js:396:    let where = `pm.partyid = $1`;
+mini-services/animaxia-backend/modules/social/watchparty.js:399:      where += ` AND pm.id < $2`;
+mini-services/animaxia-backend/modules/social/watchparty.js:436:    const party = await one(`SELECT * FROM watchparties WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:449:      `INSERT INTO partymessages (partyid, userid, body) VALUES ($1, $2, $3) RETURNING id, createdat`,
+mini-services/animaxia-backend/modules/social/watchparty.js:452:    await rows(`UPDATE watchparties SET updatedat = NOW() WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/social/watchparty.js:475:      `SELECT * FROM watchparties WHERE code = $1 AND status = 'active'`,
+mini-services/animaxia-backend/modules/social/watchparty.js:481:    const count = await one(`SELECT COUNT(*) AS c FROM watchpartymembers WHERE partyid = $1`, [num(party.id)]);
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:31:function peekTenantPool(tenant, { now = Date.now() } = {}) {
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:41:function incrementTenantPool(tenant, { now = Date.now() } = {}) {
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:56:  const now = Date.now();
+mini-services/animaxia-backend/modules/tenant/billing.js:39:import { getTenantBySlug, invalidateTenantCache, serializeTenant } from './core.js';
+mini-services/animaxia-backend/modules/tenant/billing.js:93:    `SELECT COUNT(*)::int AS count, COALESCE(SUM(totalusd), 0)::real AS total
+mini-services/animaxia-backend/modules/tenant/billing.js:97:    `SELECT COUNT(*)::int AS count, COALESCE(SUM(totalusd), 0)::real AS total
+mini-services/animaxia-backend/modules/tenant/billing.js:109:         WHERE tenantid = $1 AND createdat > NOW() - '30 days'::interval GROUP BY metric`,
+mini-services/animaxia-backend/modules/tenant/billing.js:161:    `SELECT * FROM tenantinvoices WHERE tenantid = $1 ORDER BY createdat DESC LIMIT 100`,
+mini-services/animaxia-backend/modules/tenant/billing.js:165:    tenant: serializeTenant(tenant),
+mini-services/animaxia-backend/modules/tenant/billing.js:184:  let start = periodStart ? new Date(periodStart) : new Date(Date.now() - 30 * 24 * 3600 * 1000);
+mini-services/animaxia-backend/modules/tenant/billing.js:192:    `SELECT metric, SUM(quantity)::real AS total, COUNT(*)::int AS events
+mini-services/animaxia-backend/modules/tenant/billing.js:194:     WHERE tenantid = $1 AND createdat >= $2 AND createdat < $3
+mini-services/animaxia-backend/modules/tenant/billing.js:246:     VALUES ($1, $2, $3, 'open', $4, $5, $6, $7::jsonb, $8) RETURNING id`,
+mini-services/animaxia-backend/modules/tenant/billing.js:272:    `UPDATE tenantinvoices SET status = 'void' WHERE id = $1 AND status = 'open' RETURNING id, totalusd`,
+mini-services/animaxia-backend/modules/tenant/billing.js:293:     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+mini-services/animaxia-backend/modules/tenant/billing.js:314:  await rows(`UPDATE tenants SET plan = $2, updatedat = NOW() WHERE id = $1`, [tenant.id, plan]);
+mini-services/animaxia-backend/modules/tenant/billing.js:316:    `UPDATE tenantlimits SET maxusers=$2, aiperday=$3, ratelimitpermin=$4, vectorcollections=$5, storagegb=$6, updatedat=NOW()
+mini-services/animaxia-backend/modules/tenant/billing.js:317:     WHERE tenantid=$1`,
+mini-services/animaxia-backend/modules/tenant/billing.js:324:  return res.json({ ok: true, direction, from: tenant.plan, to: plan, tenant: serializeTenant(fresh) });
+mini-services/animaxia-backend/modules/tenant/billing.js:336:  await rows(`UPDATE tenants SET stripecustomerid = $2, updatedat = NOW() WHERE id = $1`, [tenant.id, String(stripecustomerid)]);
+mini-services/animaxia-backend/modules/tenant/billing.js:340:  res.json({ ok: true, tenant: serializeTenant(fresh) });
+mini-services/animaxia-backend/modules/tenant/core.js:7: *   • serializeTenant()     — API shape used by /api/tenants + admin console
+mini-services/animaxia-backend/modules/tenant/core.js:47:    const cutoff = Date.now() - CACHE_TTL_MS * 5;
+mini-services/animaxia-backend/modules/tenant/core.js:89:  if (hit && Date.now() - hit.cachedAt < CACHE_TTL_MS) return hit.tenant;
+mini-services/animaxia-backend/modules/tenant/core.js:98:       WHERE t.slug = $1`,
+mini-services/animaxia-backend/modules/tenant/core.js:103:    cache.set(key, { tenant, cachedAt: Date.now() });
+mini-services/animaxia-backend/modules/tenant/core.js:114:    const row = await one(`SELECT slug FROM tenants WHERE id = $1`, [Number(id)]);
+mini-services/animaxia-backend/modules/tenant/core.js:128:       WHERE tu.userid = $1 ORDER BY tu.tenantid ASC LIMIT 1`,
+mini-services/animaxia-backend/modules/tenant/core.js:144:       WHERE tu.userid = $1 ORDER BY tu.tenantid ASC`,
+mini-services/animaxia-backend/modules/tenant/core.js:184:/* ------------------------------ serialization -------------------------------- */
+mini-services/animaxia-backend/modules/tenant/core.js:186:export function serializeTenant(tenant, usage = null) {
+mini-services/animaxia-backend/modules/tenant/core.js:218:       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+mini-services/animaxia-backend/modules/tenant/core.js:230:      `SELECT metric, SUM(quantity)::real AS total, COUNT(*)::int AS events
+mini-services/animaxia-backend/modules/tenant/core.js:232:       WHERE tenantid = $1 AND createdat > NOW() - ($2::text)::interval
+mini-services/animaxia-backend/modules/tenant/jwt-tenant.js:51:  const nowSec = Math.floor(Date.now() / 1000);
+mini-services/animaxia-backend/modules/tenant/jwt-tenant.js:84:  const nowSec = Math.floor(Date.now() / 1000);
+mini-services/animaxia-backend/modules/tenant/tenant-ai.js:34:  serializeTenant,
+mini-services/animaxia-backend/modules/tenant/tenant-ai.js:85:    tenant: serializeTenant(tenant),
+mini-services/animaxia-backend/modules/tenant/tenant-ai.js:217:         WHERE tenantid = $1 ORDER BY createdat DESC LIMIT 20`,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:48:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:54:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:55:    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:62:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:74:    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:78:    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:79:    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:80:    playerallowlist JSONB NOT NULL DEFAULT '[]'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:81:    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:84:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:91:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:96:    id SERIAL PRIMARY KEY,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:104:    lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:106:    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:162:    const existing = await one(`SELECT id FROM tenants WHERE slug = $1`, [s.slug]);
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:166:      `INSERT INTO tenants (slug, name, plan) VALUES ($1, $2, $3) RETURNING id`,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:172:       VALUES ($1, $2, $3, $4, $5, $6)
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:178:       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:39:  serializeTenant,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:61:            (SELECT COUNT(*)::int FROM tenantusers tu WHERE tu.tenantid = t.id) AS usercount
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:69:    const t = serializeTenant({
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:95:  const existing = await one(`SELECT id FROM tenants WHERE slug = $1`, [String(slug)]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:100:  const t = await one(`INSERT INTO tenants (slug, name, plan) VALUES ($1, $2, $3) RETURNING id`, [String(slug), String(name), String(plan)]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:104:     VALUES ($1, $2, $3, $4, $5, $6)`,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:109:     VALUES ($1, '{}'::jsonb, $2::jsonb, '["mp4","m3u8"]'::jsonb)`,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:116:  return res.status(201).json({ ok: true, tenant: serializeTenant(tenant) });
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:128:     WHERE tu.tenantid = $1 ORDER BY tu.createdat ASC`,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:132:  return res.json({ tenant: serializeTenant(tenant, usage), members });
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:156:    `UPDATE tenantlimits SET maxusers=$2, aiperday=$3, ratelimitpermin=$4, vectorcollections=$5, storagegb=$6,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:157:            overageallowed=$7, updatedat=NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:158:     WHERE tenantid=$1`,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:164:  return res.json({ ok: true, tenant: serializeTenant(fresh) });
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:187:       config = COALESCE($2::jsonb, config),
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:188:       features = COALESCE($3::jsonb, features),
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:189:       playerallowlist = COALESCE($4::jsonb, playerallowlist),
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:190:       updatedat = NOW()
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:191:     WHERE tenantid = $1`,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:200:  return res.json({ ok: true, tenant: serializeTenant(fresh) });
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:214:  const user = await one(`SELECT id, email, username FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:216:  const count = await one(`SELECT COUNT(*)::int AS c FROM tenantusers WHERE tenantid = $1`, [tenant.id]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:220:  const existing = await one(`SELECT userid FROM tenantusers WHERE tenantid = $1 AND userid = $2`, [tenant.id, user.id]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:222:  await rows(`INSERT INTO tenantusers (tenantid, userid, role) VALUES ($1, $2, $3)`, [tenant.id, user.id, role]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:234:  const removed = await one(`DELETE FROM tenantusers WHERE tenantid = $1 AND userid = $2 RETURNING userid`, [tenant.id, userid]);
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:260:    tenant: serializeTenant(tenant),
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:137:         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:144:           updatedat = NOW()`,
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:182:  const started = Date.now();
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:188:      `SELECT refkey, refid, 1 - (embedding <=> $1::vector) AS score, metadata, contenttext
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:190:       WHERE tenantid = $2 AND kind = $3
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:191:       ORDER BY embedding <=> $1::vector
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:192:       LIMIT $4`,
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:216:    took: Date.now() - started,
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:250:      `SELECT kind, COUNT(*)::int AS count FROM vectorembeddings WHERE tenantid = $1 GROUP BY kind`,
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:273:    const res = await one(`DELETE FROM vectorembeddings WHERE tenantid = $1 RETURNING id`, [slug]);
+mini-services/animaxia-backend/modules/users/admin-users.js:84:      `SELECT id, username, email, role FROM users WHERE id = $1`,
+mini-services/animaxia-backend/modules/users/admin-users.js:101:      const count = await one(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin'`);
+mini-services/animaxia-backend/modules/users/admin-users.js:113:      await rows(`UPDATE users SET banned = $1 WHERE id = $2`, [banned, targetId]);
+mini-services/animaxia-backend/modules/users/admin-users.js:116:      await rows(`UPDATE users SET role = $1 WHERE id = $2`, [isadmin ? 'admin' : 'user', targetId]);
+mini-services/animaxia-backend/modules/users/admin-users.js:119:      await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE userid = $1`, [targetId]);
+mini-services/animaxia-backend/modules/users/admin-users.js:124:       FROM users WHERE id = $1`,
+mini-services/animaxia-backend/modules/users/auth-extra-migrations.js:33:    createdat TIMESTAMPTZ DEFAULT now()
+mini-services/animaxia-backend/modules/users/auth.js:55:  const nowSec = Math.floor(Date.now() / 1000);
+mini-services/animaxia-backend/modules/users/auth.js:102:/* ------------------------------ user serialization ---------------------------- */
+mini-services/animaxia-backend/modules/users/auth.js:124:  return one(`SELECT * FROM users WHERE id = $1`, [Number(id)]);
+mini-services/animaxia-backend/modules/users/auth.js:146:    `INSERT INTO refreshtokens (userid, tokenhash, expiresat, tenantid) VALUES ($1, $2, NOW() + ($3::text)::interval, $4)`,
+mini-services/animaxia-backend/modules/users/auth.js:158:     WHERE rt.tokenhash = $1 AND rt.revoked = FALSE AND rt.expiresat > NOW()`,
+mini-services/animaxia-backend/modules/users/auth.js:171:    `UPDATE refreshtokens SET revoked = TRUE WHERE tokenhash = $1 AND revoked = FALSE RETURNING id`,
+mini-services/animaxia-backend/modules/users/auth.js:257:    const existing = await one(`SELECT id, email FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+mini-services/animaxia-backend/modules/users/auth.js:268:    const adminCount = await one(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin'`);
+mini-services/animaxia-backend/modules/users/auth.js:273:       VALUES ($1, $2, $3, $4, '{}'::jsonb)
+mini-services/animaxia-backend/modules/users/auth.js:274:       RETURNING *`,
+mini-services/animaxia-backend/modules/users/auth.js:288:           VALUES ($1, $2, 'verify-email', NOW() + interval '24 hours')`,
+mini-services/animaxia-backend/modules/users/auth.js:302:        await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(inserted.id)]);
+mini-services/animaxia-backend/modules/users/auth.js:343:    const row = await one(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+mini-services/animaxia-backend/modules/users/auth.js:364:    await rows(`UPDATE users SET lastloginat = NOW() WHERE id = $1`, [Number(row.id)]);
+mini-services/animaxia-backend/modules/users/auth.js:398:    await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE id = $1`, [Number(row.id)]);
+mini-services/animaxia-backend/modules/users/auth.js:421:       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
+mini-services/animaxia-backend/modules/users/auth.js:422:       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history,
+mini-services/animaxia-backend/modules/users/auth.js:423:       (SELECT COUNT(*)::int FROM comments WHERE userid = $1) AS comments`,
+mini-services/animaxia-backend/modules/users/auth.js:444:       WHERE token = $1 AND purpose = 'verify-email' AND usedat IS NULL AND expiresat > NOW()`,
+mini-services/animaxia-backend/modules/users/auth.js:450:    await rows(`UPDATE emailtokens SET usedat = NOW() WHERE token = $1`, [token]);
+mini-services/animaxia-backend/modules/users/auth.js:451:    await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(row.userid)]);
+mini-services/animaxia-backend/modules/users/auth.js:474:    await rows(`UPDATE users SET twofasecret = $1 WHERE id = $2`, [secret, req.user.id]);
+mini-services/animaxia-backend/modules/users/auth.js:499:    await rows(`UPDATE users SET twofaenabled = TRUE WHERE id = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/users/auth.js:520:    await rows(`UPDATE users SET twofasecret = NULL, twofaenabled = FALSE WHERE id = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/users/auth.js:548:    const user = await one(`SELECT id, email, username FROM users WHERE email = $1`, [normalized]);
+mini-services/animaxia-backend/modules/users/auth.js:557:         VALUES ($1, $2, NOW() + ($3::text)::interval)`,
+mini-services/animaxia-backend/modules/users/auth.js:613:       WHERE u.email = $1 AND pr.codehash = $2 AND pr.used = FALSE AND pr.expiresat > NOW()
+mini-services/animaxia-backend/modules/users/auth.js:621:    await rows(`UPDATE passwordresets SET used = TRUE WHERE id = $1`, [Number(reset.id)]);
+mini-services/animaxia-backend/modules/users/auth.js:622:    await rows(`UPDATE users SET passwordhash = $1 WHERE id = $2`, [hashPassword(newPassword), Number(reset.userid)]);
+mini-services/animaxia-backend/modules/users/auth.js:624:    await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE userid = $1 AND revoked = FALSE`, [Number(reset.userid)]);
+mini-services/animaxia-backend/modules/users/playlists.js:62:/** Serialize a playlist row into the public playlist shape. */
+mini-services/animaxia-backend/modules/users/playlists.js:77:/** Serialize a playlist-items JOIN row (playlistitems × content) — the rating
+mini-services/animaxia-backend/modules/users/playlists.js:96:  return one(`SELECT * FROM playlists WHERE id = $1 AND userid = $2`, [id, userid]);
+mini-services/animaxia-backend/modules/users/playlists.js:108:            (SELECT COUNT(*)::int FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemcount,
+mini-services/animaxia-backend/modules/users/playlists.js:119:     WHERE p.userid = $1
+mini-services/animaxia-backend/modules/users/playlists.js:137:    `INSERT INTO playlists (userid, title, description) VALUES ($1, $2, $3) RETURNING *`,
+mini-services/animaxia-backend/modules/users/playlists.js:163:     WHERE pi.playlistid = $1
+mini-services/animaxia-backend/modules/users/playlists.js:205:    `UPDATE playlists SET ${sets.join(', ')}, updatedat = NOW()
+mini-services/animaxia-backend/modules/users/playlists.js:207:     RETURNING *`,
+mini-services/animaxia-backend/modules/users/playlists.js:226:    `DELETE FROM playlists WHERE id = $1 AND userid = $2 RETURNING id`,
+mini-services/animaxia-backend/modules/users/playlists.js:255:  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/users/playlists.js:261:     SELECT $1, $2, COALESCE(MAX(position), 0) + 1 FROM playlistitems WHERE playlistid = $1
+mini-services/animaxia-backend/modules/users/playlists.js:263:     RETURNING id, position`,
+mini-services/animaxia-backend/modules/users/playlists.js:269:  await rows(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/users/playlists.js:296:    `DELETE FROM playlistitems WHERE playlistid = $1 AND contentid = $2 RETURNING position`,
+mini-services/animaxia-backend/modules/users/playlists.js:303:    `UPDATE playlistitems SET position = position - 1 WHERE playlistid = $1 AND position > $2`,
+mini-services/animaxia-backend/modules/users/playlists.js:306:  await rows(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [id]);
+mini-services/animaxia-backend/modules/users/playlists.js:330:     WHERE pi.playlistid = $1
+mini-services/animaxia-backend/modules/users/profile.js:108:       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
+mini-services/animaxia-backend/modules/users/profile.js:109:       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history,
+mini-services/animaxia-backend/modules/users/profile.js:110:       (SELECT COUNT(*)::int FROM comments WHERE userid = $1) AS comments`,
+mini-services/animaxia-backend/modules/users/profile.js:161:    sets.push(`preferences = $${params.length}::jsonb`);
+mini-services/animaxia-backend/modules/users/profile.js:169:  const updated = await one(`UPDATE users SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
+mini-services/animaxia-backend/modules/users/profile.js:184:    `UPDATE users SET avatar = $2 WHERE id = $1 RETURNING *`,
+mini-services/animaxia-backend/modules/users/profile.js:200:     WHERE w.userid = $1
+mini-services/animaxia-backend/modules/users/profile.js:214:  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/users/profile.js:219:    `SELECT id FROM watchlist WHERE userid = $1 AND contentid = $2`,
+mini-services/animaxia-backend/modules/users/profile.js:226:    const countRow = await one(`SELECT COUNT(*)::int AS count FROM watchlist WHERE userid = $1`, [req.user.id]);
+mini-services/animaxia-backend/modules/users/profile.js:239:    `INSERT INTO watchlist (userid, contentid) VALUES ($1, $2)
+mini-services/animaxia-backend/modules/users/profile.js:240:     ON CONFLICT (userid, contentid) DO NOTHING RETURNING id`,
+mini-services/animaxia-backend/modules/users/profile.js:253:    `DELETE FROM watchlist WHERE userid = $1 AND contentid = $2 RETURNING id`,
+mini-services/animaxia-backend/modules/users/profile.js:269:     WHERE h.userid = $1
+mini-services/animaxia-backend/modules/users/profile.js:271:     LIMIT $2`,
+mini-services/animaxia-backend/modules/users/profile.js:304:  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+mini-services/animaxia-backend/modules/users/profile.js:309:     VALUES ($1, $2, $3, NOW())
+mini-services/animaxia-backend/modules/users/profile.js:311:     DO UPDATE SET progress = EXCLUDED.progress, watchedat = NOW()`,
+mini-services/animaxia-backend/modules/users/profile.js:320:       WHERE userid = $1 AND id NOT IN (
+mini-services/animaxia-backend/modules/users/profile.js:321:         SELECT id FROM watchhistory WHERE userid = $1
+mini-services/animaxia-backend/modules/users/profile.js:323:         LIMIT $2
+mini-services/animaxia-backend/modules/users/profile.js:348:    `UPDATE users SET preferences = $2::jsonb WHERE id = $1 RETURNING *`,
+mini-services/animaxia-backend/modules/users/totp.js:78:export function totpCode(secret, timeStep = Math.floor(Date.now() / 1000 / STEP_SECONDS)) {
+mini-services/animaxia-backend/modules/users/totp.js:105:  const currentStep = Math.floor(Date.now() / 1000 / STEP_SECONDS);
+mini-services/animaxia-backend/modules/workers/tasks/thumbnail.mjs:144:    const res = await query('SELECT id, title, type FROM content WHERE id = $1', [Number(contentId)]);
+mini-services/animaxia-backend/modules/workers/tasks/thumbnail.mjs:158:        `INSERT INTO thumbnailcache (file, svg, contentid) VALUES ($1, $2, $3)
+mini-services/animaxia-backend/modules/workers/workers.js:258:  nextRunAt: REFRESH_INTERVAL_MS > 0 ? new Date(Date.now() + REFRESH_INTERVAL_MS).toISOString() : null,
+mini-services/animaxia-backend/modules/workers/workers.js:293:    const countRow = await one('SELECT COUNT(*)::int AS n FROM thumbnailcache');
+mini-services/animaxia-backend/modules/workers/workers.js:302:        `INSERT INTO thumbnailcache (file, svg, contentid) VALUES ($1, $2, $3)
+mini-services/animaxia-backend/modules/workers/workers.js:439:    const row = await one('SELECT svg FROM thumbnailcache WHERE file = $1', [file]);

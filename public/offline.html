@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#e11d48" />
+  <title>Ești offline — Animaxia</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0a0a10;
+      color: #f4f4f5;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      padding: 24px;
+    }
+    .card {
+      max-width: 420px;
+      width: 100%;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: -0.02em;
+    }
+    .logo .mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, #e11d48, #d946ef);
+      box-shadow: 0 10px 30px rgba(225, 29, 72, 0.35);
+    }
+    .logo .mark svg { display: block; }
+    .logo .x { color: #fb7185; }
+    .title { font-size: 18px; font-weight: 700; }
+    .msg {
+      font-size: 14px;
+      line-height: 1.6;
+      color: #a1a1aa;
+    }
+    button {
+      border: none;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      color: #fff;
+      background: #e11d48;
+      padding: 12px 26px;
+      border-radius: 12px;
+      transition: background 0.15s ease;
+    }
+    button:hover { background: #f43f5e; }
+    button:focus-visible { outline: 2px solid #fb7185; outline-offset: 2px; }
+    .hint { font-size: 12px; color: #52525b; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="logo" aria-label="Animaxia">
+      <span class="mark" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M7 4 L19 12 L7 20 Z"/></svg>
+      </span>
+      <span>ANIMA<span class="x">XIA</span></span>
+    </div>
+    <div>
+      <h1 class="title">Ești offline</h1>
+      <p class="msg" style="margin-top: 8px;">
+        Conexiunea la internet lipsește momentan — conținutul cache-uit este disponibil,
+        iar restul platformei revine imediat ce te reconectezi.
+      </p>
+    </div>
+    <button type="button" onclick="location.reload()">Reîncearcă</button>
+    <p class="hint">Pagină statică Animaxia · funcționează fără conexiune</p>
+  </main>
+</body>
+</html>

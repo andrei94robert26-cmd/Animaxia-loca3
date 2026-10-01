@@ -1,0 +1,416 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "uid": "faza23-pipeline",
+  "title": "FAZA 23 · Pipeline FAZA 18",
+  "description": "Pipeline-ul de căutare FAZA 18 — cele 10 straturi: anti-spam, rate-limit, cooldown, queue, priority, windowing, dedup, batching, cache, neon-fts. Date re-expuse din /api/search/status (scrape 10s).",
+  "tags": [
+    "animaxia",
+    "faza23",
+    "observability"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Anti-spam hits",
+      "type": "timeseries",
+      "description": "Strat 1 — interogări respinse (tooLong/control chars/repeat).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_antisam_hits_total",
+          "legendFormat": "anti-spam respinse",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Rate-limit hits",
+      "type": "timeseries",
+      "description": "Strat 2 — token bucket per client.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_ratelimit_hits_total",
+          "legendFormat": "rate-limit",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cooldown (served + deprioritized)",
+      "type": "timeseries",
+      "description": "Strat 3 — căutări repetitive servite din cooldown.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_cooldown_served_total",
+          "legendFormat": "served",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_cooldown_deprioritized_total",
+          "legendFormat": "deprioritized",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Queue length + inflight",
+      "type": "timeseries",
+      "description": "Strat 4 — coada (maxConcurrency 8, alertă la >500).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_queue_length",
+          "legendFormat": "queueDepth",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_queue_inflight",
+          "legendFormat": "inflight",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Windowing + batching + dedup",
+      "type": "timeseries",
+      "description": "Straturi 6-8 — windowing (rate/s), dedup, batching.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_batching_batches_total",
+          "legendFormat": "batches",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_dedup_coalesced_total",
+          "legendFormat": "dedup coalesced",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Cache hits / misses",
+      "type": "timeseries",
+      "description": "Strat 9 — cache FTS (alertă miss rate >80% pe 10m).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_cache_hits_total",
+          "legendFormat": "hits",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_cache_misses_total",
+          "legendFormat": "misses",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "FTS execuții + erori",
+      "type": "timeseries",
+      "description": "Strat 10 — motorul FTS real (pg_trgm).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_requests_total",
+          "legendFormat": "execuții",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_pipeline_rejections_total",
+          "legendFormat": "erori",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "FTS latency p95 (ms)",
+      "type": "timeseries",
+      "description": "Alertă warning la >500ms (animaxia-fts-latency-high).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_fts_latency_p95_ms",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Sursă de date",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "animaxia-prometheus-global",
+          "value": "animaxia-prometheus-global"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "timepicker": {},
+  "weekStart": ""
+}

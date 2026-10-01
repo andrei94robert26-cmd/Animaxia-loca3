@@ -1,0 +1,1241 @@
+    84→ * score). Rolling p50/p95 latency over the last 50 queries feeds /status.
+    85→ */
+    86→
+    87→import express from 'express';
+    88→import { rows, one, parseJsonb } from '../platform/sql.js';
+    89→import { requireAuth, requireAdmin } from '../users/auth.js';
+    90→import { events } from '../platform/events.js';
+    91→import { logger } from '../../utils/logger.js';
+    92→import { computeShardIdFromContentId, shardCount, logicalAddressSpace, SHARD_SPAN_IDS } from '../sharding/model.js'; // FAZA 13 (sharding): searchdocs.shardid = catalog range shard of the contentid; FAZA 14: logical 30B address space
+    93→import { searchCluster } from '../../services/search-cluster/index.js'; // FAZA 13 (Task 13-3): search cluster — FTS fan-out over per-shard searchdocs nodes
+    94→import {
+    95→  searchFlowExecute,
+    96→  resolveSearchPriority,
+    97→  resolveSearchShard,
+    98→  searchFlowStatusSnapshot,
+    99→  searchWindowingSnapshot,
+   100→  searchFlowConsoleSnapshot,
+   101→  updateSearchFlowConfig,
+   102→} from './flow.js'; // FAZA 15: search flow control (queue + priority + windowing)
+   103→import {
+   104→  searchRateGate,
+   105→  searchRateComplete,
+   106→  searchRateStatusSnapshot,
+   107→  searchRateBurstSnapshot,
+   108→  searchRateConsoleSnapshot,
+   109→  updateSearchRateConfig,
+   110→} from './rate.js'; // FAZA 16: search rate management (rate-limit + cooldown + anti-spam + burst)
+   111→import {
+   112→  searchOptExecute,
+   113→  searchOptEnabled,
+   114→  searchOptBatchingSnapshot,
+   115→  searchOptCacheSnapshot,
+   116→  searchOptDedupSnapshot,
+   117→  searchOptPipelineSnapshot,
+   118→  searchOptConsoleSnapshot,
+   119→  updateSearchOptConfig,
+   120→} from './opt.js'; // FAZA 17: search optimization layer (dedup + batching + cache)
+   121→
+   122→/**
+   123→ * FAZA 16 admission helper — runs the rate gate for one search request.
+   124→ * Returns true when the request was REJECTED (the 429 + Retry-After are
+   125→ * already sent — the caller just returns). Blocked requests never reach the
+   126→ * FAZA 15 flow queue, never touch Neon and always get an explicit answer
+   127→ * with retryInMs (nothing is dropped silently).
+   128→ */
+   129→function rejectIfRateLimited(req, res, kind, describe) {
+   130→  const gate = searchRateGate(req, kind);
+   131→  if (gate.ok) return false;
+   132→  const retryAfterSec = Math.max(1, Math.ceil(gate.body.retryInMs / 1000));
+   133→  res.set('Retry-After', String(retryAfterSec));
+   134→  logger.warn(
+   135→    `[search] FAZA 16 gate rejected ${kind} ${describe} → ${gate.body.error} (retryInMs=${gate.body.retryInMs}, identity=${gate.identity}, shard=${gate.shardId})`,
+   136→  );
+   137→  res.status(429).json(gate.body);
+   138→  return true;
+   139→}
+   140→
+   141→const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+   142→const ENGINE = 'animaxia-neon-fts';
+   143→const SYNC_DEBOUNCE_MS = 3000;
+   144→const LATENCY_WINDOW = 50;
+   145→const SYNC_CHUNK = 25; // rows per multi-row upsert
+   146→
+   147→/* FAZA 17-a hardening constants. */
+   148→const OFFSET_CAP = 10000; // offset pagination ceiling (rows)
+   149→const QUERY_TIMEOUT_MS = 8000; // per-query budget before a 504
+   150→
+   151→/* FAZA 17-a ops counters — exported via searchOpsSnapshot(). */
+   152→const searchOps = { coalesced: 0, errors: 0, offsetCapped: 0 };
+   153→
+   154→/** FAZA 17-a: { coalesced, errors, offsetCapped } for /api/platform/stability. */
+   155→export function searchOpsSnapshot() {
+   156→  return { ...searchOps };
+   157→}
+   158→
+   159→/* --------------------------------- cursor utils ------------------------------- */
+   160→
+   161→/** base64url encode/decode (no padding issues, URL-safe). */
+   162→function b64urlEncode(obj) {
+   163→  return Buffer.from(JSON.stringify(obj), 'utf8')
+   164→    .toString('base64')
+   165→    .replace(/\+/g, '-')
+   166→    .replace(/\//g, '_')
+   167→    .replace(/=+$/, '');
+   168→}
+   169→
+   170→function b64urlDecode(text) {
+   171→  try {
+   172→    const padded = String(text).replace(/-/g, '+').replace(/_/g, '/');
+   173→    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+   174→  } catch {
+   175→    return null;
+   176→  }
+   177→}
+   178→
+   179→/**
+   180→ * Build the next cursor from the LAST row of the current page, per sort.
+   181→ * Filter-only + no q → effective sort is contentid (see effectiveSort).
+   182→ */
+   183→function buildNextCursor({ sort, lastRow, pageNumber }) {
+   184→  if (!lastRow) return null;
+   185→  const id = Number(lastRow.id);
+   186→  if (!Number.isFinite(id)) return null;
+   187→  let payload = null;
+   188→  if (sort === 'year') payload = { y: lastRow._year ?? null, id };
+   189→  else if (sort === 'rating') payload = { r: lastRow._rating ?? null, id };
+   190→  else if (sort === 'title') payload = { t: lastRow._title ?? null, id };
+   191→  else if (sort === 'score') payload = { s: Number(lastRow._score ?? 0), id };
+   192→  else payload = { id }; // contentid keyset (filter-only)
+   193→  payload.p = pageNumber; // page estimate — incremented on each cursor hop
+   194→  return b64urlEncode(payload);
+   195→}
+   196→
+   197→/**
+   198→ * Decode + validate the cursor payload for a given effective sort.
+   199→ * @returns {{ payload: object, where: string, params: any[] } | { error: string }}
+   200→ */
+   201→function cursorContinuation(effectiveSort, cursorText) {
+   202→  const payload = b64urlDecode(cursorText);
+   203→  if (!payload || typeof payload !== 'object' || !Number.isFinite(Number(payload.id))) {
+   204→    return { error: 'Invalid cursor' };
+   205→  }
+   206→  const id = Number(payload.id);
+   207→  const params = [];
+   208→  const P = (v) => {
+   209→    params.push(v);
+   210→    return `$${params.length}`;
+   211→  };
+   212→
+   213→  if (effectiveSort === 'score') {
+   214→    const s = Number(payload.s);
+   215→    if (!Number.isFinite(s)) return { error: 'Invalid cursor (missing s)' };
+   216→    const sp = P(s);
+   217→    const ip = P(id);
+   218→    return { payload, where: `(t.score < ${sp} OR (t.score = ${sp} AND t.contentid > ${ip}))`, params };
+   219→  }
+   220→  if (effectiveSort === 'year') {
+   221→    const y = Number(payload.y);
+   222→    if (!Number.isFinite(y)) return { error: 'Invalid cursor (missing y)' };
+   223→    const yp = P(y);
+   224→    const ip = P(id);
+   225→    return { payload, where: `(t.year < ${yp} OR (t.year = ${yp} AND t.contentid > ${ip}))`, params };
+   226→  }
+   227→  if (effectiveSort === 'rating') {
+   228→    const r = Number(payload.r);
+   229→    if (!Number.isFinite(r)) return { error: 'Invalid cursor (missing r)' };
+   230→    const rp = P(r);
+   231→    const ip = P(id);
+   232→    return { payload, where: `(t.rating < ${rp} OR (t.rating = ${rp} AND t.contentid > ${ip}))`, params };
+   233→  }
+   234→  if (effectiveSort === 'title') {
+   235→    const t = payload.t;
+   236→    if (typeof t !== 'string') return { error: 'Invalid cursor (missing t)' };
+   237→    const tp = P(t);
+   238→    const ip = P(id);
+   239→    return { payload, where: `(t.title > ${tp} OR (t.title = ${tp} AND t.contentid > ${ip}))`, params };
+   240→  }
+   241→  // contentid keyset (filter-only / no q)
+   242→  const ip = P(id);
+   243→  return { payload, where: `t.contentid > ${ip}`, params };
+   244→}
+   245→
+   246→/* ------------------------------ metadata helpers ----------------------------- */
+   247→
+   248→/** Coerce a metadata value to a clean string array (strings or {name} objects). */
+   249→function toNameArray(value) {
+   250→  if (value == null) return [];
+   251→  const list = Array.isArray(value) ? value : [value];
+   252→  const out = [];
+   253→  for (const item of list) {
+   254→    if (typeof item === 'string') {
+   255→      const name = item.trim();
+   256→      if (name) out.push(name);
+   257→    } else if (item && typeof item === 'object') {
+   258→      const name = String(item.name ?? '').trim();
+   259→      if (name) out.push(name);
+   260→    }
+   261→  }
+   262→  return out;
+   263→}
+   264→
+   265→function toIntOrNull(value) {
+   266→  const n = parseInt(value, 10);
+   267→  return Number.isInteger(n) ? n : null;
+   268→}
+   269→
+   270→function toFloatOrNull(value) {
+   271→  const n = Number(value);
+   272→  return Number.isFinite(n) ? n : null;
+   273→}
+   274→
+   275→/** Build the FTS document text: title + genres + first 500 chars of overview. */
+   276→function buildTsvText(title, genres, meta) {
+   277→  const overview = String(meta.overview || meta.synopsis || meta.description || '');
+   278→  return [String(title || ''), genres.join(' '), overview.slice(0, 500)].join(' ').trim();
+   279→}
+   280→
+   281→/* --------------------------------- index sync -------------------------------- */
+   282→
+   283→let syncPromise = null; // async lock — concurrent ensureSynced() calls coalesce
+   284→let lastSync = null; // ISO timestamp of the last successful sync
+   285→let dirty = true; // set at boot and on every content:changed
+   286→
+   287→async function syncIndex() {
+   288→  const raw = await rows(
+   289→    'SELECT id, externalid, type, title, metadata, thumbnail, createdat FROM content',
+   290→  );
+   291→
+   292→  let synced = 0;
+   293→  for (let i = 0; i < raw.length; i += SYNC_CHUNK) {
+   294→    const slice = raw.slice(i, i + SYNC_CHUNK);
+   295→    const values = [];
+   296→    const tuples = slice.map((row, j) => {
+   297→      const meta = parseJsonb(row.metadata, {});
+   298→      const genres = toNameArray(meta.genres);
+   299→      const actors = toNameArray(meta.actors ?? meta.cast);
+   300→      const studios = toNameArray(meta.studios ?? meta.studio);
+   301→      const tsvText = buildTsvText(row.title, genres, meta);
+   302→      // FAZA 13 (sharding): searchdocs carries its shard id = the catalog
+   303→      // RANGE shard of the contentid it indexes (ids < 1B → 0, legacy-safe).
+   304→      const shardid = computeShardIdFromContentId(row.id);
+   305→      const base = j * 12;
+   306→      values.push(
+   307→        Number(row.id),
+   308→        row.externalid ?? null,
+   309→        row.type ?? null,
+   310→        row.title ?? 'untitled',
+   311→        tsvText,
+   312→        toIntOrNull(meta.year),
+   313→        toFloatOrNull(meta.rating ?? meta.score),
+   314→        genres,
+   315→        actors,
+   316→        studios,
+   317→        row.type ?? null,
+   318→        shardid,
+   319→      );
+   320→      const b = (k) => `$${base + k}`;
+   321→      return `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}::text[],${b(9)}::text[],${b(10)}::text[],${b(11)},${b(12)},NOW())`;
+   322→    });
+   323→    await rows(
+   324→      `INSERT INTO searchdocs
+   325→         (contentid, externalid, type, title, tsv, year, rating, genres, actors, studios, category, shardid, syncedat)
+   326→       VALUES ${tuples.join(', ')}
+   327→       ON CONFLICT (contentid) DO UPDATE SET
+   328→         externalid = EXCLUDED.externalid,
+   329→         type = EXCLUDED.type,
+   330→         title = EXCLUDED.title,
+   331→         tsv = EXCLUDED.tsv,
+   332→         year = EXCLUDED.year,
+   333→         rating = EXCLUDED.rating,
+   334→         genres = EXCLUDED.genres,
+   335→         actors = EXCLUDED.actors,
+   336→         studios = EXCLUDED.studios,
+   337→         category = EXCLUDED.category,
+   338→         shardid = EXCLUDED.shardid,
+   339→         syncedat = NOW()`,
+   340→      values,
+   341→    );
+   342→    synced += slice.length;
+   343→  }
+   344→
+   345→  // Drop stale docs (content rows deleted since the last sync).
+   346→  try {
+   347→    await rows('DELETE FROM searchdocs WHERE contentid NOT IN (SELECT id FROM content)');
+   348→  } catch (err) {
+   349→    logger.warn(`[search] stale-doc cleanup skipped: ${err.message}`);
+   350→  }
+   351→
+   352→  lastSync = new Date().toISOString();
+   353→  dirty = false;
+   354→  return synced;
+   355→}
+   356→
+   357→/** Rebuild once under an async lock; concurrent callers await the same run. */
+   358→async function ensureSynced() {
+   359→  if (!dirty && lastSync) return;
+   360→  if (!syncPromise) {
+   361→    syncPromise = syncIndex().finally(() => {
+   362→      syncPromise = null;
+   363→    });
+   364→  }
+   365→  await syncPromise;
+   366→}
+   367→
+   368→/** Forced full resync (POST /index): waits for any in-flight sync, then runs one. */
+   369→async function forceResync() {
+   370→  while (syncPromise) {
+   371→    await syncPromise.catch(() => {});
+   372→  }
+   373→  syncPromise = syncIndex().finally(() => {
+   374→    syncPromise = null;
+   375→  });
+   376→  return syncPromise;
+   377→}
+   378→
+   379→// content:changed → dirty immediately; debounced background resync (3s).
+   380→let resyncTimer = null;
+   381→events.on('content:changed', () => {
+   382→  dirty = true;
+   383→  if (resyncTimer) clearTimeout(resyncTimer);
+   384→  resyncTimer = setTimeout(() => {
+   385→    resyncTimer = null;
+   386→    ensureSynced().catch((err) => logger.warn(`[search] background resync failed: ${err.message}`));
+   387→  }, SYNC_DEBOUNCE_MS);
+   388→  if (typeof resyncTimer.unref === 'function') resyncTimer.unref();
+   389→});
+   390→
+   391→/* ------------------------------ latency tracking ----------------------------- */
+   392→
+   393→const latencies = []; // took ms of the last 50 /advanced queries
+   394→
+   395→function recordLatency(ms) {
+   396→  latencies.push(ms);
+   397→  if (latencies.length > LATENCY_WINDOW) latencies.shift();
+   398→}
+   399→
+   400→function percentile(sorted, p) {
+   401→  if (sorted.length === 0) return 0;
+   402→  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+   403→  return Number(sorted[idx].toFixed(2));
+   404→}
+   405→
+   406→/** Rolling p50/p95 snapshot — consumed by /status and the scale report. */
+   407→export function searchLatencySnapshot() {
+   408→  const sorted = [...latencies].sort((a, b) => a - b);
+   409→  return {
+   410→    p50Ms: percentile(sorted, 0.5),
+   411→    p95Ms: percentile(sorted, 0.95),
+   412→    samples: latencies.length,
+   413→  };
+   414→}
+   415→
+   416→/* ----------------------------- query construction ---------------------------- */
+   417→
+   418→const SORTS = new Set(['score', 'year', 'rating', 'title']);
+   419→
+   420→/** Normalize a joined row to the canonical content shape + _score. */
+   421→function normalizeHit(row) {
+   422→  if (!row) return null;
+   423→  return {
+   424→    id: Number(row.id),
+   425→    externalid: row.externalid ?? null,
+   426→    type: row.type ?? null,
+   427→    title: row.title ?? null,
+   428→    metadata: parseJsonb(row.metadata, {}),
+   429→    thumbnail: row.thumbnail === undefined ? null : row.thumbnail,
+   430→    createdat:
+   431→      row.createdat instanceof Date ? row.createdat.toISOString() : String(row.createdat ?? ''),
+   432→    _score: row._score == null ? 0 : Number(Number(row._score).toFixed(6)),
+   433→  };
+   434→}
+   435→
+   436→/**
+   437→ * Run one advanced query against searchdocs (joined back to content).
+   438→ * Filter fragments are built once and shared by the count + data statements.
+   439→ * FAZA 17-a: `cursor` (base64url payload) switches to keyset pagination —
+   440→ * the ORDER BY becomes the cursor continuation WHERE and OFFSET is dropped;
+   441→ * `effectiveSort` is what actually orders the result (contentid keyset when
+   442→ * there is no text query and the caller asked for the default 'score' sort,
+   443→ * because score would be constant 0 for every row).
+   444→ */
+   445→async function runAdvancedQuery({
+   446→  q,
+   447→  type,
+   448→  genre,
+   449→  year,
+   450→  minRating,
+   451→  actor,
+   452→  studio,
+   453→  category,
+   454→  sort,
+   455→  fuzzyEnabled,
+   456→  limit,
+   457→  page,
+   458→  cursor = null,
+   459→}) {
+   460→  const params = [];
+   461→  const P = (v) => {
+   462→    params.push(v);
+   463→    return `$${params.length}`;
+   464→  };
+   465→
+   466→  // Effective sort: filter-only (no q) with default 'score' → contentid keyset.
+   467→  const effectiveSort = !q && sort === 'score' ? 'contentid' : sort;
+   468→
+   469→  // Keyset continuation (cursor present) — validated per effective sort.
+   470→  let cursorPayload = null;
+   471→  let cursorWhere = null;
+   472→  let cursorParams = [];
+   473→  if (cursor) {
+   474→    const decoded = cursorContinuation(effectiveSort, cursor);
+   475→    if (decoded.error) {
+   476→      const err = new Error(decoded.error);
+   477→      err.status = 400;
+   478→      throw err;
+   479→    }
+   480→    cursorPayload = decoded.payload;
+   481→    cursorWhere = decoded.where;
+   482→    cursorParams = decoded.params;
+   483→  }
+   484→
+   485→  // Field filters (SQL-side, case-insensitive where array containment).
+   486→  const filters = [];
+   487→  if (type) filters.push(`s.type = ${P(type)}`);
+   488→  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${P(genre)})`);
+   489→  if (year != null) filters.push(`s.year = ${P(year)}`);
+   490→  if (actor) {
+   491→    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${P(actor)} || '%')`);
+   492→  }
+   493→  if (studio) {
+   494→    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${P(studio)} || '%')`);
+   495→  }
+   496→  if (category) filters.push(`s.category = ${P(category)}`);
+   497→  if (minRating != null) filters.push(`s.rating >= ${P(minRating)}`);
+   498→  const filterSql = filters.length ? ` AND ${filters.join(' AND ')}` : '';
+   499→
+   500→  // Text score expression (combined: ts_rank * 2 + similarity + prefix bonus).
+   501→  let scoreExpr = '0';
+   502→  let textMatch = '';
+   503→  if (q) {
+   504→    const qp = P(q);
+   505→    scoreExpr =
+   506→      `ts_rank(s.tsv, websearch_to_tsquery('simple', ${qp})) * 2` +
+   507→      ` + similarity(s.title, ${qp})` +
+   508→      ` + CASE WHEN s.title ILIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
+   509→    textMatch = `s.tsv @@ websearch_to_tsquery('simple', ${qp})`;
+   510→  }
+   511→
+   512→  const whereFor = (matchSql) => `WHERE (${matchSql || 'TRUE'})${filterSql}`;
+   513→
+   514→  // 1. FTS pass (or filter-only when q is empty).
+   515→  let matchSql = textMatch;
+   516→  let countRow = await one(
+   517→    `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+   518→    params,
+   519→  );
+   520→
+   521→  // 2. Trigram fuzzy fallback when the FTS pass matched nothing.
+   522→  //    `title % q` (pg_trgm, default 0.3 threshold) plus a looser
+   523→  //    similarity() > 0.1 guard so short typo'd queries still reach long
+   524→  //    titles (e.g. 'dunee' → 'Dune: Part Two - Wikipedia', sim ≈ 0.15).
+   525→  if (q && fuzzyEnabled && Number(countRow?.total ?? 0) === 0) {
+   526→    const words = q.split(/\s+/).filter(Boolean);
+   527→    const trigramClauses = [];
+   528→    for (const candidate of [q, ...words]) {
+   529→      const ph = P(`%${candidate}%`);
+   530→      trigramClauses.push(`s.title ILIKE ${ph}`);
+   531→    }
+   532→    const qSim = P(q);
+   533→    trigramClauses.push(`(s.title % ${qSim} OR similarity(s.title, ${qSim}) > 0.1)`);
+   534→    matchSql = `(${trigramClauses.join(' OR ')})`;
+   535→    countRow = await one(
+   536→      `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+   537→      params,
+   538→    );
+   539→  }
+   540→
+   541→  const total = Number(countRow?.total ?? 0);
+   542→  const maxScore = Number(Number(countRow?.maxscore ?? 0).toFixed(6));
+   543→
+   544→  // 3. Data page — subquery keeps the score expression, then joins content.
+   545→  //    FAZA 17-a: expose year/rating/title to JS for nextCursor construction;
+   546→  //    cursor mode replaces OFFSET with the keyset continuation predicate.
+   547→  const orderExpr =
+   548→    effectiveSort === 'year'
+   549→      ? 't.year DESC NULLS LAST, t.contentid ASC'
+   550→      : effectiveSort === 'rating'
+   551→        ? 't.rating DESC NULLS LAST, t.score DESC, t.contentid ASC'
+   552→        : effectiveSort === 'title'
+   553→          ? 't.title ASC, t.contentid ASC'
+   554→          : effectiveSort === 'contentid'
+   555→            ? 't.contentid ASC'
+   556→            : 't.score DESC, t.contentid ASC';
+   557→
+   558→  const limitPh = P(limit);
+   559→  const offsetPh = P((page - 1) * limit);
+   560→  // Cursor mode: continuation params come FIRST ($1..$n), then LIMIT; the
+   561→  // filter/score params are re-bound only inside the subquery — so build a
+   562→  // dedicated statement for each mode instead of renumbering dynamically.
+   563→  let dataSql;
+   564→  let dataParams;
+   565→  if (cursorWhere) {
+   566→    // Rebuild the subquery with a fresh parameter namespace for the cursor run
+   567→    // (filters + score expression are re-parameterized after the cursor slots).
+   568→    const subParams = [...cursorParams, limit];
+   569→    const sub = (v) => {
+   570→      subParams.push(v);
+   571→      return `$${subParams.length}`;
+   572→    };
+   573→    const cFilters = [];
+   574→    if (type) cFilters.push(`s.type = ${sub(type)}`);
+   575→    if (genre) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${sub(genre)})`);
+   576→    if (year != null) cFilters.push(`s.year = ${sub(year)}`);
+   577→    if (actor) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${sub(actor)} || '%')`);
+   578→    if (studio) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${sub(studio)} || '%')`);
+   579→    if (category) cFilters.push(`s.category = ${sub(category)}`);
+   580→    if (minRating != null) cFilters.push(`s.rating >= ${sub(minRating)}`);
+   581→    const cFilterSql = cFilters.length ? ` AND ${cFilters.join(' AND ')}` : '';
+   582→
+   583→    let cScoreExpr = '0';
+   584→    let cMatch = 'TRUE';
+   585→    // Single q slot, bound LAST (after cursor params + LIMIT) so every
+   586→    // placeholder references a parameter that exists in the bind array.
+   587→    let qParam = null;
+   588→    if (q) {
+   589→      qParam = sub(String(q));
+   590→      cScoreExpr =
+   591→        `ts_rank(s.tsv, websearch_to_tsquery('simple', ${qParam})) * 2` +
+   592→        ` + similarity(s.title, ${qParam})` +
+   593→        ` + CASE WHEN s.title ILIKE ${qParam} || '%' THEN 0.5 ELSE 0 END`;
+   594→      cMatch = `s.tsv @@ websearch_to_tsquery('simple', ${qParam})`;
+   595→    }
+   596→    // Fuzzy fallback consistency: when the FTS pass matched nothing the offset
+   597→    // run switched matchSql — mirror that for the cursor run using `total`.
+   598→    if (q && fuzzyEnabled && total === 0) {
+   599→      const words = q.split(/\s+/).filter(Boolean);
+   600→      const clauses = [q, ...words].map((candidate) => `s.title ILIKE ${sub(`%${candidate}%`)}`);
+   601→      clauses.push(`(s.title % ${qParam} OR similarity(s.title, ${qParam}) > 0.1)`);
+   602→      cMatch = `(${clauses.join(' OR ')})`;
+   603→    }
+   604→
+   605→    dataSql =
+   606→      `SELECT c.id, c.externalid, c.type, c.title, c.metadata, c.thumbnail, c.createdat,
+   607→              t.score AS _score, t.year AS _year, t.rating AS _rating, t.title AS _title
+   608→       FROM (
+   609→         SELECT s.contentid, s.year, s.rating, s.title, ${cScoreExpr} AS score
+   610→         FROM searchdocs s
+   611→         WHERE (${cMatch})${cFilterSql}
+   612→       ) t
+   613→       JOIN content c ON c.id = t.contentid
+   614→       WHERE ${cursorWhere}
+   615→       ORDER BY ${orderExpr}
+   616→       LIMIT $${cursorParams.length + 1}::int`;
+   617→    // LIMIT is the placeholder right after the cursor params (::int — a bare
+   618→    // parameter in LIMIT cannot be type-inferred by Postgres); the q/filter
+   619→    // slots follow it so every bound parameter is referenced by the statement.
+   620→    dataParams = subParams;
+   621→  } else {
+   622→    dataSql =
+   623→      `SELECT c.id, c.externalid, c.type, c.title, c.metadata, c.thumbnail, c.createdat,
+   624→              t.score AS _score, t.year AS _year, t.rating AS _rating, t.title AS _title
+   625→       FROM (
+   626→         SELECT s.contentid, s.year, s.rating, s.title, ${scoreExpr} AS score
+   627→         FROM searchdocs s
+   628→         ${whereFor(matchSql)}
+   629→       ) t
+   630→       JOIN content c ON c.id = t.contentid
+   631→       ORDER BY ${orderExpr}
+   632→       LIMIT ${limitPh} OFFSET ${offsetPh}`;
+   633→    dataParams = params;
+   634→  }
+   635→  const dataRows = await rows(dataSql, dataParams);
+   636→
+   637→  // Keyset paging estimates the page number by incrementing the cursor's `p`.
+   638→  const resultPage = cursor ? (Number(cursorPayload?.p) || 1) + 1 : page;
+   639→  const normalized = dataRows.map(normalizeHit).filter(Boolean);
+   640→  const lastRaw = dataRows.length ? dataRows[dataRows.length - 1] : null;
+   641→
+   642→  return {
+   643→    total,
+   644→    max_score: maxScore,
+   645→    data: normalized,
+   646→    page: resultPage,
+   647→    nextCursor: buildNextCursor({ sort: effectiveSort, lastRow: lastRaw, pageNumber: resultPage }),
+   648→    paginationMode: cursor ? 'cursor' : 'offset',
+   649→  };
+   650→}
+   651→
+   652→/* --------------------------- single-flight coalescing -------------------------- */
+   653→
+   654→/**
+   655→ * FAZA 17-a: identical concurrent /advanced requests share one promise.
+   656→ * Key = normalized query params; the map entry is removed on settle.
+   657→ */
+   658→const inflightSearch = new Map();
+   659→
+   660→function coalesceAdvanced(normalizedKey, run) {
+   661→  const existing = inflightSearch.get(normalizedKey);
+   662→  if (existing) {
+   663→    searchOps.coalesced += 1;
+   664→    return existing;
+   665→  }
+   666→  const promise = run().finally(() => {
+   667→    inflightSearch.delete(normalizedKey);
+   668→  });
+   669→  inflightSearch.set(normalizedKey, promise);
+   670→  return promise;
+   671→}
+   672→
+   673→/** Race a query promise against the 8s budget (loser is logged, not awaited). */
+   674→function withQueryTimeout(promise, describe) {
+   675→  let timer = null;
+   676→  const budget = new Promise((_, reject) => {
+   677→    timer = setTimeout(() => {
+   678→      const err = new Error('Search query timeout');
+   679→      err.status = 504;
+   680→      reject(err);
+   681→    }, QUERY_TIMEOUT_MS);
+   682→    if (typeof timer.unref === 'function') timer.unref();
+   683→  });
+   684→  return promise.then(
+   685→    (value) => {
+   686→      clearTimeout(timer);
+   687→      return value;
+   688→    },
+   689→    (err) => {
+   690→      clearTimeout(timer);
+   691→      throw err;
+   692→    },
+   693→  ).finally(() => {
+   694→    clearTimeout(timer);
+   695→    promise.catch((loser) => {
+   696→      // The lost race (if it also failed) must not become an unhandledRejection.
+   697→      logger.warn(`[search] query lost the timeout race (${describe}): ${loser?.message ?? loser}`);
+   698→    });
+   699→  });
+   700→}
+   701→
+   702→/**
+   703→ * FAZA 17-a stress-lab entry: one full /advanced query with small random
+   704→ * variations of q (deterministic latency measurement, no HTTP self-call).
+   705→ * @returns {{ tookMs: number, total: number, returned: number }}
+   706→ */
+   707→export async function runSearchLoad(q) {
+   708→  const startedAt = Date.now();
+   709→  const result = await runAdvancedQuery({
+   710→    q: String(q || 'dune'),
+   711→    type: null,
+   712→    genre: null,
+   713→    year: null,
+   714→    minRating: null,
+   715→    actor: null,
+   716→    studio: null,
+   717→    category: null,
+   718→    sort: 'score',
+   719→    fuzzyEnabled: true,
+   720→    limit: 20,
+   721→    page: 1,
+   722→  });
+   723→  await ensureSynced().catch(() => {});
+   724→  return {
+   725→    tookMs: Date.now() - startedAt,
+   726→    total: result.total,
+   727→    returned: result.data.length,
+   728→  };
+   729→}
+   730→
+   731→/* ---------------------------------- router ----------------------------------- */
+   732→
+   733→const router = express.Router();
+   734→
+   735→/** GET /api/search/advanced — Neon FTS + trigram fallback + SQL filters. Public. */
+   736→router.get('/advanced', wrap(async (req, res) => {
+   737→  const startedAt = Date.now();
+   738→  const q = req.query.q != null ? String(req.query.q).trim() : '';
+   739→
+   740→  const type = req.query.type ? String(req.query.type) : null;
+   741→  const genre = req.query.genre ? String(req.query.genre) : null;
+   742→  const actor = req.query.actor ? String(req.query.actor) : null;
+   743→  const studio = req.query.studio ? String(req.query.studio) : null;
+   744→  const category = req.query.category ? String(req.query.category) : null;
+   745→  const yearRaw = req.query.year != null && req.query.year !== '' ? String(req.query.year) : null;
+   746→  const minRatingRaw =
+   747→    req.query.minRating != null && req.query.minRating !== '' ? String(req.query.minRating) : null;
+   748→
+   749→  const sortRaw = req.query.sort ? String(req.query.sort) : 'score';
+   750→  const sort = SORTS.has(sortRaw) ? sortRaw : 'score';
+   751→  const fuzzy = req.query.fuzzy != null ? String(req.query.fuzzy) : 'true';
+   752→  const fuzzyEnabled = fuzzy !== 'false'; // default on
+   753→  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+   754→  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+   755→
+   756→  // year: integer equality; a non-integer year matches nothing (old semantics).
+   757→  let year = null;
+   758→  if (yearRaw != null) {
+   759→    year = parseInt(yearRaw, 10);
+   760→    if (!Number.isInteger(year)) {
+   761→      return res.json({ took: 0, total: 0, max_score: 0, page, limit, engine: ENGINE, data: [] });
+   762→    }
+   763→  }
+   764→  const minRating = minRatingRaw != null && Number.isFinite(Number(minRatingRaw)) ? Number(minRatingRaw) : null;
+   765→
+   766→  const hasFilters = Boolean(
+   767→    type || genre || year != null || minRating != null || actor || studio || category,
+   768→  );
+   769→  if (!q && !hasFilters) {
+   770→    return res.status(400).json({ error: 'Missing required query parameter: q (or at least one filter)' });
+   771→  }
+   772→
+   773→  // FAZA 17-a: raw cursor param (base64url JSON) — presence enables keyset mode.
+   774→  const cursorRaw = req.query.cursor != null && req.query.cursor !== '' ? String(req.query.cursor) : null;
+   775→
+   776→  // FAZA 17-a: offset pagination is capped — deep pages must use the cursor.
+   777→  // FAZA 15: the cap check is HOISTED above the flow queue — it is pure param
+   778→  // validation (identical expression in the legacy path and the cluster
+   779→  // service's queryFTS mirror: page*limit > OFFSET_CAP), so capped requests
+   780→  // fast-fail without being admitted to the search queue.
+   781→  if (!cursorRaw) {
+   782→    const offset = (page - 1) * limit;
+   783→    if (offset + limit > OFFSET_CAP) {
+   784→      searchOps.offsetCapped += 1;
+   785→      return res.status(400).json({
+   786→        error: `Offset pagination capped at ${OFFSET_CAP} rows — use cursor pagination (pass cursor param)`,
+   787→        useCursor: true,
+   788→      });
+   789→    }
+   790→  }
+   791→
+   792→  // FAZA 16 (Search Rate Management): the per-user pacing gate runs AFTER
+   793→  // pure param validation (missing q / offset cap already answered above —
+   794→  // they never burn a pacing slot) and BEFORE the FAZA 15 flow queue: ENTER
+   795→  // spam → 429 rate_limited, search-during-cooldown → 429 cooldown_active,
+   796→  // flood (≥ spamThreshold arrivals in spamWindowMs) → 429 spam_blocked.
+   797→  // Every rejection is explicit, carries retryInMs and never touches Neon.
+   798→  if (rejectIfRateLimited(req, res, 'advanced', `q=${q || '(filters)'}`)) {
+   799→    return; // 429 already sent — nothing queued, nothing executed
+   800→  }
+   801→
+   802→  // FAZA 15 (Search Flow Control): the execution (cluster fan-out OR legacy
+   803→  // single-index path — including ensureSynced) goes through the search flow
+   804→  // queue: priority lane (admin/ops/QA high, logged-in normal, anonymous
+   805→  // low), maxConcurrent bound and windowed dispatch (intervalMs × batchSize).
+   806→  // The queue ONLY schedules admission — the FTS executions inside run() are
+   807→  // the byte-identical FAZA 14 code paths, so results stay 100% real.
+   808→  const flowPriority = resolveSearchPriority(req);
+   809→  const flowShardId = resolveSearchShard(req);
+   810→  const useClusterPath = searchCluster.enabled() && !cursorRaw;
+   811→
+   812→  const { result: body, waitedMs: flowWaitedMs } = await searchFlowExecute({
+   813→    priority: flowPriority,
+   814→    shardId: flowShardId,
+   815→    kind: 'advanced',
+   816→    describe: `q=${q || '(filters)'}`,
+   817→    run: async () => {
+   818→      // FAZA 13 (Task 13-3): search cluster path — when enabled and the request
+   819→      // has NO cursor param, fan the query out over the per-shard searchdocs
+   820→      // nodes (queryOnShard, merge + dedupe). Keyset (cursor) requests ALWAYS
+   821→      // stay on the legacy single-index path; when the cluster is disabled
+   822→      // the legacy path runs byte-identical. The cluster response keeps the
+   823→      // legacy shape and adds only the `cluster` field (per-node report).
+   824→      //
+   825→      // FAZA 17 (Search Optimization Layer): the cluster fan-out goes through
+   826→      // the dedup + batching + cache executor — 1000 identical concurrent
+   827→      // requests share ONE real fan-out (batch) and repeats within cacheTtlMs
+   828→      // are served from the micro-cache; the result object is the EXACT output
+   829→      // of the real execution (nothing fabricated), with the additive `opt`
+   830→      // block documenting the provenance. The queryKey includes every semantic
+   831→      // param + the shardHint (it orders the cluster node report — hinted and
+   832→      // unhinted variants never share a cache entry, responses stay
+   833→      // byte-identical per variant).
+   834→      if (useClusterPath) {
+   835→        await ensureSynced(); // same index-freshness guarantee as the legacy path
+   836→        const headerRaw = req.headers['x-animaxia-shard'];
+   837→        const headerHint = parseInt(Array.isArray(headerRaw) ? headerRaw[0] : headerRaw, 10);
+   838→        const shardHint =
+   839→          Number.isInteger(headerHint) && headerHint >= 0 && headerHint < shardCount() ? headerHint : null;
+   840→        const optQueryKey = JSON.stringify({
+   841→          p: 'cluster',
+   842→          q: q || null,
+   843→          type,
+   844→          genre,
+   845→          year,
+   846→          minRating,
+   847→          actor,
+   848→          studio,
+   849→          category,
+   850→          sort,
+   851→          fuzzy: fuzzyEnabled,
+   852→          limit,
+   853→          page,
+   854→          shardHint,
+   855→        });
+   856→        const optOutcome = await searchOptExecute({
+   857→          queryKey: optQueryKey,
+   858→          kind: 'advanced',
+   859→          shardId: flowShardId,
+   860→          describe: `q=${q || '(filters)'}`,
+   861→          run: () =>
+   862→            searchCluster.queryFTS({
+   863→              q: q || null,
+   864→              type,
+   865→              genre,
+   866→              year,
+   867→              minRating,
+   868→              actor,
+   869→              studio,
+   870→              category,
+   871→              sort,
+   872→              fuzzy: fuzzyEnabled ? 'true' : 'false',
+   873→              limit,
+   874→              page,
+   875→              shardHint,
+   876→            }),
+   877→        });
+   878→        // FAZA 14: the cluster serves the whole LOGICAL 30B space (30 shards × 1B
+   879→        // ids); results stay 100% real (real searchdocs rows) — only the served
+   880→        // address space is logical. Additive field, only present when the cluster
+   881→        // serves (the pure legacy path below stays byte-identical).
+   882→        return {
+   883→          ...optOutcome.result,
+   884→          logical: {
+   885→            addressSpace: logicalAddressSpace(),
+   886→            shardcount: shardCount(),
+   887→            shardSpan: SHARD_SPAN_IDS,
+   888→            mode: 'logical',
+   889→          },
+   890→          opt: {
+   891→            source: optOutcome.source,
+   892→            queryHash: optOutcome.queryHash,
+   893→            cached: optOutcome.cached,
+   894→            batched: optOutcome.batched,
+   895→          },
+   896→        };
+   897→      }
+   898→
+   899→      // Legacy path (cluster disabled OR keyset cursor request).
+   900→      await ensureSynced();
+   901→
+   902→      // FAZA 17-a: single-flight — identical concurrent requests share one query.
+   903→      const normalizedKey = JSON.stringify({
+   904→        q, type, genre, year, minRating, actor, studio, category, sort, fuzzyEnabled, limit, page, cursor: cursorRaw,
+   905→      });
+   906→
+   907→      // The raw FTS execution (+ 8s budget + error counter) — handed to the
+   908→      // FAZA 17 optimization executor when the layer is enabled (its batch IS
+   909→      // a superset of the single-flight: identical in-flight requests attach,
+   910→      // PLUS repeats within cacheTtlMs are served from the micro-cache), and
+   911→      // to the legacy single-flight when disabled (byte-identical bypass).
+   912→      const runFts = async () => {
+   913→        const queryPromise = runAdvancedQuery({
+   914→          q: q || null,
+   915→          type,
+   916→          genre,
+   917→          year,
+   918→          minRating,
+   919→          actor,
+   920→          studio,
+   921→          category,
+   922→          sort,
+   923→          fuzzyEnabled,
+   924→          limit,
+   925→          page,
+   926→          cursor: cursorRaw,
+   927→        });
+   928→        try {
+   929→          return await withQueryTimeout(queryPromise, `q=${q || '(filters)'}`);
+   930→        } catch (err) {
+   931→          searchOps.errors += 1;
+   932→          throw err;
+   933→        }
+   934→      };
+   935→
+   936→      const optOutcome = searchOptEnabled()
+   937→        ? await searchOptExecute({
+   938→            queryKey: normalizedKey,
+   939→            kind: 'advanced',
+   940→            shardId: flowShardId,
+   941→            describe: `q=${q || '(filters)'}`,
+   942→            run: runFts,
+   943→          })
+   944→        : {
+   945→            result: await coalesceAdvanced(normalizedKey, runFts),
+   946→            source: 'bypass',
+   947→            queryHash: null,
+   948→            cached: false,
+   949→            batched: false,
+   950→          };
+   951→      const result = optOutcome.result;
+   952→
+   953→      const took = Date.now() - startedAt;
+   954→      recordLatency(took);
+   955→
+   956→      return {
+   957→        took,
+   958→        total: result.total,
+   959→        max_score: result.max_score,
+   960→        page: result.page,
+   961→        limit,
+   962→        engine: ENGINE,
+   963→        data: result.data,
+   964→        // FAZA 17-a additive pagination contract:
+   965→        nextCursor: result.nextCursor ?? null,
+   966→        paginationMode: result.paginationMode ?? 'offset',
+   967→        // FAZA 17: additive optimization provenance — 'neon' = this request
+   968→        // ran the real FTS, 'batch' = shared an in-flight identical execution,
+   969→        // 'cache' = served the stored REAL result (≤ cacheTtlMs old),
+   970→        // 'bypass' = layer disabled (legacy single-flight path).
+   971→        opt: {
+   972→          source: optOutcome.source,
+   973→          queryHash: optOutcome.queryHash,
+   974→          cached: optOutcome.cached,
+   975→          batched: optOutcome.batched,
+   976→        },
+   977→      };
+   978→    },
+   979→  });
+   980→
+   981→  // FAZA 16: the user RECEIVED a real result → the post-result cooldown
+   982→  // starts now (their next /advanced within cooldownMs gets 429
+   983→  // cooldown_active with retryInMs). Failures never start a cooldown.
+   984→  searchRateComplete(req, 'advanced');
+   985→
+   986→  // FAZA 15: additive flow attribution on every /advanced response — the
+   987→  // search stayed 100% real; the field documents how the request was scheduled.
+   988→  // FAZA 16: additive `rate` block so the UI can enforce its own cooldown
+   989→  // affordance (disable ENTER + countdown) without a second round-trip.
+   990→  const rateSnapshot = searchRateStatusSnapshot();
+   991→  return res.json({
+   992→    ...body,
+   993→    flow: {
+   994→      priority: flowPriority,
+   995→      shardid: flowShardId,
+   996→      queuedMs: flowWaitedMs,
+   997→    },
+   998→    rate: {
+   999→      perUserMs: rateSnapshot.perUserMs,
+  1000→      cooldownMs: rateSnapshot.cooldownMs,
+  1001→    },
+  1002→  });
+  1003→}));
+  1004→
+  1005→/** GET /api/search/autocomplete?q= — trigram + prefix title suggestions. Public. */
+  1006→router.get('/autocomplete', wrap(async (req, res) => {
+  1007→  const q = req.query.q != null ? String(req.query.q).trim() : '';
+  1008→  if (q.length < 1) {
+  1009→    return res.status(400).json({ error: 'Missing required query parameter: q' });
+  1010→  }
+  1011→
+  1012→  // FAZA 16: autocomplete is paced in its OWN lane (typing never blocks the
+  1013→  // ENTER search and vice-versa) and shares the anti-spam flood window — a
+  1014→  // typeahead flood is spam exactly like an ENTER flood.
+  1015→  if (rejectIfRateLimited(req, res, 'autocomplete', `q=${q}`)) {
+  1016→    return; // 429 already sent — nothing queued, nothing executed
+  1017→  }
+  1018→
+  1019→  // FAZA 15: autocomplete is a real Neon FTS probe — it goes through the same
+  1020→  // search flow queue as /advanced (priority lane + windowed dispatch). The
+  1021→  // query itself is untouched.
+  1022→  // FAZA 17: the probe goes through the optimization executor too — a
+  1023→  // typeahead flood (many users typing the same prefix) shares ONE real
+  1024→  // probe (batch) and repeats within cacheTtlMs are served from the cache.
+  1025→  const flowPriority = resolveSearchPriority(req);
+  1026→  const flowShardId = resolveSearchShard(req);
+  1027→  const { result: body, waitedMs: flowWaitedMs } = await searchFlowExecute({
+  1028→    priority: flowPriority,
+  1029→    shardId: flowShardId,
+  1030→    kind: 'autocomplete',
+  1031→    describe: `q=${q}`,
+  1032→    run: async () => {
+  1033→      await ensureSynced();
+  1034→
+  1035→      const runAcFts = () =>
+  1036→        rows(
+  1037→          `SELECT s.contentid, s.title, s.type, s.rating, c.thumbnail,
+  1038→                similarity(s.title, $1) AS sim
+  1039→         FROM searchdocs s
+  1040→         JOIN content c ON c.id = s.contentid
+  1041→         WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
+  1042→         ORDER BY sim DESC, s.rating DESC NULLS LAST, s.contentid ASC
+  1043→         LIMIT 8`,
+  1044→          [q],
+  1045→        );
+  1046→
+  1047→      const optOutcome = searchOptEnabled()
+  1048→        ? await searchOptExecute({
+  1049→            queryKey: JSON.stringify({ p: 'autocomplete', q }),
+  1050→            kind: 'autocomplete',
+  1051→            shardId: flowShardId,
+  1052→            describe: `q=${q}`,
+  1053→            run: runAcFts,
+  1054→          })
+  1055→        : { result: await runAcFts(), source: 'bypass', queryHash: null, cached: false, batched: false };
+  1056→      const matched = optOutcome.result;
+  1057→
+  1058→      return {
+  1059→        suggestions: matched.map((r) => ({
+  1060→          id: Number(r.contentid),
+  1061→          title: r.title,
+  1062→          type: r.type ?? null,
+  1063→          thumbnail: r.thumbnail ?? null,
+  1064→          rating: r.rating == null ? null : Number(r.rating),
+  1065→        })),
+  1066→        opt: {
+  1067→          source: optOutcome.source,
+  1068→          queryHash: optOutcome.queryHash,
+  1069→          cached: optOutcome.cached,
+  1070→          batched: optOutcome.batched,
+  1071→        },
+  1072→      };
+  1073→    },
+  1074→  });
+  1075→
+  1076→  return res.json({
+  1077→    ...body,
+  1078→    flow: {
+  1079→      priority: flowPriority,
+  1080→      shardid: flowShardId,
+  1081→      queuedMs: flowWaitedMs,
+  1082→    },
+  1083→  });
+  1084→}));
+  1085→
+  1086→/** GET /api/search/filters — distinct filter values for UI dropdowns. Public. */
+  1087→router.get('/filters', wrap(async (req, res) => {
+  1088→  await ensureSynced();
+  1089→  const [genres, actors, years, categories, studios] = await Promise.all([
+  1090→    rows(
+  1091→      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(genres) AS value FROM searchdocs) t
+  1092→       WHERE value <> '' GROUP BY value ORDER BY count DESC, value ASC`,
+  1093→    ),
+  1094→    rows(
+  1095→      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(actors) AS value FROM searchdocs) t
+  1096→       WHERE value <> '' GROUP BY value ORDER BY count DESC, value ASC LIMIT 50`,
+  1097→    ),
+  1098→    rows(`SELECT DISTINCT year FROM searchdocs WHERE year IS NOT NULL ORDER BY year DESC`),
+  1099→    rows(
+  1100→      `SELECT category AS value, COUNT(*)::int AS count FROM searchdocs
+  1101→       WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC, value ASC`,
+  1102→    ),
+  1103→    rows(
+  1104→      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(studios) AS value FROM searchdocs) t
+  1105→       WHERE value <> '' GROUP BY value ORDER BY count DESC, value ASC LIMIT 50`,
+  1106→    ),
+  1107→  ]);
+  1108→  return res.json({
+  1109→    genres,
+  1110→    actors,
+  1111→    years: years.map((r) => Number(r.year)),
+  1112→    categories,
+  1113→    studios,
+  1114→  });
+  1115→}));
+  1116→
+  1117→/** POST /api/search/index — force a full resync (requireAuth + requireAdmin). */
+  1118→router.post('/index', requireAuth, requireAdmin, wrap(async (req, res) => {
+  1119→  const indexed = await forceResync();
+  1120→  logger.info(`[search] Manual reindex by user ${req.user?.id ?? '?'} — ${indexed} docs`);
+  1121→  return res.json({ ok: true, indexed });
+  1122→}));
+  1123→
+  1124→/** GET /api/search/status — engine health snapshot. Public. */
+  1125→router.get('/status', wrap(async (req, res) => {
+  1126→  await ensureSynced().catch((err) => logger.warn(`[search] status sync failed: ${err.message}`));
+  1127→  let docs = 0;
+  1128→  let pgTrgm = false;
+  1129→  try {
+  1130→    const [docRow, extRow] = await Promise.all([
+  1131→      one('SELECT COUNT(*)::int AS n FROM searchdocs'),
+  1132→      one(`SELECT COUNT(*)::int AS n FROM pg_extension WHERE extname = 'pg_trgm'`),
+  1133→    ]);
+  1134→    docs = Number(docRow?.n ?? 0);
+  1135→    pgTrgm = Number(extRow?.n ?? 0) > 0;
+  1136→  } catch (err) {
+  1137→    logger.warn(`[search] status counts failed: ${err.message}`);
+  1138→  }
+  1139→  // FAZA 13 (Task 13-3): additive cluster health field — null when the
+  1140→  // cluster is disabled or its health probe fails (legacy shape untouched).
+  1141→  let clusterHealth = null;
+  1142→  if (searchCluster.enabled()) {
+  1143→    try {
+  1144→      clusterHealth = await searchCluster.health();
+  1145→    } catch (err) {
+  1146→      logger.warn(`[search] cluster health probe failed: ${err.message}`);
+  1147→      clusterHealth = null;
+  1148→    }
+  1149→  }
+  1150→  return res.json({
+  1151→    docs,
+  1152→    engine: ENGINE,
+  1153→    backend: 'neon-postgresql',
+  1154→    extensions: { pg_trgm: pgTrgm },
+  1155→    lastSync,
+  1156→    dirty,
+  1157→    latency: searchLatencySnapshot(),
+  1158→    capacity: { indexedDocs: docs },
+  1159→    cluster: clusterHealth,
+  1160→    // FAZA 14: the LOGICAL 30B address space the search cluster covers —
+  1161→    // 30 shards × 1B ids (volume simulated logically; search results are
+  1162→    // always REAL rows from searchdocs/content).
+  1163→    logical: {
+  1164→      addressSpace: logicalAddressSpace(),
+  1165→      shardcount: shardCount(),
+  1166→      shardSpan: SHARD_SPAN_IDS,
+  1167→      mode: 'logical',
+  1168→    },
+  1169→    // FAZA 15 (Search Flow Control): the admission layer sitting between the
+  1170→    // search routes and Neon — queue + priority lanes + windowed dispatch.
+  1171→    // Pinned contract: queueEnabled / maxConcurrent / priorities + live
+  1172→    // gauges (queueLength, inflight, dropped — target 0, timedOut — target 0,
+  1173→    // processingRate, wait percentiles).
+  1174→    flowControl: searchFlowStatusSnapshot(),
+  1175→    windowing: searchWindowingSnapshot(),
+  1176→    // FAZA 16 (Search Rate Management): the per-user pacing layer in front of
+  1177→    // the flow queue. Pinned contract: rateLimit { perUserMs, enforced } and
+  1178→    // burstControl { active, maxBurstPerWindow } + live counters.
+  1179→    rateLimit: searchRateStatusSnapshot(),
+  1180→    burstControl: searchRateBurstSnapshot(),
+  1181→    // FAZA 17 (Search Optimization Layer): dedup + batching + micro-cache
+  1182→    // between the window dispatcher and the real FTS. Pinned contracts:
+  1183→    // batching { enabled, activeBatches }, cache { ttlMs, hits, misses },
+  1184→    // dedup { active, deduplicatedRequests } and the deterministic pipeline
+  1185→    // order (antiSpam → … → cache → fts).
+  1186→    batching: searchOptBatchingSnapshot(),
+  1187→    cache: searchOptCacheSnapshot(),
+  1188→    dedup: searchOptDedupSnapshot(),
+  1189→    pipeline: searchOptPipelineSnapshot(),
+  1190→  });
+  1191→}));
+  1192→
+  1193→/** GET /api/search/flow — FAZA 15 Search Flow Control console snapshot:
+  1194→ *  full config, the rolling history (180 × 1s samples of queueLength /
+  1195→ *  inflight / rate) and the per-shard attribution table (queue, inflight,
+  1196→ *  processed, dropped). Public read-only (same policy as /status). */
+  1197→router.get('/flow', wrap(async (req, res) => {
+  1198→  return res.json(searchFlowConsoleSnapshot());
+  1199→}));
+  1200→
+  1201→/** POST /api/search/flow/settings — FAZA 15 runtime reconfiguration of the
+  1202→ *  flow control knobs (maxConcurrent, intervalMs, batchSize, queueCap,
+  1203→ *  maxWaitMs, aging thresholds, enabled). requireAuth + requireAdmin —
+  1204→ *  operational surface, not end-user. Unknown fields are ignored; every
+  1205→ *  value is clamped to its safe range (modules/search/flow.js). */
+  1206→router.post('/flow/settings', requireAuth, requireAdmin, wrap(async (req, res) => {
+  1207→  const patch = req.body || {};
+  1208→  const allowed = [
+  1209→    'enabled', 'maxConcurrent', 'intervalMs', 'batchSize',
+  1210→    'queueCap', 'maxWaitMs', 'lowPromoteMs', 'normalPromoteMs',
+  1211→  ];
+  1212→  const filtered = {};
+  1213→  for (const key of allowed) {
+  1214→    if (patch[key] !== undefined) filtered[key] = patch[key];
+  1215→  }
+  1216→  const config = updateSearchFlowConfig(filtered);
+  1217→  await auditLogFlowSettings(req, filtered);
+  1218→  return res.json({ ok: true, config });
+  1219→}));
+  1220→
+  1221→/** GET /api/search/rate — FAZA 16 Search Rate Management console snapshot:
+  1222→ *  full config, live counters (rate-limit hits, cooldown blocks, spam blocks,
+  1223→ *  burst events), the rolling history (180 x 1s samples of arrivals /
+  1224→ *  admitted / blocked) and the per-shard attribution table. Public read-only
+  1225→ *  (same policy as /flow). */
+  1226→router.get('/rate', wrap(async (req, res) => {
+  1227→  return res.json(searchRateConsoleSnapshot());
+  1228→}));
+  1229→
+  1230→/** POST /api/search/rate/settings — FAZA 16 runtime reconfiguration of the
+  1231→ *  pacing knobs (perUserMs, cooldownMs, spam window/threshold/block,
+  1232→ *  burst window/threshold, enabled). requireAuth + requireAdmin —
+  1233→ *  operational surface, not end-user. Unknown fields are ignored; every
+  1234→ *  value is clamped to its safe range (modules/search/rate.js). */
+  1235→router.post('/rate/settings', requireAuth, requireAdmin, wrap(async (req, res) => {
+  1236→  const patch = req.body || {};
+  1237→  const allowed = [
+  1238→    'enabled', 'perUserMs', 'cooldownMs',
+  1239→    'spamWindowMs', 'spamThreshold', 'spamBlockMs',
+  1240→    'burstWindowMs', 'burstThreshold',
+  1241→  ];
+  1242→  const filtered = {};
+  1243→  for (const key of allowed) {
+  1244→    if (patch[key] !== undefined) filtered[key] = patch[key];
+  1245→  }
+  1246→  const config = updateSearchRateConfig(filtered);
+  1247→  await auditLogRateSettings(req, filtered);
+  1248→  return res.json({ ok: true, config });
+  1249→}));
+  1250→
+  1251→/** GET /api/search/opt — FAZA 17 Search Optimization Layer console snapshot:
+  1252→ *  the pinned batching / cache / dedup / pipeline blocks, full config, live
+  1253→ *  counters (cache hits/misses, batch fan-out, REAL Neon FTS executions,
+  1254→ *  reduction factor), the in-flight batch list (top 50 by fan-out), the
+  1255→ *  rolling history (180 × 1s samples of requests vs fts) and the per-shard
+  1256→ *  attribution table. Public read-only (same policy as /flow and /rate). */
+  1257→router.get('/opt', wrap(async (req, res) => {
+  1258→  return res.json(searchOptConsoleSnapshot());
+  1259→}));
+  1260→
+  1261→/** POST /api/search/opt/settings — FAZA 17 runtime reconfiguration of the
+  1262→ *  optimization knobs (enabled, cacheTtlMs, cacheMax, batchMax).
+  1263→ *  requireAuth + requireAdmin — operational surface, not end-user. Unknown
+  1264→ *  fields are ignored; every value is clamped to its safe range
+  1265→ *  (modules/search/opt.js — ttlMs pinned to the 1000–5000ms range). */
+  1266→router.post('/opt/settings', requireAuth, requireAdmin, wrap(async (req, res) => {
+  1267→  const patch = req.body || {};
+  1268→  const allowed = ['enabled', 'cacheTtlMs', 'cacheMax', 'batchMax'];
+  1269→  const filtered = {};
+  1270→  for (const key of allowed) {
+  1271→    if (patch[key] !== undefined) filtered[key] = patch[key];
+  1272→  }
+  1273→  const config = updateSearchOptConfig(filtered);
+  1274→  await auditLogOptSettings(req, filtered);
+  1275→  return res.json({ ok: true, config });
+  1276→}));
+  1277→
+  1278→/** Audit trail for optimization reconfiguration (best effort). */
+  1279→async function auditLogOptSettings(req, patch) {
+  1280→  try {
+  1281→    const { auditLog, clientIpOf } = await import('../security/security.js');
+  1282→    await auditLog({
+  1283→      userid: req.user?.id ?? null,
+  1284→      action: 'searchopt.settings',
+  1285→      ip: clientIpOf(req),
+  1286→      meta: { patch },
+  1287→    });
+  1288→  } catch {
+  1289→    /* audit is best-effort — never block the operational response */
+  1290→  }
+  1291→}
+  1292→
+  1293→/** Audit trail for rate-management reconfiguration (best effort). */
+  1294→async function auditLogRateSettings(req, patch) {
+  1295→  try {
+  1296→    const { auditLog, clientIpOf } = await import('../security/security.js');
+  1297→    await auditLog({
+  1298→      userid: req.user?.id ?? null,
+  1299→      action: 'searchrate.settings',
+  1300→      ip: clientIpOf(req),
+  1301→      meta: { patch },
+  1302→    });
+  1303→  } catch {
+  1304→    /* audit is best-effort — never block the operational response */
+  1305→  }
+  1306→}
+  1307→
+  1308→/** Audit trail for flow-control reconfiguration (best effort). */
+  1309→async function auditLogFlowSettings(req, patch) {
+  1310→  try {
+  1311→    const { auditLog, clientIpOf } = await import('../security/security.js');
+  1312→    await auditLog({
+  1313→      userid: req.user?.id ?? null,
+  1314→      action: 'searchflow.settings',
+  1315→      ip: clientIpOf(req),
+  1316→      meta: { patch },
+  1317→    });
+  1318→  } catch {
+  1319→    /* audit is best-effort — never block the operational response */
+  1320→  }
+  1321→}
+  1322→
+  1323→export default router;
+  1324→

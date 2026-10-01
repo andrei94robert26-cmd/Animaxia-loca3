@@ -1,0 +1,23 @@
+{
+  "name": "animaxia-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch server.js",
+    "start": "node server.js",
+    "test": "bun tests/smoke-sharding.mjs",
+    "test:providers": "node tests/miner-providers.mjs",
+    "test:miner": "npm run test:providers",
+    "cli:miner-test": "node cli/miner-test.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "fast-xml-parser": "^4.5.1",
+    "nodemailer": "^10.0.10",
+    "pg": "^8.13.1",
+    "z-ai-web-dev-sdk": "^0.0.18"
+  }
+}

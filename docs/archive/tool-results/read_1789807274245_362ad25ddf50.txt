@@ -1,0 +1,1394 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * admin-view.tsx — Operations panel: system/database/cache/rate-limit stats
+     5→ * plus Content (library CRUD), Miner (URL mining + upsert), Analytics, Workers,
+     6→ * Security, Providers, AI Cloud (Phase-4 LLM/vector/assistant telemetry),
+     7→ * Shards (FAZA 13 Neon sharding/search/vector cluster console) and
+     8→ * About (download ZIP, seed, API reference) tabs.
+     9→ */
+    10→
+    11→import { useState } from 'react';
+    12→import {
+    13→  Activity,
+    14→  AlertTriangle,
+    15→  BarChart3,
+    16→  Bot,
+    17→  Building2,
+    18→  Brain,
+    19→  Cloud,
+    20→  CloudDownload,
+    21→  Code2,
+    22→  Cpu,
+    23→  Database,
+    24→  DatabaseZap,
+    25→  DollarSign,
+    26→  Download,
+    27→  FileVideo,
+    28→  Film,
+    29→  Gauge,
+    30→  Loader2,
+    31→  Lock,
+    32→  Network,
+    33→  Pickaxe,
+    34→  Radio,
+    35→  RefreshCw,
+    36→  Server,
+    37→  ShieldAlert,
+    38→  Sparkles,
+    39→  Timer,
+    40→  Trash2,
+    41→  Wrench,
+    42→  Youtube,
+    43→  Zap,
+    44→} from 'lucide-react';
+    45→import { toast } from 'sonner';
+    46→import { api } from '@/lib/animaxia/api';
+    47→import { platform } from '@/lib/animaxia/platform';
+    48→import { useApi } from '@/lib/animaxia/hooks';
+    49→import { navigate, useRoute } from '@/lib/animaxia/router';
+    50→import { useAuth } from '@/components/animaxia/auth-provider';
+    51→import type { DbContent, HealthResponse, MinerExtraction } from '@/lib/animaxia/types';
+    52→import {
+    53→  AlertDialog,
+    54→  AlertDialogAction,
+    55→  AlertDialogCancel,
+    56→  AlertDialogContent,
+    57→  AlertDialogDescription,
+    58→  AlertDialogFooter,
+    59→  AlertDialogHeader,
+    60→  AlertDialogTitle,
+    61→  AlertDialogTrigger,
+    62→} from '@/components/ui/alert-dialog';
+    63→import { Button } from '@/components/ui/button';
+    64→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+    65→import { Input } from '@/components/ui/input';
+    66→import { Label } from '@/components/ui/label';
+    67→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    68→import { Skeleton } from '@/components/ui/skeleton';
+    69→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    70→import {
+    71→  Table,
+    72→  TableBody,
+    73→  TableCell,
+    74→  TableHead,
+    75→  TableHeader,
+    76→  TableRow,
+    77→} from '@/components/ui/table';
+    78→import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+    79→import { cn } from '@/lib/utils';
+    80→import { AdminAnalyticsTab } from '../admin/admin-analytics-tab';
+    81→import { AdminSecurityTab } from '../admin/admin-security-tab';
+    82→import { AdminWorkersTab } from '../admin/admin-workers-tab';
+    83→import { AdminTenantsTab } from '../admin/admin-tenants-tab'; // FAZA 11 multi-tenant
+    84→import { AdminMinerTab } from '../admin/admin-miner-tab'; // FAZA 12 miner ingest + indexing
+    85→import { AdminShardsTab } from '../admin/admin-shards-tab'; // FAZA 13 shard console
+    86→import { Container, PageHeader } from '../section';
+    87→import { EmptyState, ErrorState, TypeBadge } from '../states';
+    88→import { Pagination } from '../pagination';
+    89→
+    90→/* ------------------------------- helpers ------------------------------- */
+    91→
+    92→function formatUptime(sec: number): string {
+    93→  const h = Math.floor(sec / 3600);
+    94→  const m = Math.floor((sec % 3600) / 60);
+    95→  const s = Math.floor(sec % 60);
+    96→  if (h > 0) return `${h}h ${m}m`;
+    97→  if (m > 0) return `${m}m ${s}s`;
+    98→  return `${s}s`;
+    99→}
+   100→
+   101→function formatBytes(b?: number): string {
+   102→  if (!b || b <= 0) return '0 B';
+   103→  const units = ['B', 'KB', 'MB', 'GB'];
+   104→  let v = b;
+   105→  let i = 0;
+   106→  while (v >= 1024 && i < units.length - 1) {
+   107→    v /= 1024;
+   108→    i += 1;
+   109→  }
+   110→  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+   111→}
+   112→
+   113→function formatMs(ms?: number): string {
+   114→  if (ms == null) return '—';
+   115→  if (ms < 1000) return `${Math.round(ms)}ms`;
+   116→  return `${(ms / 1000).toFixed(1)}s`;
+   117→}
+   118→
+   119→function formatDate(iso?: string | null): string {
+   120→  if (!iso) return '—';
+   121→  const d = new Date(iso);
+   122→  if (Number.isNaN(d.getTime())) return '—';
+   123→  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+   124→}
+   125→
+   126→function getErrorMessage(e: unknown): string {
+   127→  return e instanceof Error ? e.message : 'Request failed';
+   128→}
+   129→
+   130→/** True when an endpoint error means the caller is not an admin (403/401). */
+   131→function isForbidden(message: string | null): boolean {
+   132→  return Boolean(message && /admin access required|forbidden|status 40[13]/i.test(message));
+   133→}
+   134→
+   135→/* ------------------------------ stat cards ------------------------------ */
+   136→
+   137→function StatCard({
+   138→  icon,
+   139→  title,
+   140→  children,
+   141→}: {
+   142→  icon: React.ReactNode;
+   143→  title: string;
+   144→  children: React.ReactNode;
+   145→}) {
+   146→  return (
+   147→    <Card className="border-white/10 bg-white/[0.03]">
+   148→      <CardHeader className="pb-2">
+   149→        <CardTitle className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-zinc-400">
+   150→          {icon}
+   151→          {title}
+   152→        </CardTitle>
+   153→      </CardHeader>
+   154→      <CardContent className="space-y-2 text-sm">{children}</CardContent>
+   155→    </Card>
+   156→  );
+   157→}
+   158→
+   159→function StatsSection({
+   160→  health,
+   161→  loading,
+   162→  error,
+   163→  onRetry,
+   164→}: {
+   165→  health: HealthResponse | null;
+   166→  loading: boolean;
+   167→  error: string | null;
+   168→  onRetry: () => void;
+   169→}) {
+   170→  if (loading && !health) {
+   171→    return (
+   172→      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   173→        {Array.from({ length: 4 }).map((_, i) => (
+   174→          <Skeleton key={i} className="h-40 rounded-xl" />
+   175→        ))}
+   176→      </div>
+   177→    );
+   178→  }
+   179→  if (error && !health) {
+   180→    return <ErrorState message={error} onRetry={onRetry} compact />;
+   181→  }
+   182→  if (!health) return null;
+   183→
+   184→  return (
+   185→    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   186→      {/* System */}
+   187→      <StatCard icon={<Server className="h-4 w-4 text-rose-400" aria-hidden />} title="System">
+   188→        <p className="font-semibold text-zinc-100">
+   189→          {health.service} <span className="text-zinc-500">v{health.version}</span>
+   190→        </p>
+   191→        <div className="flex flex-wrap items-center gap-2">
+   192→          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] text-zinc-300">
+   193→            {health.env}
+   194→          </span>
+   195→          <span className="text-xs text-zinc-500">up {formatUptime(health.uptimeSec)}</span>
+   196→        </div>
+   197→        <p className="text-[11px] text-zinc-600">status: {health.status}</p>
+   198→      </StatCard>
+   199→
+   200→      {/* Database */}
+   201→      <StatCard icon={<Database className="h-4 w-4 text-amber-400" aria-hidden />} title="Database">
+   202→        {health.db.driver === 'postgres' ? (
+   203→          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+   204→            Neon PostgreSQL connected
+   205→          </span>
+   206→        ) : (
+   207→          <Tooltip>
+   208→            <TooltipTrigger asChild>
+   209→              <span className="inline-flex cursor-help items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-300">
+   210→                Local fallback
+   211→              </span>
+   212→            </TooltipTrigger>
+   213→            <TooltipContent side="bottom" className="max-w-xs break-words border-white/10 bg-[#1a1a24] text-zinc-200">
+   214→              {health.db.lastError || 'PostgreSQL unreachable — serving from the local JSON store.'}
+   215→            </TooltipContent>
+   216→          </Tooltip>
+   217→        )}
+   218→        <p className="text-3xl font-black text-white">{health.db.totalItems}</p>
+   219→        <p className="text-[11px] text-zinc-500">total items in library</p>
+   220→      </StatCard>
+   221→
+   222→      {/* Cache */}
+   223→      <StatCard icon={<Zap className="h-4 w-4 text-fuchsia-400" aria-hidden />} title="Cache">
+   224→        <p className="text-3xl font-black text-white">{Math.round(health.cache.hitRate * 100)}%</p>
+   225→        <p className="text-xs text-zinc-400">
+   226→          hit rate · {health.cache.keys} keys · {health.cache.ttlMs / 1000}s TTL
+   227→        </p>
+   228→        <p className="text-[11px] text-zinc-500">
+   229→          hits {health.cache.hits} · misses {health.cache.misses}
+   230→        </p>
+   231→      </StatCard>
+   232→
+   233→      {/* Rate limit */}
+   234→      <StatCard icon={<Gauge className="h-4 w-4 text-teal-400" aria-hidden />} title="Rate limit">
+   235→        <p className="text-xl font-black text-white">
+   236→          {health.rateLimit.max} req / {health.rateLimit.windowMs / 1000}s
+   237→        </p>
+   238→        <p className="text-xs text-zinc-400">{health.rateLimit.trackedClients} tracked clients</p>
+   239→        <p className="text-[11px] text-zinc-500">{health.rateLimit.totalLimited} limited requests</p>
+   240→      </StatCard>
+   241→    </div>
+   242→  );
+   243→}
+   244→
+   245→/* ----------------------------- content tab ----------------------------- */
+   246→
+   247→const CONTENT_TYPES = ['all', 'movie', 'tv', 'anime', 'news', 'sports', 'mined', 'featured'] as const;
+   248→
+   249→function ContentTab({ onMutated }: { onMutated: () => void }) {
+   250→  const [type, setType] = useState<string>('all');
+   251→  const [page, setPage] = useState(1);
+   252→  const [deletingId, setDeletingId] = useState<number | null>(null);
+   253→
+   254→  const list = useApi(`admin-content-${type}-${page}`, () =>
+   255→    api.all({ type: type === 'all' ? undefined : type, page, limit: 10 }),
+   256→  );
+   257→
+   258→  async function handleDelete(c: DbContent) {
+   259→    setDeletingId(c.id);
+   260→    try {
+   261→      await api.deleteContent(c.id);
+   262→      toast.success(`Deleted "${c.title}"`);
+   263→      await list.refetch();
+   264→      onMutated();
+   265→    } catch (e) {
+   266→      toast.error(getErrorMessage(e));
+   267→    } finally {
+   268→      setDeletingId(null);
+   269→    }
+   270→  }
+   271→
+   272→  const rows = list.data?.data || [];
+   273→
+   274→  return (
+   275→    <div className="space-y-4">
+   276→      {/* Toolbar */}
+   277→      <div className="flex flex-wrap items-center gap-3">
+   278→        <div>
+   279→          <Label htmlFor="admin-type-filter" className="sr-only">
+   280→            Filter by type
+   281→          </Label>
+   282→          <Select
+   283→            value={type}
+   284→            onValueChange={(v) => {
+   285→              setType(v);
+   286→              setPage(1);
+   287→            }}
+   288→          >
+   289→            <SelectTrigger id="admin-type-filter" className="w-[150px] border-white/10 bg-black/40">
+   290→              <SelectValue placeholder="Type" />
+   291→            </SelectTrigger>
+   292→            <SelectContent className="border-white/10 bg-[#12121a]">
+   293→              {CONTENT_TYPES.map((t) => (
+   294→                <SelectItem key={t} value={t}>
+   295→                  {t === 'all' ? 'All types' : t}
+   296→                </SelectItem>
+   297→              ))}
+   298→            </SelectContent>
+   299→          </Select>
+   300→        </div>
+   301→        <Button
+   302→          variant="outline"
+   303→          className="border-white/10 bg-white/5 hover:bg-white/10"
+   304→          onClick={() => list.refetch()}
+   305→        >
+   306→          <RefreshCw aria-hidden /> Refresh
+   307→        </Button>
+   308→        {list.data && (
+   309→          <span className="ml-auto text-xs font-semibold text-zinc-500">
+   310→            {list.data.total} {list.data.total === 1 ? 'title' : 'titles'} in library
+   311→          </span>
+   312→        )}
+   313→      </div>
+   314→
+   315→      {/* Table */}
+   316→      {list.loading && rows.length === 0 ? (
+   317→        <div className="space-y-2">
+   318→          {Array.from({ length: 6 }).map((_, i) => (
+   319→            <Skeleton key={i} className="h-14 w-full rounded-xl" />
+   320→          ))}
+   321→        </div>
+   322→      ) : list.error && rows.length === 0 ? (
+   323→        <ErrorState message={list.error} onRetry={list.refetch} compact />
+   324→      ) : rows.length === 0 ? (
+   325→        <EmptyState
+   326→          title="No titles"
+   327→          message={`No ${type === 'all' ? '' : `${type} `}titles are stored in the library yet.`}
+   328→        />
+   329→      ) : (
+   330→        <div
+   331→          className={cn(
+   332→            'custom-scrollbar overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02] transition-opacity',
+   333→            list.loading && 'pointer-events-none opacity-50',
+   334→          )}
+   335→        >
+   336→          <Table className="min-w-[680px]">
+   337→            <TableHeader>
+   338→              <TableRow className="border-white/10 hover:bg-transparent">
+   339→                <TableHead className="w-16 text-zinc-400">Poster</TableHead>
+   340→                <TableHead className="text-zinc-400">Title</TableHead>
+   341→                <TableHead className="text-zinc-400">Type</TableHead>
+   342→                <TableHead className="text-zinc-400">Added</TableHead>
+   343→                <TableHead className="w-14 text-right text-zinc-400">Actions</TableHead>
+   344→              </TableRow>
+   345→            </TableHeader>
+   346→            <TableBody>
+   347→              {rows.map((c) => (
+   348→                <TableRow key={c.id} className="border-white/5">
+   349→                  <TableCell>
+   350→                    {c.thumbnail ? (
+   351→                      <img
+   352→                        src={c.thumbnail}
+   353→                        alt={`${c.title} poster`}
+   354→                        loading="lazy"
+   355→                        className="h-12 w-8 rounded object-cover"
+   356→                      />
+   357→                    ) : (
+   358→                      <div className="grid h-12 w-8 place-items-center rounded bg-gradient-to-br from-white/10 to-white/[0.03]">
+   359→                        <Film className="h-3.5 w-3.5 text-zinc-600" aria-hidden />
+   360→                      </div>
+   361→                    )}
+   362→                  </TableCell>
+   363→                  <TableCell className="max-w-[220px]">
+   364→                    <p className="truncate font-medium text-zinc-100">{c.title}</p>
+   365→                    <p className="truncate text-[11px] text-zinc-500" title={c.externalid}>
+   366→                      {c.externalid}
+   367→                    </p>
+   368→                  </TableCell>
+   369→                  <TableCell>
+   370→                    <TypeBadge type={c.type} />
+   371→                  </TableCell>
+   372→                  <TableCell className="whitespace-nowrap text-zinc-400">{formatDate(c.createdat)}</TableCell>
+   373→                  <TableCell className="text-right">
+   374→                    <AlertDialog>
+   375→                      <AlertDialogTrigger asChild>
+   376→                        <Button
+   377→                          variant="ghost"
+   378→                          size="icon"
+   379→                          aria-label={`Delete ${c.title}`}
+   380→                          className="text-rose-400 hover:bg-rose-500/10 hover:text-rose-300"
+   381→                        >
+   382→                          <Trash2 aria-hidden />
+   383→                        </Button>
+   384→                      </AlertDialogTrigger>
+   385→                      <AlertDialogContent className="border-white/10 bg-[#12121a]">
+   386→                        <AlertDialogHeader>
+   387→                          <AlertDialogTitle>Delete this title?</AlertDialogTitle>
+   388→                          <AlertDialogDescription>
+   389→                            This permanently removes &quot;{c.title}&quot; (id {c.id}) from the library. This action
+   390→                            cannot be undone.
+   391→                          </AlertDialogDescription>
+   392→                        </AlertDialogHeader>
+   393→                        <AlertDialogFooter>
+   394→                          <AlertDialogCancel className="border-white/10 bg-white/5 hover:bg-white/10">
+   395→                            Cancel
+   396→                          </AlertDialogCancel>
+   397→                          <AlertDialogAction
+   398→                            className="bg-rose-600 font-bold hover:bg-rose-500"
+   399→                            onClick={() => handleDelete(c)}
+   400→                          >
+   401→                            {deletingId === c.id ? (
+   402→                              <Loader2 className="animate-spin" aria-hidden />
+   403→                            ) : (
+   404→                              <Trash2 aria-hidden />
+   405→                            )}
+   406→                            Delete
+   407→                          </AlertDialogAction>
+   408→                        </AlertDialogFooter>
+   409→                      </AlertDialogContent>
+   410→                    </AlertDialog>
+   411→                  </TableCell>
+   412→                </TableRow>
+   413→              ))}
+   414→            </TableBody>
+   415→          </Table>
+   416→        </div>
+   417→      )}
+   418→
+   419→      <Pagination
+   420→        page={list.data?.page ?? page}
+   421→        totalPages={list.data?.totalPages ?? 1}
+   422→        onPage={setPage}
+   423→      />
+   424→    </div>
+   425→  );
+   426→}
+   427→
+   428→/* ------------------------------ miner tab ------------------------------ */
+   429→
+   430→const MINER_TYPES = ['mined', 'movie', 'tv', 'anime', 'news', 'sports', 'featured'] as const;
+   431→
+   432→const MINER_PRESETS = [
+   433→  { label: 'Wikipedia article', url: 'https://en.wikipedia.org/wiki/Studio_Ghibli' },
+   434→  { label: 'YouTube video', url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ' },
+   435→  {
+   436→    label: 'Direct MP4',
+   437→    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+   438→  },
+   439→];
+   440→
+   441→interface MinerResult {
+   442→  extraction: MinerExtraction;
+   443→  record: DbContent;
+   444→}
+   445→
+   446→const SOURCE_GROUPS: { key: 'mp4' | 'm3u8' | 'iframe' | 'youtube'; icon: React.ReactNode }[] = [
+   447→  { key: 'mp4', icon: <FileVideo className="h-3 w-3" aria-hidden /> },
+   448→  { key: 'm3u8', icon: <Radio className="h-3 w-3" aria-hidden /> },
+   449→  { key: 'iframe', icon: <Code2 className="h-3 w-3" aria-hidden /> },
+   450→  { key: 'youtube', icon: <Youtube className="h-3 w-3" aria-hidden /> },
+   451→];
+   452→
+   453→function MinerTab({ onMutated }: { onMutated: () => void }) {
+   454→  const [url, setUrl] = useState('');
+   455→  const [type, setType] = useState<string>('mined');
+   456→  const [externalId, setExternalId] = useState('');
+   457→  const [busy, setBusy] = useState(false);
+   458→  const [result, setResult] = useState<MinerResult | null>(null);
+   459→  const [error, setError] = useState<string | null>(null);
+   460→
+   461→  async function handleMine(e: React.FormEvent) {
+   462→    e.preventDefault();
+   463→    if (!url.trim() || busy) return;
+   464→    setBusy(true);
+   465→    setError(null);
+   466→    try {
+   467→      const res = await api.miner({
+   468→        url: url.trim(),
+   469→        type,
+   470→        ...(externalId.trim() ? { externalId: externalId.trim() } : {}),
+   471→      });
+   472→      setResult(res);
+   473→      toast.success(`Mined "${res.record.title}"`);
+   474→      onMutated();
+   475→    } catch (e2) {
+   476→      const message = getErrorMessage(e2);
+   477→      setError(message);
+   478→      toast.error(message);
+   479→    } finally {
+   480→      setBusy(false);
+   481→    }
+   482→  }
+   483→
+   484→  return (
+   485→    <div className="space-y-6">
+   486→      <Card className="border-white/10 bg-white/[0.03]">
+   487→        <CardHeader>
+   488→          <CardTitle className="flex items-center gap-2 text-base">
+   489→            <Pickaxe className="h-4 w-4 text-rose-400" aria-hidden />
+   490→            Mine a page or stream
+   491→          </CardTitle>
+   492→          <CardDescription>
+   493→            Fetch any URL, extract its metadata and media sources (mp4, m3u8, iframe, YouTube) and upsert the result
+   494→            into the library.
+   495→          </CardDescription>
+   496→        </CardHeader>
+   497→        <CardContent className="space-y-5">
+   498→          <form className="space-y-4" onSubmit={handleMine}>
+   499→            <div className="grid gap-4 sm:grid-cols-2">
+   500→              <div className="space-y-2 sm:col-span-2">
+   501→                <Label htmlFor="miner-url">URL</Label>
+   502→                <Input
+   503→                  id="miner-url"
+   504→                  value={url}
+   505→                  onChange={(e) => setUrl(e.target.value)}
+   506→                  placeholder="https://example.com/page-or-stream"
+   507→                  className="border-white/10 bg-black/40"
+   508→                />
+   509→              </div>
+   510→              <div className="space-y-2">
+   511→                <Label htmlFor="miner-type">Type</Label>
+   512→                <Select value={type} onValueChange={setType}>
+   513→                  <SelectTrigger id="miner-type" className="w-full border-white/10 bg-black/40">
+   514→                    <SelectValue placeholder="Type" />
+   515→                  </SelectTrigger>
+   516→                  <SelectContent className="border-white/10 bg-[#12121a]">
+   517→                    {MINER_TYPES.map((t) => (
+   518→                      <SelectItem key={t} value={t}>
+   519→                        {t}
+   520→                      </SelectItem>
+   521→                    ))}
+   522→                  </SelectContent>
+   523→                </Select>
+   524→              </div>
+   525→              <div className="space-y-2">
+   526→                <Label htmlFor="miner-external-id">External ID (optional)</Label>
+   527→                <Input
+   528→                  id="miner-external-id"
+   529→                  value={externalId}
+   530→                  onChange={(e) => setExternalId(e.target.value)}
+   531→                  placeholder="Optional — defaults to the URL"
+   532→                  className="border-white/10 bg-black/40"
+   533→                />
+   534→              </div>
+   535→            </div>
+   536→            <Button
+   537→              type="submit"
+   538→              disabled={busy || !url.trim()}
+   539→              className="bg-rose-600 font-bold hover:bg-rose-500"
+   540→            >
+   541→              {busy ? <Loader2 className="animate-spin" aria-hidden /> : <Pickaxe aria-hidden />}
+   542→              Mine &amp; UPSERT
+   543→            </Button>
+   544→          </form>
+   545→
+   546→          <div className="space-y-2">
+   547→            <p className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Presets</p>
+   548→            <div className="flex flex-wrap gap-2">
+   549→              {MINER_PRESETS.map((p) => (
+   550→                <button
+   551→                  key={p.label}
+   552→                  type="button"
+   553→                  onClick={() => setUrl(p.url)}
+   554→                  className={cn(
+   555→                    'rounded-full border px-3 py-1.5 text-xs font-semibold transition',
+   556→                    url === p.url
+   557→                      ? 'border-rose-500/60 bg-rose-500/15 text-rose-300'
+   558→                      : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+   559→                  )}
+   560→                >
+   561→                  {p.label}
+   562→                </button>
+   563→              ))}
+   564→            </div>
+   565→          </div>
+   566→
+   567→          {error && <ErrorState message={error} compact />}
+   568→        </CardContent>
+   569→      </Card>
+   570→
+   571→      {result && (
+   572→        <div className="space-y-4">
+   573→          <Card className="border-white/10 bg-white/[0.03]">
+   574→            <CardHeader>
+   575→              <CardTitle className="text-base">Extraction result</CardTitle>
+   576→              <CardDescription>
+   577→                Upserted as record #{result.record.id} ({result.record.type})
+   578→              </CardDescription>
+   579→            </CardHeader>
+   580→            <CardContent className="space-y-4">
+   581→              {result.extraction.thumbnail && (
+   582→                <img
+   583→                  src={result.extraction.thumbnail}
+   584→                  alt={`${result.extraction.title || 'Mined page'} thumbnail`}
+   585→                  className="max-h-48 w-full rounded-xl bg-black/30 object-contain"
+   586→                />
+   587→              )}
+   588→              <div>
+   589→                <h3 className="text-lg font-bold text-white">{result.extraction.title || result.record.title}</h3>
+   590→                {result.extraction.description && (
+   591→                  <p className="mt-1 line-clamp-3 text-sm text-zinc-400">{result.extraction.description}</p>
+   592→                )}
+   593→                <p className="mt-2 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+   594→                  {[result.extraction.siteName, formatBytes(result.extraction.bytesRead ?? result.extraction.bytes), formatMs(result.extraction.elapsedMs ?? result.extraction.ms)]
+   595→                    .filter(Boolean)
+   596→                    .join(' · ')}
+   597→                </p>
+   598→              </div>
+   599→
+   600→              <div className="space-y-2">
+   601→                {SOURCE_GROUPS.map(({ key, icon }) => {
+   602→                  const urls = result.extraction[key] || [];
+   603→                  if (urls.length === 0) return null;
+   604→                  return (
+   605→                    <div key={key} className="flex flex-wrap items-center gap-1.5">
+   606→                      {urls.map((u) => (
+   607→                        <span
+   608→                          key={`${key}-${u}`}
+   609→                          title={u}
+   610→                          className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-zinc-300"
+   611→                        >
+   612→                          {icon}
+   613→                          <span className="max-w-[240px] truncate font-mono text-[11px]">{u}</span>
+   614→                        </span>
+   615→                      ))}
+   616→                    </div>
+   617→                  );
+   618→                })}
+   619→                {SOURCE_GROUPS.every(({ key }) => (result.extraction[key] || []).length === 0) && (
+   620→                  <p className="text-sm text-zinc-500">No media sources were found on this page.</p>
+   621→                )}
+   622→              </div>
+   623→
+   624→              <Button
+   625→                className="bg-rose-600 font-bold hover:bg-rose-500"
+   626→                onClick={() => navigate(`/content/${result.record.id}`)}
+   627→              >
+   628→                Open in library
+   629→              </Button>
+   630→            </CardContent>
+   631→          </Card>
+   632→
+   633→          <div>
+   634→            <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-zinc-500">Raw extraction</p>
+   635→            <pre className="custom-scrollbar max-h-96 overflow-auto rounded-xl border border-white/10 bg-black/40 p-4 font-mono text-xs text-zinc-300">
+   636→              {JSON.stringify(result.extraction, null, 2)}
+   637→            </pre>
+   638→          </div>
+   639→        </div>
+   640→      )}
+   641→    </div>
+   642→  );
+   643→}
+   644→
+   645→/* ---------------------------- providers tab ---------------------------- */
+   646→
+   647→const NOT_ROUTED = [
+   648→  'OpenSubtitles',
+   649→  'BallDontLie',
+   650→  'OpenLigaDB',
+   651→  'TheSportsDB',
+   652→  'OpenDota',
+   653→  'PokeAPI',
+   654→  'Steam',
+   655→  'iTunes',
+   656→  'Lyrics.ovh',
+   657→  'MusicBrainz',
+   658→  'OpenLibrary',
+   659→  'Wikipedia',
+   660→  'Wikidata',
+   661→  'Wiktionary',
+   662→  'REST Countries',
+   663→  'GeoDB',
+   664→  'Open-Meteo',
+   665→  'NASA',
+   666→  'Giphy',
+   667→  'Unsplash',
+   668→  'Pexels',
+   669→  'Trivia',
+   670→  'JokeAPI',
+   671→  'Quotable',
+   672→  'RandomFox',
+   673→  'Shibe',
+   674→];
+   675→
+   676→function ProviderStateBadge({ state }: { state: string }) {
+   677→  if (state === 'closed') {
+   678→    return (
+   679→      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
+   680→        healthy
+   681→      </span>
+   682→    );
+   683→  }
+   684→  if (state === 'open') {
+   685→    return (
+   686→      <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-rose-300">
+   687→        circuit open
+   688→      </span>
+   689→    );
+   690→  }
+   691→  return (
+   692→    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-amber-300">
+   693→      half-open
+   694→    </span>
+   695→  );
+   696→}
+   697→
+   698→function ProvidersTab({ providers, loading }: { providers: HealthResponse['providers'] | undefined; loading: boolean }) {
+   699→  return (
+   700→    <Card className="border-white/10 bg-white/[0.03]">
+   701→      <CardHeader>
+   702→        <CardTitle className="text-base">Routed providers</CardTitle>
+   703→        <CardDescription>
+   704→          Live circuit-breaker state for every upstream API the backend routes to.
+   705→        </CardDescription>
+   706→      </CardHeader>
+   707→      <CardContent className="space-y-8">
+   708→        {loading && !providers ? (
+   709→          <div className="space-y-3">
+   710→            {Array.from({ length: 5 }).map((_, i) => (
+   711→              <Skeleton key={i} className="h-9 w-full" />
+   712→            ))}
+   713→          </div>
+   714→        ) : !providers || providers.length === 0 ? (
+   715→          <EmptyState title="No providers" message="Provider health is not available right now." />
+   716→        ) : (
+   717→          <div>
+   718→            {providers.map((p) => (
+   719→              <div
+   720→                key={p.name}
+   721→                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-white/5 py-2.5 last:border-0"
+   722→              >
+   723→                <div className="flex items-center gap-3">
+   724→                  <span className="font-mono font-semibold text-zinc-100">{p.name}</span>
+   725→                  <ProviderStateBadge state={p.state} />
+   726→                </div>
+   727→                <div className="flex min-w-0 items-center gap-4 text-xs text-zinc-500">
+   728→                  <span className="shrink-0">{p.failures} failures</span>
+   729→                  {p.lastError && (
+   730→                    <Tooltip>
+   731→                      <TooltipTrigger asChild>
+   732→                        <span className="max-w-md cursor-help truncate text-zinc-500">{p.lastError}</span>
+   733→                      </TooltipTrigger>
+   734→                      <TooltipContent
+   735→                        side="bottom"
+   736→                        className="max-w-sm break-words border-white/10 bg-[#1a1a24] text-zinc-200"
+   737→                      >
+   738→                        {p.lastError}
+   739→                      </TooltipContent>
+   740→                    </Tooltip>
+   741→                  )}
+   742→                </div>
+   743→              </div>
+   744→            ))}
+   745→          </div>
+   746→        )}
+   747→
+   748→        <div className="space-y-2">
+   749→          <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-500">
+   750→            Also configured (not routed yet)
+   751→          </h3>
+   752→          <div className="flex flex-wrap gap-1.5">
+   753→            {NOT_ROUTED.map((name) => (
+   754→              <span
+   755→                key={name}
+   756→                className="rounded-full border border-white/5 bg-white/[0.03] px-2.5 py-1 text-[11px] text-zinc-500"
+   757→              >
+   758→                {name}
+   759→              </span>
+   760→            ))}
+   761→          </div>
+   762→        </div>
+   763→      </CardContent>
+   764→    </Card>
+   765→  );
+   766→}
+   767→
+   768→/* ------------------------------ about tab ------------------------------ */
+   769→
+   770→const API_ROUTES: { method: string; path: string }[] = [
+   771→  { method: 'GET', path: '/api/all' },
+   772→  { method: 'GET', path: '/api/content/:id' },
+   773→  { method: 'GET', path: '/api/content/:id/player' },
+   774→  { method: 'POST', path: '/api/content' },
+   775→  { method: 'DELETE', path: '/api/content/:id' },
+   776→  { method: 'POST|GET', path: '/api/miner' },
+   777→  { method: 'GET', path: '/api/health' },
+   778→  { method: 'POST', path: '/api/admin/seed' },
+   779→  { method: 'GET', path: '/api/anime/*' },
+   780→  { method: 'GET', path: '/api/movies/*' },
+   781→  { method: 'GET', path: '/api/tv/*' },
+   782→  { method: 'GET', path: '/api/news' },
+   783→  { method: 'GET', path: '/api/sports/football/*' },
+   784→  { method: 'GET', path: '/api/sports/f1/*' },
+   785→];
+   786→
+   787→function methodClass(method: string): string {
+   788→  if (method === 'GET') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+   789→  if (method === 'DELETE') return 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+   790→  if (method.includes('POST')) return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+   791→  return 'border-white/10 bg-white/5 text-zinc-300';
+   792→}
+   793→
+   794→function AboutTab({ onSeeded }: { onSeeded: () => void }) {
+   795→  const [seeding, setSeeding] = useState(false);
+   796→
+   797→  async function handleSeed() {
+   798→    if (seeding) return;
+   799→    setSeeding(true);
+   800→    try {
+   801→      const res = await api.seed();
+   802→      toast.success(`Seeded: ${res.added.movie} movies, ${res.added.tv} TV, ${res.added.anime} anime`);
+   803→      onSeeded();
+   804→    } catch (e) {
+   805→      toast.error(getErrorMessage(e));
+   806→    } finally {
+   807→      setSeeding(false);
+   808→    }
+   809→  }
+   810→
+   811→  return (
+   812→    <div className="space-y-6">
+   813→      {/* Download CTA */}
+   814→      <Card className="border-rose-500/20 bg-gradient-to-br from-rose-500/[0.08] via-white/[0.03] to-white/[0.02]">
+   815→        <CardContent className="flex flex-col items-start gap-5 p-6 sm:flex-row sm:items-center">
+   816→          <div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-rose-500 to-fuchsia-600 shadow-lg shadow-rose-900/40">
+   817→            <Download className="h-6 w-6 text-white" aria-hidden />
+   818→          </div>
+   819→          <div className="min-w-0 flex-1">
+   820→            <h3 className="text-lg font-black text-white">Download the full Animaxia platform</h3>
+   821→            <p className="mt-1 text-sm text-zinc-400">
+   822→              The complete stack — Express backend (Neon PostgreSQL, stream miner, auth, premium, social, AI,
+   823→              analytics, search engine, workers, security, mobile API) plus the Next.js frontend, ready to run
+   824→              anywhere.
+   825→            </p>
+   826→          </div>
+   827→          <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+   828→            <a href="/animaxia-platform.zip" download>
+   829→              <Button size="lg" className="bg-rose-600 font-bold text-white hover:bg-rose-500">
+   830→                <Download aria-hidden /> Platform ZIP
+   831→              </Button>
+   832→            </a>
+   833→            <a href="/animaxia-backend.zip" download>
+   834→              <Button size="lg" variant="outline" className="border-white/10 bg-transparent text-zinc-300 hover:bg-white/5 hover:text-white">
+   835→                <Download aria-hidden /> Backend only
+   836→              </Button>
+   837→            </a>
+   838→          </div>
+   839→        </CardContent>
+   840→      </Card>
+   841→
+   842→      {/* Cloud (Phase 3) */}
+   843→      <Card className="border-fuchsia-500/25 bg-gradient-to-br from-fuchsia-500/[0.08] via-white/[0.03] to-white/[0.02]">
+   844→        <CardHeader>
+   845→          <CardTitle className="flex items-center gap-2 text-base">
+   846→            <Cloud className="h-4 w-4 text-fuchsia-400" aria-hidden />
+   847→            Animaxia Cloud — Phase 3 (microservices &amp; enterprise)
+   848→          </CardTitle>
+   849→          <CardDescription>
+   850→            The platform re-architected as 10 microservices (API gateway + auth, content, AI, analytics, search,
+   851→            premium, social, mobile, queue) with Docker + Kubernetes + Helm, CI/CD with auto-rollback, full
+   852→            observability (Prometheus / Grafana / Loki / Tempo tracing), Cloudflare edge (WAF, KV, R2) and a
+   853→            disaster-recovery program.
+   854→          </CardDescription>
+   855→        </CardHeader>
+   856→        <CardContent className="space-y-4">
+   857→          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+   858→            {[
+   859→              { name: 'gateway', desc: ':8080 · routing, edge cache, breakers' },
+   860→              { name: 'auth', desc: ':4001 · users, JWT, security' },
+   861→              { name: 'content', desc: ':4002 · library, miner, providers' },
+   862→              { name: 'ai', desc: ':4003 · recommendations, chat' },
+   863→              { name: 'analytics', desc: ':4004 · views, trending' },
+   864→              { name: 'search', desc: ':4005 · advanced, fuzzy, index' },
+   865→              { name: 'premium', desc: ':4006 · plans, Stripe' },
+   866→              { name: 'social', desc: ':4007 · comments, feeds' },
+   867→              { name: 'mobile', desc: ':4008 · mobile app API' },
+   868→              { name: 'queue', desc: ':4009 · PG jobs, cron, workers' },
+   869→            ].map((s) => (
+   870→              <div key={s.name} className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+   871→                <p className="font-mono text-xs font-bold text-fuchsia-300">{s.name}-service</p>
+   872→                <p className="text-[11px] text-zinc-500">{s.desc}</p>
+   873→              </div>
+   874→            ))}
+   875→          </div>
+   876→          <a href="/animaxia-cloud.zip" download>
+   877→            <Button size="lg" className="w-full bg-fuchsia-600 font-bold text-white hover:bg-fuchsia-500">
+   878→              <CloudDownload aria-hidden /> Download Animaxia Cloud ZIP
+   879→            </Button>
+   880→          </a>
+   881→        </CardContent>
+   882→      </Card>
+   883→
+   884→      {/* Seed */}
+   885→      <Card className="border-white/10 bg-white/[0.03]">
+   886→        <CardHeader>
+   887→          <CardTitle className="flex items-center gap-2 text-base">
+   888→            <DatabaseZap className="h-4 w-4 text-rose-400" aria-hidden />
+   889→            Trending content
+   890→          </CardTitle>
+   891→          <CardDescription>
+   892→            Refreshes TMDB and Jikan trending content into the library — safe to run at any time, existing records
+   893→            are upserted.
+   894→          </CardDescription>
+   895→        </CardHeader>
+   896→        <CardContent>
+   897→          <Button
+   898→            variant="outline"
+   899→            className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   900→            onClick={handleSeed}
+   901→            disabled={seeding}
+   902→          >
+   903→            {seeding ? <Loader2 className="animate-spin" aria-hidden /> : <DatabaseZap aria-hidden />}
+   904→            Re-sync trending content
+   905→          </Button>
+   906→        </CardContent>
+   907→      </Card>
+   908→
+   909→      {/* API reference */}
+   910→      <Card className="border-white/10 bg-white/[0.03]">
+   911→        <CardHeader>
+   912→          <CardTitle className="text-base">API reference</CardTitle>
+   913→          <CardDescription>Every route the backend exposes on port 4000.</CardDescription>
+   914→        </CardHeader>
+   915→        <CardContent>
+   916→          <div className="custom-scrollbar overflow-x-auto rounded-xl border border-white/10 bg-black/40">
+   917→            <div className="min-w-[420px] divide-y divide-white/5 font-mono text-xs">
+   918→              {API_ROUTES.map((r) => (
+   919→                <div key={r.path + r.method} className="flex items-center gap-3 px-4 py-2.5">
+   920→                  <span
+   921→                    className={`inline-flex w-[92px] shrink-0 justify-center rounded-full border px-2 py-0.5 text-[10px] font-bold ${methodClass(r.method)}`}
+   922→                  >
+   923→                    {r.method}
+   924→                  </span>
+   925→                  <span className="text-zinc-300">{r.path}</span>
+   926→                </div>
+   927→              ))}
+   928→            </div>
+   929→          </div>
+   930→        </CardContent>
+   931→      </Card>
+   932→
+   933→      <p className="text-center text-xs text-zinc-600">
+   934→        Backend port 4000 · accessed via gateway ?XTransformPort=4000
+   935→      </p>
+   936→    </div>
+   937→  );
+   938→}
+   939→
+   940→/* ----------------------------- ai cloud tab ----------------------------- */
+   941→
+   942→function AiCloudLockCard() {
+   943→  return (
+   944→    <Card className="border-rose-500/20 bg-white/[0.03]">
+   945→      <CardContent className="flex flex-col items-center gap-4 p-10 text-center">
+   946→        <div className="grid h-14 w-14 place-items-center rounded-2xl bg-rose-500/10">
+   947→          <Lock className="h-6 w-6 text-rose-400" aria-hidden />
+   948→        </div>
+   949→        <div>
+   950→          <p className="font-semibold text-zinc-100">Admin access required</p>
+   951→          <p className="mt-1 max-w-md text-sm text-zinc-400">
+   952→            Sign in as an administrator to view AI Cloud telemetry — LLM usage, vector index and the assistant.
+   953→          </p>
+   954→          <p className="mt-1 text-xs text-zinc-600">Demo admin: admin@animaxia.test</p>
+   955→        </div>
+   956→        <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/auth')}>
+   957→          Sign in
+   958→        </Button>
+   959→      </CardContent>
+   960→    </Card>
+   961→  );
+   962→}
+   963→
+   964→function AiMetricCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
+   965→  return (
+   966→    <Card className="border-white/10 bg-white/[0.03]">
+   967→      <CardContent className="flex items-center gap-3 p-4">
+   968→        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.04]">
+   969→          {icon}
+   970→        </span>
+   971→        <div className="min-w-0">
+   972→          <p className="truncate text-2xl font-black leading-tight text-white">{value}</p>
+   973→          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{label}</p>
+   974→        </div>
+   975→      </CardContent>
+   976→    </Card>
+   977→  );
+   978→}
+   979→
+   980→function AiCloudTab() {
+   981→  const { isAdmin, initializing } = useAuth();
+   982→
+   983→  const stats = useApi(`admin-ai-stats-${isAdmin}`, () => platform.aiAdminStats(), {
+   984→    enabled: !initializing && isAdmin,
+   985→  });
+   986→  const prompts = useApi(`admin-ai-prompts-${isAdmin}`, () => platform.aiAdminPrompts(8), {
+   987→    enabled: !initializing && isAdmin,
+   988→  });
+   989→  const errors = useApi(`admin-ai-errors-${isAdmin}`, () => platform.aiAdminErrors(8), {
+   990→    enabled: !initializing && isAdmin,
+   991→  });
+   992→
+   993→  /* A 403 means the session is not admin — surface the lock card (same
+   994→     pattern as the Analytics / Workers tabs). */
+   995→  const locked =
+   996→    !initializing &&
+   997→    (!isAdmin || isForbidden(stats.error) || isForbidden(prompts.error) || isForbidden(errors.error));
+   998→  if (locked) return <AiCloudLockCard />;
+   999→
+  1000→  if (stats.loading && !stats.data) {
+  1001→    return (
+  1002→      <div className="space-y-4">
+  1003→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+  1004→          {Array.from({ length: 6 }).map((_, i) => (
+  1005→            <Skeleton key={i} className="h-20 rounded-xl" />
+  1006→          ))}
+  1007→        </div>
+  1008→        <div className="grid gap-4 lg:grid-cols-3">
+  1009→          {Array.from({ length: 3 }).map((_, i) => (
+  1010→            <Skeleton key={i} className="h-40 rounded-xl" />
+  1011→          ))}
+  1012→        </div>
+  1013→        <Skeleton className="h-48 rounded-xl" />
+  1014→      </div>
+  1015→    );
+  1016→  }
+  1017→
+  1018→  if (stats.error && !stats.data) {
+  1019→    return <ErrorState message={stats.error} onRetry={stats.refetch} compact />;
+  1020→  }
+  1021→
+  1022→  const s = stats.data;
+  1023→  if (!s) return null;
+  1024→
+  1025→  const usage = s.usage;
+  1026→
+  1027→  return (
+  1028→    <div className="space-y-4">
+  1029→      {/* Toolbar */}
+  1030→      <div className="flex items-center justify-between gap-3">
+  1031→        <p className="text-xs text-zinc-500">
+  1032→          Phase-4 AI Cloud — LLM usage, vector index and the Animaxia Assistant, live from the usage ring.
+  1033→        </p>
+  1034→        <Button
+  1035→          variant="outline"
+  1036→          size="sm"
+  1037→          className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+  1038→          onClick={() => {
+  1039→            void stats.refetch();
+  1040→            void prompts.refetch();
+  1041→            void errors.refetch();
+  1042→          }}
+  1043→        >
+  1044→          <RefreshCw aria-hidden /> Refresh
+  1045→        </Button>
+  1046→      </div>
+  1047→
+  1048→      {/* Usage metrics */}
+  1049→      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+  1050→        <AiMetricCard
+  1051→          icon={<Activity className="h-5 w-5 text-rose-400" aria-hidden />}
+  1052→          label="Calls today"
+  1053→          value={usage.callsToday}
+  1054→        />
+  1055→        <AiMetricCard
+  1056→          icon={<BarChart3 className="h-5 w-5 text-amber-400" aria-hidden />}
+  1057→          label="Total calls"
+  1058→          value={usage.totalCalls}
+  1059→        />
+  1060→        <AiMetricCard
+  1061→          icon={<AlertTriangle className="h-5 w-5 text-teal-400" aria-hidden />}
+  1062→          label="Error rate"
+  1063→          value={`${(usage.errorRate * 100).toFixed(1)}%`}
+  1064→        />
+  1065→        <AiMetricCard
+  1066→          icon={<Timer className="h-5 w-5 text-fuchsia-400" aria-hidden />}
+  1067→          label="Latency p50 / p95"
+  1068→          value={`${usage.latency.p50} / ${usage.latency.p95}ms`}
+  1069→        />
+  1070→        <AiMetricCard
+  1071→          icon={<DollarSign className="h-5 w-5 text-lime-400" aria-hidden />}
+  1072→          label="Token cost"
+  1073→          value={`$${usage.costUsd.toFixed(2)}`}
+  1074→        />
+  1075→        <AiMetricCard
+  1076→          icon={<Zap className="h-5 w-5 text-orange-400" aria-hidden />}
+  1077→          label="Degraded calls"
+  1078→          value={usage.degradedCalls}
+  1079→        />
+  1080→      </div>
+  1081→
+  1082→      {/* Provider / vector / assistant */}
+  1083→      <div className="grid gap-4 lg:grid-cols-3">
+  1084→        <StatCard icon={<Sparkles className="h-4 w-4 text-rose-400" aria-hidden />} title="LLM provider">
+  1085→          <p className="font-semibold text-zinc-100">
+  1086→            {s.provider.provider} <span className="font-mono text-xs text-zinc-500">{s.provider.model}</span>
+  1087→          </p>
+  1088→          {s.provider.available ? (
+  1089→            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+  1090→              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden /> available
+  1091→            </span>
+  1092→          ) : (
+  1093→            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-300">
+  1094→              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden /> degraded
+  1095→            </span>
+  1096→          )}
+  1097→          <p className="font-mono text-[11px] text-zinc-500">
+  1098→            tokens: {usage.tokens.prompt.toLocaleString()} in / {usage.tokens.completion.toLocaleString()} out
+  1099→          </p>
+  1100→        </StatCard>
+  1101→
+  1102→        <StatCard icon={<Database className="h-4 w-4 text-fuchsia-400" aria-hidden />} title="Vector index">
+  1103→          <p className="font-semibold text-zinc-100">
+  1104→            {s.vector.backend} <span className="font-mono text-xs text-zinc-500">{s.vector.dims}d</span>
+  1105→          </p>
+  1106→          <div className="flex flex-wrap gap-1.5">
+  1107→            {Object.entries(s.vector.counts).map(([kind, count]) => (
+  1108→              <span
+  1109→                key={kind}
+  1110→                className="rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-fuchsia-300"
+  1111→              >
+  1112→                {kind}: {count}
+  1113→              </span>
+  1114→            ))}
+  1115→          </div>
+  1116→        </StatCard>
+  1117→
+  1118→        <StatCard icon={<Bot className="h-4 w-4 text-teal-400" aria-hidden />} title="Assistant">
+  1119→          <p className="font-semibold text-zinc-100">{s.assistant.tools} tools</p>
+  1120→          <div className="flex flex-wrap gap-1.5">
+  1121→            {s.assistant.toolNames.map((name) => (
+  1122→              <span
+  1123→                key={name}
+  1124→                className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-zinc-300"
+  1125→              >
+  1126→                <Wrench className="h-2.5 w-2.5 text-teal-400" aria-hidden />
+  1127→                {name}
+  1128→              </span>
+  1129→            ))}
+  1130→          </div>
+  1131→        </StatCard>
+  1132→      </div>
+  1133→
+  1134→      {/* Top prompts + recent calls */}
+  1135→      <div className="grid gap-4 lg:grid-cols-2">
+  1136→        <Card className="border-white/10 bg-white/[0.03]">
+  1137→          <CardHeader className="pb-2">
+  1138→            <CardTitle className="flex items-center gap-2 text-base">
+  1139→              <Brain className="h-4 w-4 text-rose-400" aria-hidden /> Top prompts
+  1140→            </CardTitle>
+  1141→            <CardDescription>Aggregated by feature and mode from the persisted usage logs.</CardDescription>
+  1142→          </CardHeader>
+  1143→          <CardContent>
+  1144→            {prompts.loading && !prompts.data ? (
+  1145→              <div className="space-y-2">
+  1146→                {Array.from({ length: 4 }).map((_, i) => (
+  1147→                  <Skeleton key={i} className="h-9 w-full" />
+  1148→                ))}
+  1149→              </div>
+  1150→            ) : prompts.error && !prompts.data ? (
+  1151→              <ErrorState compact message={prompts.error} onRetry={prompts.refetch} />
+  1152→            ) : (prompts.data?.topPrompts ?? []).length === 0 ? (
+  1153→              <p className="py-6 text-center text-sm text-zinc-500">No prompts logged yet.</p>
+  1154→            ) : (
+  1155→              <div className="custom-scrollbar max-h-72 overflow-y-auto">
+  1156→                <Table>
+  1157→                  <TableHeader>
+  1158→                    <TableRow className="border-white/10 hover:bg-transparent">
+  1159→                      <TableHead className="text-zinc-400">Feature</TableHead>
+  1160→                      <TableHead className="text-zinc-400">Prompt</TableHead>
+  1161→                      <TableHead className="text-right text-zinc-400">Count</TableHead>
+  1162→                      <TableHead className="text-right text-zinc-400">Tokens</TableHead>
+  1163→                    </TableRow>
+  1164→                  </TableHeader>
+  1165→                  <TableBody>
+  1166→                    {(prompts.data?.topPrompts ?? []).map((p, i) => (
+  1167→                      <TableRow key={`${p.feature}-${i}`} className="border-white/5">
+  1168→                        <TableCell className="font-mono text-[11px] text-rose-300">
+  1169→                          {p.feature}
+  1170→                          {p.mode ? <span className="text-zinc-600">/{p.mode}</span> : null}
+  1171→                        </TableCell>
+  1172→                        <TableCell className="max-w-[220px] truncate text-xs text-zinc-300" title={p.snippet}>
+  1173→                          {p.snippet}
+  1174→                        </TableCell>
+  1175→                        <TableCell className="text-right text-xs font-bold text-zinc-100">{p.count}</TableCell>
+  1176→                        <TableCell className="text-right font-mono text-[11px] text-zinc-400">{p.tokens}</TableCell>
+  1177→                      </TableRow>
+  1178→                    ))}
+  1179→                  </TableBody>
+  1180→                </Table>
+  1181→              </div>
+  1182→            )}
+  1183→          </CardContent>
+  1184→        </Card>
+  1185→
+  1186→        <Card className="border-white/10 bg-white/[0.03]">
+  1187→          <CardHeader className="pb-2">
+  1188→            <CardTitle className="flex items-center gap-2 text-base">
+  1189→              <Activity className="h-4 w-4 text-amber-400" aria-hidden /> Recent calls
+  1190→            </CardTitle>
+  1191→            <CardDescription>
+  1192→              Latest {prompts.data?.recent.length ?? 0} LLM invocations from the in-memory ring.
+  1193→            </CardDescription>
+  1194→          </CardHeader>
+  1195→          <CardContent>
+  1196→            {prompts.loading && !prompts.data ? (
+  1197→              <div className="space-y-2">
+  1198→                {Array.from({ length: 5 }).map((_, i) => (
+  1199→                  <Skeleton key={i} className="h-8 w-full" />
+  1200→                ))}
+  1201→              </div>
+  1202→            ) : prompts.error && !prompts.data ? null : (prompts.data?.recent ?? []).length === 0 ? (
+  1203→              <p className="py-6 text-center text-sm text-zinc-500">No calls recorded yet.</p>
+  1204→            ) : (
+  1205→              <ul className="custom-scrollbar max-h-72 space-y-1.5 overflow-y-auto pr-1">
+  1206→                {(prompts.data?.recent ?? []).map((r, i) => (
+  1207→                  <li
+  1208→                    key={`${r.traceid}-${i}`}
+  1209→                    className="flex items-center gap-2.5 rounded-lg border border-white/5 bg-white/[0.02] px-2.5 py-2"
+  1210→                  >
+  1211→                    <span
+  1212→                      className={cn(
+  1213→                        'h-2 w-2 shrink-0 rounded-full',
+  1214→                        r.status === 'ok' || r.status === 'success' ? 'bg-emerald-400' : 'bg-rose-400',
+  1215→                      )}
+  1216→                      aria-label={r.status}
+  1217→                    />
+  1218→                    <span className="min-w-0 flex-1">
+  1219→                      <span className="block truncate font-mono text-[11px] text-zinc-300">
+  1220→                        {r.feature}
+  1221→                        {r.mode ? <span className="text-zinc-600">/{r.mode}</span> : null} · {r.provider}
+  1222→                      </span>
+  1223→                      <span className="block truncate text-[11px] text-zinc-600" title={r.snippet}>
+  1224→                        {r.snippet}
+  1225→                      </span>
+  1226→                    </span>
+  1227→                    {r.degraded && (
+  1228→                      <span className="shrink-0 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-amber-300">
+  1229→                        degraded
+  1230→                      </span>
+  1231→                    )}
+  1232→                    <span className="shrink-0 text-right font-mono text-[10px] text-zinc-500">
+  1233→                      <span className="block">{r.tokens} tok</span>
+  1234→                      <span className="block">{formatMs(r.latencyms)}</span>
+  1235→                    </span>
+  1236→                  </li>
+  1237→                ))}
+  1238→              </ul>
+  1239→            )}
+  1240→          </CardContent>
+  1241→        </Card>
+  1242→      </div>
+  1243→
+  1244→      {/* Recent errors */}
+  1245→      <Card className="border-white/10 bg-white/[0.03]">
+  1246→        <CardHeader className="pb-2">
+  1247→          <CardTitle className="flex items-center gap-2 text-base">
+  1248→            <AlertTriangle className="h-4 w-4 text-rose-400" aria-hidden /> Recent AI errors
+  1249→          </CardTitle>
+  1250→          <CardDescription>
+  1251→            {errors.data ? `${errors.data.total} total · ${(errors.data.errorRate * 100).toFixed(1)}% error rate` : '—'}
+  1252→          </CardDescription>
+  1253→        </CardHeader>
+  1254→        <CardContent>
+  1255→          {errors.loading && !errors.data ? (
+  1256→            <div className="space-y-2">
+  1257→              {Array.from({ length: 3 }).map((_, i) => (
+  1258→                <Skeleton key={i} className="h-10 w-full" />
+  1259→              ))}
+  1260→            </div>
+  1261→          ) : errors.error && !errors.data ? (
+  1262→            <ErrorState compact message={errors.error} onRetry={errors.refetch} />
+  1263→          ) : (errors.data?.recent ?? []).length === 0 ? (
+  1264→            <p className="flex items-center justify-center gap-2 py-6 text-center text-sm text-emerald-300">
+  1265→              <Sparkles className="h-4 w-4" aria-hidden /> No errors — smooth sailing.
+  1266→            </p>
+  1267→          ) : (
+  1268→            <ul className="divide-y divide-white/5">
+  1269→              {(errors.data?.recent ?? []).map((e, i) => (
+  1270→                <li key={`${e.traceid}-${i}`} className="flex items-start justify-between gap-3 py-2.5">
+  1271→                  <div className="min-w-0">
+  1272→                    <p className="truncate text-sm text-zinc-200">{e.message || e.snippet}</p>
+  1273→                    <p className="font-mono text-[11px] text-zinc-600">
+  1274→                      {e.provider} · {e.feature}
+  1275→                    </p>
+  1276→                  </div>
+  1277→                  <span className="shrink-0 text-xs text-zinc-500">
+  1278→                    {new Date(e.createdat).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+  1279→                  </span>
+  1280→                </li>
+  1281→              ))}
+  1282→            </ul>
+  1283→          )}
+  1284→        </CardContent>
+  1285→      </Card>
+  1286→    </div>
+  1287→  );
+  1288→}
+  1289→
+  1290→/* ------------------------------ main view ------------------------------ */
+  1291→
+  1292→export function AdminView() {
+  1293→  const health = useApi('admin-health', () => api.health());
+  1294→  // FAZA 11: #/admin/tenants deep-links straight to the Tenants tab
+  1295→  // (route.params[0] === 'tenants'); every other sub-path defaults to content.
+  1296→  // Controlled Tabs: `tab` is null until the user clicks, so the route-derived
+  1297→  // target keeps driving the selection across the null→object route transition
+  1298→  // (useRoute is null on the very first render).
+  1299→  const route = useRoute();
+  1300→  const [tabOverride, setTabOverride] = useState<string | null>(null);
+  1301→  const routeTab =
+  1302→    route?.view === 'admin' && route.params[0] === 'tenants'
+  1303→      ? 'tenants'
+  1304→      : route?.view === 'admin' && route.params[0] === 'ingest'
+  1305→        ? 'ingest' // FAZA 12: #/admin/ingest deep-links to the miner console
+  1306→        : route?.view === 'admin' && route.params[0] === 'shards'
+  1307→          ? 'shards' // FAZA 13: #/admin/shards deep-links to the shard console
+  1308→          : 'content';
+  1309→  const activeTab = tabOverride ?? routeTab;
+  1310→
+  1311→  return (
+  1312→    <Container className="space-y-6 py-8 sm:py-10">
+  1313→      <div className="flex flex-wrap items-end justify-between gap-4">
+  1314→        <PageHeader
+  1315→          title="Admin panel"
+  1316→          subtitle="Operate the Animaxia backend — library, miner, providers and system health."
+  1317→        />
+  1318→        <Button
+  1319→          variant="outline"
+  1320→          className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+  1321→          onClick={() => health.refetch()}
+  1322→        >
+  1323→          <RefreshCw aria-hidden /> Refresh
+  1324→        </Button>
+  1325→      </div>
+  1326→
+  1327→      <StatsSection health={health.data} loading={health.loading} error={health.error} onRetry={health.refetch} />
+  1328→
+  1329→      <Tabs value={activeTab} onValueChange={setTabOverride} className="gap-4">
+  1330→        <TabsList className="w-full flex-wrap justify-start border border-white/10 bg-white/[0.03] sm:w-fit">
+  1331→          <TabsTrigger value="content">Content</TabsTrigger>
+  1332→          <TabsTrigger value="miner">Miner</TabsTrigger>
+  1333→          <TabsTrigger value="analytics">
+  1334→            <BarChart3 className="h-3.5 w-3.5" aria-hidden /> Analytics
+  1335→          </TabsTrigger>
+  1336→          <TabsTrigger value="workers">
+  1337→            <Cpu className="h-3.5 w-3.5" aria-hidden /> Workers
+  1338→          </TabsTrigger>
+  1339→          <TabsTrigger value="security">
+  1340→            <ShieldAlert className="h-3.5 w-3.5" aria-hidden /> Security
+  1341→          </TabsTrigger>
+  1342→          <TabsTrigger value="tenants">
+  1343→            <Building2 className="h-3.5 w-3.5" aria-hidden /> Tenants
+  1344→          </TabsTrigger>
+  1345→          <TabsTrigger value="ingest">
+  1346→            <DatabaseZap className="h-3.5 w-3.5" aria-hidden /> Ingest
+  1347→          </TabsTrigger>
+  1348→          <TabsTrigger value="shards">
+  1349→            <Network className="h-3.5 w-3.5" aria-hidden /> Shards
+  1350→          </TabsTrigger>
+  1351→          <TabsTrigger value="providers">Providers</TabsTrigger>
+  1352→          <TabsTrigger value="ai">
+  1353→            <Bot className="h-3.5 w-3.5" aria-hidden /> AI Cloud
+  1354→          </TabsTrigger>
+  1355→          <TabsTrigger value="about">About</TabsTrigger>
+  1356→        </TabsList>
+  1357→        <TabsContent value="content">
+  1358→          <ContentTab onMutated={() => health.refetch()} />
+  1359→        </TabsContent>
+  1360→        <TabsContent value="miner">
+  1361→          <MinerTab onMutated={() => health.refetch()} />
+  1362→        </TabsContent>
+  1363→        <TabsContent value="analytics">
+  1364→          <AdminAnalyticsTab />
+  1365→        </TabsContent>
+  1366→        <TabsContent value="workers">
+  1367→          <AdminWorkersTab />
+  1368→        </TabsContent>
+  1369→        <TabsContent value="security">
+  1370→          <AdminSecurityTab />
+  1371→        </TabsContent>
+  1372→        <TabsContent value="tenants">
+  1373→          <AdminTenantsTab />
+  1374→        </TabsContent>
+  1375→        <TabsContent value="ingest">
+  1376→          <AdminMinerTab />
+  1377→        </TabsContent>
+  1378→        <TabsContent value="shards">
+  1379→          <AdminShardsTab />
+  1380→        </TabsContent>
+  1381→        <TabsContent value="providers">
+  1382→          <ProvidersTab providers={health.data?.providers} loading={health.loading} />
+  1383→        </TabsContent>
+  1384→        <TabsContent value="ai">
+  1385→          <AiCloudTab />
+  1386→        </TabsContent>
+  1387→        <TabsContent value="about">
+  1388→          <AboutTab onSeeded={() => health.refetch()} />
+  1389→        </TabsContent>
+  1390→      </Tabs>
+  1391→    </Container>
+  1392→  );
+  1393→}
+  1394→

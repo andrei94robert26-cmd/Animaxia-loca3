@@ -1,0 +1,914 @@
+     1→{
+     2→  "annotations": {
+     3→    "list": [
+     4→      {
+     5→        "builtIn": 1,
+     6→        "datasource": {
+     7→          "type": "grafana",
+     8→          "uid": "-- Grafana --"
+     9→        },
+    10→        "enable": true,
+    11→        "hide": true,
+    12→        "iconColor": "rgba(0, 211, 255, 1)",
+    13→        "name": "Annotations & Alerts",
+    14→        "type": "dashboard"
+    15→      }
+    16→    ]
+    17→  },
+    18→  "description": "FAZA 13 (Sharding & Multi-Node) \u2014 DB shard view: per-shard pg pool gauges (logical mode = shared main pool, physical mode = dedicated Neon branch pools via SHARD{N}URL), per-shard error rate + health, search cluster (FTS fan-out over searchdocs per shard) and vector cluster (pgvector fan-out with tenant/hint affinity) node latency, query/upsert rates and single-flight coalescing. Alerts: AnimaxiaShardDown, AnimaxiaSearchClusterNodeDown. Metric contract: animaxia-ops/metrics/METRICS.md \u00a7FAZA 13.",
+    19→  "editable": true,
+    20→  "fiscalYearStartMonth": 0,
+    21→  "graphTooltip": 1,
+    22→  "id": null,
+    23→  "links": [],
+    24→  "panels": [
+    25→    {
+    26→      "collapsed": false,
+    27→      "gridPos": {
+    28→        "h": 1,
+    29→        "w": 24,
+    30→        "x": 0,
+    31→        "y": 0
+    32→      },
+    33→      "id": 1,
+    34→      "panels": [],
+    35→      "title": "Shard pools (FAZA 13)",
+    36→      "type": "row"
+    37→    },
+    38→    {
+    39→      "datasource": {
+    40→        "type": "prometheus",
+    41→        "uid": "animaxia-prom"
+    42→      },
+    43→      "description": "Per-shard pg pool gauges from the 'shards' collector (db.js listShardPools): total / idle / waiting clients per shard. In logical mode every shard reports the shared main pool; in physical mode (SHARD{N}URL set) each shard shows its dedicated Neon branch pool.",
+    44→      "fieldConfig": {
+    45→        "defaults": {
+    46→          "color": {
+    47→            "mode": "palette-classic"
+    48→          },
+    49→          "custom": {
+    50→            "axisBorderShow": false,
+    51→            "axisCenteredZero": false,
+    52→            "axisColorMode": "text",
+    53→            "axisLabel": "",
+    54→            "axisPlacement": "auto",
+    55→            "barAlignment": 0,
+    56→            "drawStyle": "line",
+    57→            "fillOpacity": 10,
+    58→            "gradientMode": "none",
+    59→            "hideFrom": {
+    60→              "legend": false,
+    61→              "tooltip": false,
+    62→              "viz": false
+    63→            },
+    64→            "insertNulls": false,
+    65→            "lineInterpolation": "linear",
+    66→            "lineWidth": 1,
+    67→            "pointSize": 5,
+    68→            "scaleDistribution": {
+    69→              "type": "linear"
+    70→            },
+    71→            "showPoints": "never",
+    72→            "spanNulls": true,
+    73→            "stacking": {
+    74→              "group": "A",
+    75→              "mode": "none"
+    76→            },
+    77→            "thresholdsStyle": {
+    78→              "mode": "off"
+    79→            }
+    80→          },
+    81→          "mappings": [],
+    82→          "thresholds": {
+    83→            "mode": "absolute",
+    84→            "steps": [
+    85→              {
+    86→                "color": "green",
+    87→                "value": null
+    88→              }
+    89→            ]
+    90→          },
+    91→          "unit": "none"
+    92→        },
+    93→        "overrides": []
+    94→      },
+    95→      "gridPos": {
+    96→        "h": 8,
+    97→        "w": 12,
+    98→        "x": 0,
+    99→        "y": 1
+   100→      },
+   101→      "id": 2,
+   102→      "options": {
+   103→        "legend": {
+   104→          "calcs": [
+   105→            "lastNotNull"
+   106→          ],
+   107→          "displayMode": "list",
+   108→          "placement": "bottom",
+   109→          "showLegend": true
+   110→        },
+   111→        "tooltip": {
+   112→          "mode": "multi",
+   113→          "sort": "desc"
+   114→        }
+   115→      },
+   116→      "pluginVersion": "11.5.1",
+   117→      "targets": [
+   118→        {
+   119→          "datasource": {
+   120→            "type": "prometheus",
+   121→            "uid": "animaxia-prom"
+   122→          },
+   123→          "editorMode": "code",
+   124→          "expr": "animaxia_db_shard_pool_total",
+   125→          "legendFormat": "total \u00b7 s{{shard}} ({{branch}})",
+   126→          "range": true,
+   127→          "refId": "A"
+   128→        },
+   129→        {
+   130→          "datasource": {
+   131→            "type": "prometheus",
+   132→            "uid": "animaxia-prom"
+   133→          },
+   134→          "editorMode": "code",
+   135→          "expr": "animaxia_db_shard_pool_idle",
+   136→          "legendFormat": "idle \u00b7 s{{shard}} ({{branch}})",
+   137→          "range": true,
+   138→          "refId": "B"
+   139→        },
+   140→        {
+   141→          "datasource": {
+   142→            "type": "prometheus",
+   143→            "uid": "animaxia-prom"
+   144→          },
+   145→          "editorMode": "code",
+   146→          "expr": "animaxia_db_shard_pool_waiting",
+   147→          "legendFormat": "waiting \u00b7 s{{shard}} ({{branch}})",
+   148→          "range": true,
+   149→          "refId": "C"
+   150→        }
+   151→      ],
+   152→      "title": "Pool usage per shard",
+   153→      "type": "timeseries"
+   154→    },
+   155→    {
+   156→      "datasource": {
+   157→        "type": "prometheus",
+   158→        "uid": "animaxia-prom"
+   159→      },
+   160→      "description": "Query error rate per shard from the pool registry stats (queryOnShard failure counter). Sustained non-zero on a branch-mode shard = the resilient branch\u2192main fallback is absorbing a dead Neon branch (expect a latency penalty, not an outage). shard 0 errors = the main pool itself is failing.",
+   161→      "fieldConfig": {
+   162→        "defaults": {
+   163→          "color": {
+   164→            "mode": "palette-classic"
+   165→          },
+   166→          "custom": {
+   167→            "axisBorderShow": false,
+   168→            "axisCenteredZero": false,
+   169→            "axisColorMode": "text",
+   170→            "axisLabel": "",
+   171→            "axisPlacement": "auto",
+   172→            "barAlignment": 0,
+   173→            "drawStyle": "line",
+   174→            "fillOpacity": 10,
+   175→            "gradientMode": "none",
+   176→            "hideFrom": {
+   177→              "legend": false,
+   178→              "tooltip": false,
+   179→              "viz": false
+   180→            },
+   181→            "insertNulls": false,
+   182→            "lineInterpolation": "linear",
+   183→            "lineWidth": 1,
+   184→            "pointSize": 5,
+   185→            "scaleDistribution": {
+   186→              "type": "linear"
+   187→            },
+   188→            "showPoints": "never",
+   189→            "spanNulls": true,
+   190→            "stacking": {
+   191→              "group": "A",
+   192→              "mode": "none"
+   193→            },
+   194→            "thresholdsStyle": {
+   195→              "mode": "off"
+   196→            }
+   197→          },
+   198→          "mappings": [],
+   199→          "thresholds": {
+   200→            "mode": "absolute",
+   201→            "steps": [
+   202→              {
+   203→                "color": "green",
+   204→                "value": null
+   205→              }
+   206→            ]
+   207→          },
+   208→          "unit": "none"
+   209→        },
+   210→        "overrides": []
+   211→      },
+   212→      "gridPos": {
+   213→        "h": 8,
+   214→        "w": 9,
+   215→        "x": 12,
+   216→        "y": 1
+   217→      },
+   218→      "id": 3,
+   219→      "options": {
+   220→        "legend": {
+   221→          "calcs": [
+   222→            "lastNotNull"
+   223→          ],
+   224→          "displayMode": "list",
+   225→          "placement": "bottom",
+   226→          "showLegend": true
+   227→        },
+   228→        "tooltip": {
+   229→          "mode": "multi",
+   230→          "sort": "desc"
+   231→        }
+   232→      },
+   233→      "pluginVersion": "11.5.1",
+   234→      "targets": [
+   235→        {
+   236→          "datasource": {
+   237→            "type": "prometheus",
+   238→            "uid": "animaxia-prom"
+   239→          },
+   240→          "editorMode": "code",
+   241→          "expr": "sum by (shard) (rate(animaxia_db_shard_errors_total[15m]))",
+   242→          "legendFormat": "shard {{shard}}",
+   243→          "range": true,
+   244→          "refId": "A"
+   245→        }
+   246→      ],
+   247→      "title": "Errors per shard",
+   248→      "type": "timeseries"
+   249→    },
+   250→    {
+   251→      "datasource": {
+   252→        "type": "prometheus",
+   253→        "uid": "animaxia-prom"
+   254→      },
+   255→      "description": "animaxia_db_shard_connected and animaxia_db_shard_healthy per shard \u2014 1 = pool connected/healthy. animaxia_db_shard_connected == 0 for 2m fires AnimaxiaShardDown (critical).",
+   256→      "fieldConfig": {
+   257→        "defaults": {
+   258→          "color": {
+   259→            "mode": "palette-classic"
+   260→          },
+   261→          "mappings": [],
+   262→          "thresholds": {
+   263→            "mode": "absolute",
+   264→            "steps": [
+   265→              {
+   266→                "color": "red",
+   267→                "value": null
+   268→              },
+   269→              {
+   270→                "color": "green",
+   271→                "value": 1
+   272→              }
+   273→            ]
+   274→          },
+   275→          "unit": "none"
+   276→        },
+   277→        "overrides": []
+   278→      },
+   279→      "gridPos": {
+   280→        "h": 8,
+   281→        "w": 3,
+   282→        "x": 21,
+   283→        "y": 1
+   284→      },
+   285→      "id": 4,
+   286→      "options": {
+   287→        "colorMode": "value",
+   288→        "graphMode": "area",
+   289→        "justifyMode": "auto",
+   290→        "orientation": "auto",
+   291→        "reduceOptions": {
+   292→          "calcs": [
+   293→            "lastNotNull"
+   294→          ],
+   295→          "fields": "",
+   296→          "values": false
+   297→        },
+   298→        "showPercentChange": false,
+   299→        "textMode": "auto",
+   300→        "wideLayout": true
+   301→      },
+   302→      "pluginVersion": "11.5.1",
+   303→      "targets": [
+   304→        {
+   305→          "datasource": {
+   306→            "type": "prometheus",
+   307→            "uid": "animaxia-prom"
+   308→          },
+   309→          "editorMode": "code",
+   310→          "expr": "animaxia_db_shard_connected",
+   311→          "legendFormat": "connected \u00b7 s{{shard}}",
+   312→          "range": false,
+   313→          "refId": "A"
+   314→        },
+   315→        {
+   316→          "datasource": {
+   317→            "type": "prometheus",
+   318→            "uid": "animaxia-prom"
+   319→          },
+   320→          "editorMode": "code",
+   321→          "expr": "animaxia_db_shard_healthy",
+   322→          "legendFormat": "healthy \u00b7 s{{shard}}",
+   323→          "range": false,
+   324→          "refId": "B"
+   325→        }
+   326→      ],
+   327→      "title": "Shard health (connected / healthy)",
+   328→      "type": "stat"
+   329→    },
+   330→    {
+   331→      "collapsed": false,
+   332→      "gridPos": {
+   333→        "h": 1,
+   334→        "w": 24,
+   335→        "x": 0,
+   336→        "y": 9
+   337→      },
+   338→      "id": 5,
+   339→      "panels": [],
+   340→      "title": "Cluster latency per shard",
+   341→      "type": "row"
+   342→    },
+   343→    {
+   344→      "datasource": {
+   345→        "type": "prometheus",
+   346→        "uid": "animaxia-prom"
+   347→      },
+   348→      "description": "Per-node health-ping latency of the FAZA 13 search cluster (searchdocs FTS fan-out) and vector cluster (pgvector fan-out): SELECT 1 + COUNT(*) WHERE shardid = n per node, in ms. Logical mode shares one physical pool \u2014 parallel node latency still reveals per-shard query cost.",
+   349→      "fieldConfig": {
+   350→        "defaults": {
+   351→          "color": {
+   352→            "mode": "palette-classic"
+   353→          },
+   354→          "custom": {
+   355→            "axisBorderShow": false,
+   356→            "axisCenteredZero": false,
+   357→            "axisColorMode": "text",
+   358→            "axisLabel": "",
+   359→            "axisPlacement": "auto",
+   360→            "barAlignment": 0,
+   361→            "drawStyle": "line",
+   362→            "fillOpacity": 10,
+   363→            "gradientMode": "none",
+   364→            "hideFrom": {
+   365→              "legend": false,
+   366→              "tooltip": false,
+   367→              "viz": false
+   368→            },
+   369→            "insertNulls": false,
+   370→            "lineInterpolation": "linear",
+   371→            "lineWidth": 1,
+   372→            "pointSize": 5,
+   373→            "scaleDistribution": {
+   374→              "type": "linear"
+   375→            },
+   376→            "showPoints": "never",
+   377→            "spanNulls": true,
+   378→            "stacking": {
+   379→              "group": "A",
+   380→              "mode": "none"
+   381→            },
+   382→            "thresholdsStyle": {
+   383→              "mode": "off"
+   384→            }
+   385→          },
+   386→          "mappings": [],
+   387→          "thresholds": {
+   388→            "mode": "absolute",
+   389→            "steps": [
+   390→              {
+   391→                "color": "green",
+   392→                "value": null
+   393→              }
+   394→            ]
+   395→          },
+   396→          "unit": "ms"
+   397→        },
+   398→        "overrides": []
+   399→      },
+   400→      "gridPos": {
+   401→        "h": 8,
+   402→        "w": 24,
+   403→        "x": 0,
+   404→        "y": 10
+   405→      },
+   406→      "id": 6,
+   407→      "options": {
+   408→        "legend": {
+   409→          "calcs": [
+   410→            "lastNotNull"
+   411→          ],
+   412→          "displayMode": "list",
+   413→          "placement": "bottom",
+   414→          "showLegend": true
+   415→        },
+   416→        "tooltip": {
+   417→          "mode": "multi",
+   418→          "sort": "desc"
+   419→        }
+   420→      },
+   421→      "pluginVersion": "11.5.1",
+   422→      "targets": [
+   423→        {
+   424→          "datasource": {
+   425→            "type": "prometheus",
+   426→            "uid": "animaxia-prom"
+   427→          },
+   428→          "editorMode": "code",
+   429→          "expr": "animaxia_search_cluster_node_latency_ms",
+   430→          "legendFormat": "search \u00b7 s{{shard}}",
+   431→          "range": true,
+   432→          "refId": "A"
+   433→        },
+   434→        {
+   435→          "datasource": {
+   436→            "type": "prometheus",
+   437→            "uid": "animaxia-prom"
+   438→          },
+   439→          "editorMode": "code",
+   440→          "expr": "animaxia_vector_cluster_node_latency_ms",
+   441→          "legendFormat": "vector \u00b7 s{{shard}}",
+   442→          "range": true,
+   443→          "refId": "B"
+   444→        }
+   445→      ],
+   446→      "title": "Latency per shard \u2014 search & vector cluster nodes",
+   447→      "type": "timeseries"
+   448→    },
+   449→    {
+   450→      "collapsed": false,
+   451→      "gridPos": {
+   452→        "h": 1,
+   453→        "w": 24,
+   454→        "x": 0,
+   455→        "y": 18
+   456→      },
+   457→      "id": 7,
+   458→      "panels": [],
+   459→      "title": "Search cluster health",
+   460→      "type": "row"
+   461→    },
+   462→    {
+   463→      "datasource": {
+   464→        "type": "prometheus",
+   465→        "uid": "animaxia-prom"
+   466→      },
+   467→      "description": "animaxia_search_cluster_nodes_healthy vs nodes_total (live from the shard pool registry). enabled=0 means SEARCHCLUSTENABLED=false \u2014 /api/search/advanced serves the legacy single-node path. nodes_healthy < nodes_total for 5m fires AnimaxiaSearchClusterNodeDown.",
+   468→      "fieldConfig": {
+   469→        "defaults": {
+   470→          "color": {
+   471→            "mode": "palette-classic"
+   472→          },
+   473→          "mappings": [],
+   474→          "thresholds": {
+   475→            "mode": "absolute",
+   476→            "steps": [
+   477→              {
+   478→                "color": "red",
+   479→                "value": null
+   480→              },
+   481→              {
+   482→                "color": "green",
+   483→                "value": 1
+   484→              }
+   485→            ]
+   486→          },
+   487→          "unit": "none"
+   488→        },
+   489→        "overrides": []
+   490→      },
+   491→      "gridPos": {
+   492→        "h": 8,
+   493→        "w": 6,
+   494→        "x": 0,
+   495→        "y": 19
+   496→      },
+   497→      "id": 8,
+   498→      "options": {
+   499→        "colorMode": "value",
+   500→        "graphMode": "area",
+   501→        "justifyMode": "auto",
+   502→        "orientation": "auto",
+   503→        "reduceOptions": {
+   504→          "calcs": [
+   505→            "lastNotNull"
+   506→          ],
+   507→          "fields": "",
+   508→          "values": false
+   509→        },
+   510→        "showPercentChange": false,
+   511→        "textMode": "auto",
+   512→        "wideLayout": true
+   513→      },
+   514→      "pluginVersion": "11.5.1",
+   515→      "targets": [
+   516→        {
+   517→          "datasource": {
+   518→            "type": "prometheus",
+   519→            "uid": "animaxia-prom"
+   520→          },
+   521→          "editorMode": "code",
+   522→          "expr": "animaxia_search_cluster_nodes_healthy",
+   523→          "legendFormat": "healthy nodes",
+   524→          "range": false,
+   525→          "refId": "A"
+   526→        },
+   527→        {
+   528→          "datasource": {
+   529→            "type": "prometheus",
+   530→            "uid": "animaxia-prom"
+   531→          },
+   532→          "editorMode": "code",
+   533→          "expr": "animaxia_search_cluster_nodes_total",
+   534→          "legendFormat": "nodes total",
+   535→          "range": false,
+   536→          "refId": "B"
+   537→        },
+   538→        {
+   539→          "datasource": {
+   540→            "type": "prometheus",
+   541→            "uid": "animaxia-prom"
+   542→          },
+   543→          "editorMode": "code",
+   544→          "expr": "animaxia_search_cluster_enabled",
+   545→          "legendFormat": "enabled",
+   546→          "range": false,
+   547→          "refId": "C"
+   548→        }
+   549→      ],
+   550→      "title": "Search cluster \u2014 healthy nodes / total",
+   551→      "type": "stat"
+   552→    },
+   553→    {
+   554→      "datasource": {
+   555→        "type": "prometheus",
+   556→        "uid": "animaxia-prom"
+   557→      },
+   558→      "description": "Rate of fan-out queries (animaxia_search_cluster_queries_total), node errors (animaxia_search_cluster_errors_total) and single-flight coalesced duplicates (animaxia_search_cluster_coalesced_total, FAZA 17-style) on the search cluster. A high coalesced/queries ratio means many identical concurrent searches are being collapsed into one DB round-trip.",
+   559→      "fieldConfig": {
+   560→        "defaults": {
+   561→          "color": {
+   562→            "mode": "palette-classic"
+   563→          },
+   564→          "custom": {
+   565→            "axisBorderShow": false,
+   566→            "axisCenteredZero": false,
+   567→            "axisColorMode": "text",
+   568→            "axisLabel": "",
+   569→            "axisPlacement": "auto",
+   570→            "barAlignment": 0,
+   571→            "drawStyle": "line",
+   572→            "fillOpacity": 10,
+   573→            "gradientMode": "none",
+   574→            "hideFrom": {
+   575→              "legend": false,
+   576→              "tooltip": false,
+   577→              "viz": false
+   578→            },
+   579→            "insertNulls": false,
+   580→            "lineInterpolation": "linear",
+   581→            "lineWidth": 1,
+   582→            "pointSize": 5,
+   583→            "scaleDistribution": {
+   584→              "type": "linear"
+   585→            },
+   586→            "showPoints": "never",
+   587→            "spanNulls": true,
+   588→            "stacking": {
+   589→              "group": "A",
+   590→              "mode": "none"
+   591→            },
+   592→            "thresholdsStyle": {
+   593→              "mode": "off"
+   594→            }
+   595→          },
+   596→          "mappings": [],
+   597→          "thresholds": {
+   598→            "mode": "absolute",
+   599→            "steps": [
+   600→              {
+   601→                "color": "green",
+   602→                "value": null
+   603→              }
+   604→            ]
+   605→          },
+   606→          "unit": "none"
+   607→        },
+   608→        "overrides": []
+   609→      },
+   610→      "gridPos": {
+   611→        "h": 8,
+   612→        "w": 18,
+   613→        "x": 6,
+   614→        "y": 19
+   615→      },
+   616→      "id": 9,
+   617→      "options": {
+   618→        "legend": {
+   619→          "calcs": [
+   620→            "lastNotNull"
+   621→          ],
+   622→          "displayMode": "list",
+   623→          "placement": "bottom",
+   624→          "showLegend": true
+   625→        },
+   626→        "tooltip": {
+   627→          "mode": "multi",
+   628→          "sort": "desc"
+   629→        }
+   630→      },
+   631→      "pluginVersion": "11.5.1",
+   632→      "targets": [
+   633→        {
+   634→          "datasource": {
+   635→            "type": "prometheus",
+   636→            "uid": "animaxia-prom"
+   637→          },
+   638→          "editorMode": "code",
+   639→          "expr": "sum(rate(animaxia_search_cluster_queries_total[15m]))",
+   640→          "legendFormat": "queries /s",
+   641→          "range": true,
+   642→          "refId": "A"
+   643→        },
+   644→        {
+   645→          "datasource": {
+   646→            "type": "prometheus",
+   647→            "uid": "animaxia-prom"
+   648→          },
+   649→          "editorMode": "code",
+   650→          "expr": "sum(rate(animaxia_search_cluster_coalesced_total[15m]))",
+   651→          "legendFormat": "coalesced /s",
+   652→          "range": true,
+   653→          "refId": "B"
+   654→        },
+   655→        {
+   656→          "datasource": {
+   657→            "type": "prometheus",
+   658→            "uid": "animaxia-prom"
+   659→          },
+   660→          "editorMode": "code",
+   661→          "expr": "sum(rate(animaxia_search_cluster_errors_total[15m]))",
+   662→          "legendFormat": "errors /s",
+   663→          "range": true,
+   664→          "refId": "C"
+   665→        }
+   666→      ],
+   667→      "title": "Search cluster \u2014 query rate, errors & coalesced (single-flight)",
+   668→      "type": "timeseries"
+   669→    },
+   670→    {
+   671→      "collapsed": false,
+   672→      "gridPos": {
+   673→        "h": 1,
+   674→        "w": 24,
+   675→        "x": 0,
+   676→        "y": 27
+   677→      },
+   678→      "id": 10,
+   679→      "panels": [],
+   680→      "title": "Vector cluster health",
+   681→      "type": "row"
+   682→    },
+   683→    {
+   684→      "datasource": {
+   685→        "type": "prometheus",
+   686→        "uid": "animaxia-prom"
+   687→      },
+   688→      "description": "animaxia_vector_cluster_nodes_healthy vs nodes_total. enabled=0 means VECTORCLUSTENABLED=false \u2014 /api/vector/search serves the legacy single-pool pgvector path.",
+   689→      "fieldConfig": {
+   690→        "defaults": {
+   691→          "color": {
+   692→            "mode": "palette-classic"
+   693→          },
+   694→          "mappings": [],
+   695→          "thresholds": {
+   696→            "mode": "absolute",
+   697→            "steps": [
+   698→              {
+   699→                "color": "red",
+   700→                "value": null
+   701→              },
+   702→              {
+   703→                "color": "green",
+   704→                "value": 1
+   705→              }
+   706→            ]
+   707→          },
+   708→          "unit": "none"
+   709→        },
+   710→        "overrides": []
+   711→      },
+   712→      "gridPos": {
+   713→        "h": 8,
+   714→        "w": 6,
+   715→        "x": 0,
+   716→        "y": 28
+   717→      },
+   718→      "id": 11,
+   719→      "options": {
+   720→        "colorMode": "value",
+   721→        "graphMode": "area",
+   722→        "justifyMode": "auto",
+   723→        "orientation": "auto",
+   724→        "reduceOptions": {
+   725→          "calcs": [
+   726→            "lastNotNull"
+   727→          ],
+   728→          "fields": "",
+   729→          "values": false
+   730→        },
+   731→        "showPercentChange": false,
+   732→        "textMode": "auto",
+   733→        "wideLayout": true
+   734→      },
+   735→      "pluginVersion": "11.5.1",
+   736→      "targets": [
+   737→        {
+   738→          "datasource": {
+   739→            "type": "prometheus",
+   740→            "uid": "animaxia-prom"
+   741→          },
+   742→          "editorMode": "code",
+   743→          "expr": "animaxia_vector_cluster_nodes_healthy",
+   744→          "legendFormat": "healthy nodes",
+   745→          "range": false,
+   746→          "refId": "A"
+   747→        },
+   748→        {
+   749→          "datasource": {
+   750→            "type": "prometheus",
+   751→            "uid": "animaxia-prom"
+   752→          },
+   753→          "editorMode": "code",
+   754→          "expr": "animaxia_vector_cluster_nodes_total",
+   755→          "legendFormat": "nodes total",
+   756→          "range": false,
+   757→          "refId": "B"
+   758→        },
+   759→        {
+   760→          "datasource": {
+   761→            "type": "prometheus",
+   762→            "uid": "animaxia-prom"
+   763→          },
+   764→          "editorMode": "code",
+   765→          "expr": "animaxia_vector_cluster_enabled",
+   766→          "legendFormat": "enabled",
+   767→          "range": false,
+   768→          "refId": "C"
+   769→        }
+   770→      ],
+   771→      "title": "Vector cluster \u2014 healthy nodes / total",
+   772→      "type": "stat"
+   773→    },
+   774→    {
+   775→      "datasource": {
+   776→        "type": "prometheus",
+   777→        "uid": "animaxia-prom"
+   778→      },
+   779→      "description": "Rate of similarity queries (animaxia_vector_cluster_queries_total), upserts routed per the vectorref shard rule (animaxia_vector_cluster_upserts_total) and errors on the vector cluster.",
+   780→      "fieldConfig": {
+   781→        "defaults": {
+   782→          "color": {
+   783→            "mode": "palette-classic"
+   784→          },
+   785→          "custom": {
+   786→            "axisBorderShow": false,
+   787→            "axisCenteredZero": false,
+   788→            "axisColorMode": "text",
+   789→            "axisLabel": "",
+   790→            "axisPlacement": "auto",
+   791→            "barAlignment": 0,
+   792→            "drawStyle": "line",
+   793→            "fillOpacity": 10,
+   794→            "gradientMode": "none",
+   795→            "hideFrom": {
+   796→              "legend": false,
+   797→              "tooltip": false,
+   798→              "viz": false
+   799→            },
+   800→            "insertNulls": false,
+   801→            "lineInterpolation": "linear",
+   802→            "lineWidth": 1,
+   803→            "pointSize": 5,
+   804→            "scaleDistribution": {
+   805→              "type": "linear"
+   806→            },
+   807→            "showPoints": "never",
+   808→            "spanNulls": true,
+   809→            "stacking": {
+   810→              "group": "A",
+   811→              "mode": "none"
+   812→            },
+   813→            "thresholdsStyle": {
+   814→              "mode": "off"
+   815→            }
+   816→          },
+   817→          "mappings": [],
+   818→          "thresholds": {
+   819→            "mode": "absolute",
+   820→            "steps": [
+   821→              {
+   822→                "color": "green",
+   823→                "value": null
+   824→              }
+   825→            ]
+   826→          },
+   827→          "unit": "none"
+   828→        },
+   829→        "overrides": []
+   830→      },
+   831→      "gridPos": {
+   832→        "h": 8,
+   833→        "w": 18,
+   834→        "x": 6,
+   835→        "y": 28
+   836→      },
+   837→      "id": 12,
+   838→      "options": {
+   839→        "legend": {
+   840→          "calcs": [
+   841→            "lastNotNull"
+   842→          ],
+   843→          "displayMode": "list",
+   844→          "placement": "bottom",
+   845→          "showLegend": true
+   846→        },
+   847→        "tooltip": {
+   848→          "mode": "multi",
+   849→          "sort": "desc"
+   850→        }
+   851→      },
+   852→      "pluginVersion": "11.5.1",
+   853→      "targets": [
+   854→        {
+   855→          "datasource": {
+   856→            "type": "prometheus",
+   857→            "uid": "animaxia-prom"
+   858→          },
+   859→          "editorMode": "code",
+   860→          "expr": "sum(rate(animaxia_vector_cluster_queries_total[15m]))",
+   861→          "legendFormat": "queries /s",
+   862→          "range": true,
+   863→          "refId": "A"
+   864→        },
+   865→        {
+   866→          "datasource": {
+   867→            "type": "prometheus",
+   868→            "uid": "animaxia-prom"
+   869→          },
+   870→          "editorMode": "code",
+   871→          "expr": "sum(rate(animaxia_vector_cluster_upserts_total[15m]))",
+   872→          "legendFormat": "upserts /s",
+   873→          "range": true,
+   874→          "refId": "B"
+   875→        },
+   876→        {
+   877→          "datasource": {
+   878→            "type": "prometheus",
+   879→            "uid": "animaxia-prom"
+   880→          },
+   881→          "editorMode": "code",
+   882→          "expr": "sum(rate(animaxia_vector_cluster_errors_total[15m]))",
+   883→          "legendFormat": "errors /s",
+   884→          "range": true,
+   885→          "refId": "C"
+   886→        }
+   887→      ],
+   888→      "title": "Vector cluster \u2014 query, upsert & error rate",
+   889→      "type": "timeseries"
+   890→    }
+   891→  ],
+   892→  "preload": false,
+   893→  "refresh": "30s",
+   894→  "schemaVersion": 39,
+   895→  "tags": [
+   896→    "animaxia",
+   897→    "sharding",
+   898→    "ops"
+   899→  ],
+   900→  "templating": {
+   901→    "list": []
+   902→  },
+   903→  "time": {
+   904→    "from": "now-1h",
+   905→    "to": "now"
+   906→  },
+   907→  "timepicker": {},
+   908→  "timezone": "browser",
+   909→  "title": "Animaxia \u2014 DB Shards",
+   910→  "uid": "animaxia-db-shards",
+   911→  "version": 1,
+   912→  "weekStart": ""
+   913→}
+   914→

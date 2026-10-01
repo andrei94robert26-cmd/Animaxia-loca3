@@ -1,0 +1,273 @@
+# =============================================================================
+# Animaxia — ops alert rules (FAZA 9)
+# =============================================================================
+# PrometheusRule-style file. Consumes the recording rules from slo.yaml
+# (group animaxia_slo). Severity ladder:
+#   critical → page / immediate action
+#   warning  → ticket / investigate soon
+#   info     → awareness, no action required
+# Every alert links a runbook in animaxia-ops/runbooks/ — the full
+# alert → runbook matrix lives in animaxia-ops/alerts/README.md.
+# Metric names/labels follow animaxia-ops/metrics/METRICS.md (canonical).
+# =============================================================================
+
+groups:
+  - name: animaxia-ops-alerts
+    rules:
+      # ── Error budget burn on any SLO route ─────────────────────────────────
+      - alert: AnimaxiaErrorRateHigh
+        expr: slo:availability:error_ratio_1h > 0.02
+        for: 10m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "SLO error rate > 2% ({{ $labels.slo }})"
+          description: "The 1h error ratio for SLO '{{ $labels.slo }}' is {{ $value | humanizePercentage }}, above the 2% error-budget burn threshold (availability target 99.5% over 28d, budget 0.5% ≈ 3.4h downtime). Inspect the affected route on the 'Animaxia — User Experience' dashboard."
+          runbook_url: "animaxia-ops/runbooks/error-budget-burn.md"
+
+      # ── Neon / PostgreSQL connection lost ──────────────────────────────────
+      - alert: AnimaxiaNeonDisconnected
+        expr: animaxia_db_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "Neon (PostgreSQL) disconnected on the Animaxia monolith"
+          description: "animaxia_db_connected has been 0 for 2 minutes — the SQL layer is on the local fallback store and pgvector/RAG is degraded. The documented quick recovery is mini-services/animaxia-backend/restore-env.sh (see runbook)."
+          runbook_url: "animaxia-ops/runbooks/neon-outage.md"
+
+      # ── AI quota 402 spike ─────────────────────────────────────────────────
+      - alert: AnimaxiaAiQuotaSpike
+        expr: sum(rate(animaxia_quota_responses_total[15m])) * 60 > 5
+        for: 15m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "AI quota 402 responses > 5/min for 15m on /api/ai"
+          description: "Sustained 402 (quota exhausted) rate above 5 per minute on the /api/ai* quota gate (animaxia_quota_responses_total). Either an abusive client is hammering AI endpoints or the quota plan/limit is misconfigured. Per-route breakdown: 'Animaxia — AI Cloud' dashboard."
+          runbook_url: "animaxia-ops/runbooks/ai-quota-spike.md"
+
+      # ── AI latency SLO burn ────────────────────────────────────────────────
+      - alert: AnimaxiaAiLatencySLOBurn
+        expr: slo:ai_latency:p95_1h > 1500
+        for: 15m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "AI p95 latency above the 1500 ms SLO ({{ $labels.route }})"
+          description: "slo:ai_latency:p95_1h on route {{ $labels.route }} is {{ $value | humanize }} ms — above the 1500 ms FAZA 9 SLO target for 15 minutes. Check the LLM provider health and whether the degraded/fallback path is serving (animaxia_ai_degraded_total, 'Animaxia — AI Cloud' dashboard)."
+          runbook_url: "animaxia-ops/runbooks/ai-provider-degraded.md"
+
+      # ── AI provider degraded (fallback fired) ──────────────────────────────
+      - alert: AnimaxiaAiProviderDegraded
+        expr: increase(animaxia_ai_degraded_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "AI provider degraded — fallback fired"
+          description: "animaxia_ai_degraded_total increased within the last 15m: the primary LLM provider failed and the fallback path served requests. Expect elevated latency and/or reduced answer quality while this fires."
+          runbook_url: "animaxia-ops/runbooks/ai-provider-degraded.md"
+
+      # ── Edge WAF blocks spike ──────────────────────────────────────────────
+      - alert: AnimaxiaEdgeWafBlocksSpike
+        expr: sum(increase(animaxia_edge_waf_blocks_total[15m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Edge WAF blocked > 50 requests in 15m"
+          description: "WAF blocks across all rules (bot, sqli, xss, traversal, null-byte, query-size) exceeded 50 in 15 minutes. Could be an attack being correctly blocked — or a misconfigured rule eating legitimate traffic. Compare the per-rule breakdown on the 'Animaxia — Edge Gateway' dashboard."
+          runbook_url: "animaxia-ops/runbooks/edge-waf-misconfig.md"
+
+      # ── Edge cache hit ratio low ───────────────────────────────────────────
+      - alert: AnimaxiaEdgeCacheHitRatioLow
+        expr: |
+          sum(rate(animaxia_edge_cache_events_total{state="hit"}[5m]))
+            /
+          sum(rate(animaxia_edge_cache_events_total{state=~"hit|miss"}[5m])) < 0.3
+        for: 30m
+        labels:
+          severity: info
+          team: animaxia-ops
+        annotations:
+          summary: "Edge cache hit ratio below 30% for 30m"
+          description: "Edge cache hit ratio (hit / hit+miss) has been under 0.3 for 30 minutes — origin offload is poor. Check the x-edge-cache states (bypass/disabled/stale share) on the 'Animaxia — Edge Gateway' dashboard and review cache tags/TTLs."
+          runbook_url: "animaxia-ops/runbooks/edge-cache-hit-ratio.md"
+
+      # ── Scrape target down ─────────────────────────────────────────────────
+      - alert: AnimaxiaServiceDown
+        expr: up{job=~"animaxia-.*"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "Animaxia scrape target down: {{ $labels.job }} @ {{ $labels.instance }}"
+          description: "Prometheus has been unable to scrape {{ $labels.instance }} (job {{ $labels.job }}) for 5 minutes — the service is down or its /metrics endpoint is broken. For the monolith the metrics path is /api/metrics."
+          runbook_url: "animaxia-ops/runbooks/service-down.md"
+
+  # ── FAZA 13 (sharding) — per-shard DB + search cluster alerts ──────────────
+  - name: animaxia-sharding-alerts
+    rules:
+      # ── A shard pool lost its connection ───────────────────────────────────
+      - alert: AnimaxiaShardDown
+        expr: animaxia_db_shard_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "DB shard {{ $labels.shard }} ({{ $labels.branch }}) disconnected on the Animaxia monolith"
+          description: "animaxia_db_shard_connected{shard='{{ $labels.shard }}'} has been 0 for 2 minutes. Logical mode (mode='main'): the shard routes through the shared main Neon pool — this means the whole SQL layer is degraded (same signal class as AnimaxiaNeonDisconnected, expect local-fallback / 503s). Physical mode (mode='branch'): the dedicated Neon branch pool for shard {{ $labels.shard }} is down — queriesOnShard falls back to the main pool with a latency penalty per query, and that shard's searchdocs/vectorembeddings are served cross-pool until the branch recovers. Per-shard breakdown: 'Animaxia — DB Shards' dashboard."
+          runbook_url: "animaxia-ops/runbooks/shard-down.md"
+
+      # ── Search cluster lost nodes ──────────────────────────────────────────
+      - alert: AnimaxiaSearchClusterNodeDown
+        expr: animaxia_search_cluster_enabled == 1 and animaxia_search_cluster_nodes_healthy < animaxia_search_cluster_nodes_total
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Search cluster degraded — fewer healthy nodes than shards"
+          description: "The FAZA 13 search cluster (FTS fan-out over searchdocs per shard) has fewer healthy nodes than shards for 5 minutes. Fan-out still completes over the surviving nodes (a query only fails when ALL nodes fail), but result coverage and latency degrade — per-node docs/latency on the 'Animaxia — DB Shards' dashboard shows which shard is missing. Check whether the underlying shard pool is flapping (AnimaxiaShardDown) or a single node's health ping keeps timing out."
+          runbook_url: "animaxia-ops/runbooks/search-cluster-node-down.md"
+
+  # ── FAZA 15: Search Flow Control ─────────────────────────────────────────
+  - name: animaxia-searchflow-alerts
+    rules:
+      # ── Search requests were dropped (queue overflow) ──────────────────────
+      - alert: AnimaxiaSearchFlowDroppedRequests
+        expr: increase(animaxia_search_dropped_requests[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "Search flow queue dropped requests (queueCap overflow)"
+          description: "animaxia_search_dropped_requests increased in the last 5 minutes — more than queueCap search requests were waiting simultaneously and the queue answered 503 SEARCH_QUEUE_FULL (the client always receives a definitive answer; nothing is discarded silently, but users saw rejections). This means the arrival rate exceeds the sustainable drain rate (window batchSize/intervalMs × execution capacity). Inspect queue high-water vs capacity on the 'Animaxia — Search Flow' dashboard, then raise batchSize/maxConcurrent/queueCap via POST /api/search/flow/settings (or the #/admin/search-flow console) — or scale the pg pool (PGPOOLMAX) when the pool is the real ceiling. QA target is 0 — every drop is user-visible."
+          runbook_url: "animaxia-ops/runbooks/search-flow-saturation.md"
+
+      # ── Queue approaching capacity ────────────────────────────────────────
+      - alert: AnimaxiaSearchFlowQueueSaturation
+        expr: animaxia_search_queue_length > animaxia_search_queue_capacity * 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Search flow queue above 80% of capacity for 5m"
+          description: "animaxia_search_queue_length has been above 80% of animaxia_search_queue_capacity for 5 minutes — sustained search load is outpacing the windowed dispatch (batchSize per intervalMs) and the pool's execution capacity. No requests are lost yet (drops alert separately), but wait percentiles (animaxia_search_wait_ms_p50/p95) climb and the request-budget deadline (REQUESTTIMEOUTMS) starts expiring tail requests as 504 SEARCH_QUEUE_TIMEOUT. Rebalance the window (smaller intervalMs or larger batchSize), verify the pg pool is not the bottleneck (animaxia_db_pool_waiting), and watch inflight vs max_concurrent."
+          runbook_url: "animaxia-ops/runbooks/search-flow-saturation.md"
+
+      # ── Execution slots pinned at the cap ─────────────────────────────────
+      - alert: AnimaxiaSearchFlowInflightSaturated
+        expr: animaxia_search_inflight >= animaxia_search_max_concurrent
+        for: 10m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Search executions pinned at maxConcurrent for 10m"
+          description: "animaxia_search_inflight has been at animaxia_search_max_concurrent for 10 minutes — every scheduler slot is busy and the queue is draining at execution speed only. If the pg pool is saturated at the same time (animaxia_db_pool_waiting > 0 with pool_total at PGPOOLMAX), Neon round-trips are the real ceiling: raising maxConcurrent beyond the pool only inflates per-request latency (convoy). Either raise PGPOOLMAX (Neon serverless absorbs modest increases), accept the queue smoothing, or shed load earlier (smaller batchSize). The queue itself is healthy — this alert means capacity planning attention, not an outage."
+          runbook_url: "animaxia-ops/runbooks/search-flow-saturation.md"
+
+  # ── FAZA 16: Search Rate Management (rate-limit + cooldown + anti-spam) ──
+  - name: animaxia-searchrate-alerts
+    rules:
+      # ── Sustained anti-spam protection firing (abuse or broken client) ────
+      - alert: AnimaxiaSearchRateSpamFlood
+        expr: increase(animaxia_search_spam_blocked[5m]) > 100
+        for: 0m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Anti-spam blocked >100 search floods in 5m"
+          description: "animaxia_search_spam_blocked increased by more than 100 in the last 5 minutes — clients are flooding the search endpoints (>= spamThreshold arrivals within spamWindowMs each) and the FAZA 16 auto-block is answering them with explicit 429 spam_blocked. The protection is working (searches stay real, Neon untouched by the flood), but the volume suggests either an abusive client or a broken integration retrying in a tight loop. Identify the source via the per-shard table on #/admin/search-rate (animaxia_search_rate_blocked_by_shard) and the [search-rate] SPAM BLOCKED log lines, then block the abusive identity upstream (edge WAF) or fix the client. If the traffic is legitimate synchronized users, raise burstThreshold instead."
+          runbook_url: "animaxia-ops/runbooks/search-rate-protection.md"
+
+      # ── Burst window over the threshold for a sustained period ────────────
+      - alert: AnimaxiaSearchRateBurstSustained
+        expr: animaxia_search_burst_active == 1
+        for: 10m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Search burst active for 10m+ (arrivals above the burst threshold)"
+          description: "animaxia_search_burst_active has been 1 for 10 minutes — global search arrivals stayed above burstThreshold (default 1000 per 1000ms window) for a sustained period. The FAZA 16 pacing (per-user limits absorb repeat traffic) plus the FAZA 15 queue + windowing are absorbing the spike with zero losses, but a burst this long is unusual: verify the FAZA 15 queue is not saturating (AnimaxiaSearchFlowQueueSaturation / dropped counters, both target 0) and that Neon pool waiting stays 0. If load is legitimate growth, scale horizontally (SHARD{n}URL replicas) or raise the window throughput (batchSize/intervalMs) — the 'Animaxia — Search Rate' dashboard shows arrivals vs admitted per second."
+          runbook_url: "animaxia-ops/runbooks/search-rate-protection.md"
+
+      # ── The pacing layer was disabled at runtime ──────────────────────────
+      - alert: AnimaxiaSearchRateDisabled
+        expr: animaxia_search_rate_enabled == 0
+        for: 5m
+        labels:
+          severity: info
+          team: animaxia-ops
+        annotations:
+          summary: "Search Rate Management disabled (FAZA 16 pacing bypassed)"
+          description: "animaxia_search_rate_enabled is 0 — the per-user rate limit, cooldown and anti-spam layers were disabled at runtime (POST /api/search/rate/settings or SEARCHRATEENABLED=false). The FAZA 15 flow queue still bounds Neon load, but ENTER spam and per-user pacing are no longer enforced. Confirm the change was intentional (it is the documented emergency bypass); re-enable via POST /api/search/rate/settings { enabled: true } or the #/admin/search-rate console."
+          runbook_url: "animaxia-ops/runbooks/search-rate-protection.md"
+
+  # ── FAZA 17: Search Optimization Layer (dedup + batching + cache) ─────────
+  - name: animaxia-searchopt-alerts
+    rules:
+      # ── Cache ineffective under real traffic (TTL or traffic pattern) ─────
+      - alert: AnimaxiaSearchOptCacheRatioLow
+        expr: animaxia_search_opt_served_total > 1000 and animaxia_search_cache_hit_ratio < 0.05
+        for: 15m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Search cache hit ratio < 5% after >1000 served requests"
+          description: "animaxia_search_cache_hit_ratio is below 0.05 while more than 1000 requests were served — the micro-cache is almost never serving. With the FAZA 16 per-user pacing (500ms per user per kind) most REPEAT traffic is distinct users searching distinct queries, so a low ratio is expected for diverse catalogs; investigate only if the traffic profile SHOULD be cacheable (trending/popular queries — 'Naruto', 'Spider-Man' style spikes). Check: (1) SEARCHOPTCACHETTLMS not forced to the 1000ms floor — popular queries need 3000-5000ms to overlap; (2) the requests-vs-Neon chart on #/admin/search-opt — if Neon queries track requests 1:1, dedup is not finding identical queries (verify the traffic really is identical); (3) batch_hits > 0 — batching still collapses CONCURRENT identical requests even when the cache misses. A low ratio with batch_hits healthy is NOT an incident."
+          runbook_url: "animaxia-ops/runbooks/search-optimization.md"
+
+      # ── The optimization layer was disabled at runtime ────────────────────
+      - alert: AnimaxiaSearchOptDisabled
+        expr: animaxia_search_opt_enabled == 0
+        for: 5m
+        labels:
+          severity: info
+          team: animaxia-ops
+        annotations:
+          summary: "Search Optimization Layer disabled (FAZA 17 dedup/batching/cache bypassed)"
+          description: "animaxia_search_opt_enabled is 0 — the dedup + batching + micro-cache layer was disabled at runtime (POST /api/search/opt/settings or SEARCHOPTENABLED=false). Every search now executes its own real FTS through the FAZA 15 queue (byte-identical FAZA 16 behavior, results stay 100% real), but identical simultaneous requests are no longer collapsed: a 1000-user identical burst becomes 1000 Neon queries bounded only by windowing. Confirm the change was intentional (documented emergency bypass for isolating index-freshness issues); re-enable via POST /api/search/opt/settings { enabled: true } or the #/admin/search-opt console."
+          runbook_url: "animaxia-ops/runbooks/search-optimization.md"
+
+  # ── FAZA 18: full integration + stress verdict ────────────────────────────
+  - name: animaxia-searchstress-alerts
+    rules:
+      # ── The integrated 10-stage pipeline is no longer structurally mounted ─
+      - alert: AnimaxiaSearchPipelineDegraded
+        expr: animaxia_search_pipeline_integrated == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Integrated search pipeline degraded (pipelineIntegrated == 0)"
+          description: "animaxia_search_pipeline_integrated is 0 — the FAZA 18 integration contract reports that NOT every one of the 10 pinned stages (antiSpam -> rateLimit -> cooldown -> queue -> priority -> windowing -> dedup -> batching -> cache -> fts) is structurally mounted in the backend process. Searches still work (each layer degrades independently to its bypass behavior), but the full integration guarantee is broken. Check: (1) the search router booted completely (server log: '[search-stress] FAZA 18 ... engine ready' after '[search] ... listening'); (2) a partial module failure at boot (search.js imports flow/rate/opt/stress — any import error would have crashed the process, so a persistent 0 usually means a module was disabled or failed to wire); (3) /api/search/status -> pipelineStages must be the exact 10-stage array. The stress engine (POST /api/search/stress) refuses to start with 503 while integration is broken."
+          runbook_url: "animaxia-ops/runbooks/search-full-stress.md"
+
+      # ── A recorded stress run failed its pinned assertions ─────────────────
+      - alert: AnimaxiaSearchStressFailed
+        expr: animaxia_search_stress_executed == 1 and animaxia_search_stress_passed == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Last recorded search stress run FAILED its assertions"
+          description: "The last FAZA 18 stress run (10,000+ simultaneous searches through the real integrated pipeline) recorded verdict passed=0. Open #/admin/search-full (or GET /api/search/stress) and read lastRun.failures — each failed assertion names the exact spec checklist item with its numeric evidence (e.g. identical section no longer collapsing to 1 Neon query, queue drops appearing, cooldown/rate-limit not blocking). A failed run is a regression signal for FAZA 15/16/17 behavior, not necessarily a live outage — re-run POST /api/search/stress after investigating to confirm the fix."
+          runbook_url: "animaxia-ops/runbooks/search-full-stress.md"

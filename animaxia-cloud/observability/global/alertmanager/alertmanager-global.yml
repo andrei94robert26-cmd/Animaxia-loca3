@@ -1,0 +1,140 @@
+# =============================================================================
+# Animaxia — GLOBAL Alertmanager configuration (FAZA 23 prep — NOT ACTIVATED)
+# =============================================================================
+# Mounted into the `alertmanager` container of
+# observability/global/docker-compose.global-observability.yml
+# (profile "faza23" — never starts by default).
+#
+# Route tree:
+#   root
+#   ├── region="eu"   ├── severity=critical → alertmanager-eu-critical
+#   │                 └── severity=warning → alertmanager-eu-warning
+#   ├── region="us"   ├── severity=critical → alertmanager-us-critical
+#   │                 └── severity=warning → alertmanager-us-warning
+#   └── region="asia" ├── severity=critical → alertmanager-asia-critical
+#                     └── severity=warning → alertmanager-asia-warning
+#
+# The `region` label comes from the federation scrape labels
+# (../prometheus/prometheus-global.yml static_configs).
+#
+# HONEST NOTE — receivers: every receiver below is a WEBHOOK PLACEHOLDER.
+# Real notification channels (PagerDuty / Slack / Opsgenie) need real
+# credentials + endpoints and are wired in FAZA 23 when the stack activates.
+# Placeholder URLs use the reserved documentation TLD (.invalid) on purpose:
+# until replaced, deliveries fail visibly instead of silently succeeding
+# into nowhere. The `continue: true` on region routes also feeds
+# everything into a global audit sink (also a placeholder today).
+#
+# ── FAZA 23 (verificare aditivă) ─────────────────────────────────────────────
+# Severity routing VERIFIED against the 10 FAZA 23 alert rules
+# (animaxia-ops/alerts/faza23-alerts.yaml — AnimaxiaNeonDown/RedisDown/
+# GatewayDown/BackendDown/QueueHigh = severity:critical,
+# AiTimeout/FtsLatencyHigh/CacheMissHigh/RatelimitAbuse/CooldownAbuse =
+# severity:warning). Every route below already matches BOTH severities via
+# the nested severity matchers, so the FAZA 23 alert set routes correctly:
+#   critical → *-critical receivers (pager tier), warning → *-warning.
+# The local runnable equivalent (:4050 /api/alerts + /alertmanager/api/v2/
+# alerts) exposes the same 10 rules with the same severities — labels match
+# (alertname = rule_id, severity = critical|warning).
+# =============================================================================
+
+global:
+  resolve_timeout: 5m
+
+# FAZA 23 TODO: real notification receivers (PagerDuty/Slack/Opsgenie),
+# retention tuned for the global tier (31d default is fine to start).
+# Templates for the notification bodies live next to this file when added.
+
+route:
+  receiver: global-audit-placeholder
+  group_by: [region, alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # ── eu ───────────────────────────────────────────────────────────────────
+    - matchers:
+        - region="eu"
+      receiver: alertmanager-eu-warning
+      continue: true # also feed the global audit sink below
+      routes:
+        - matchers:
+            - severity="critical"
+          receiver: alertmanager-eu-critical
+        - matchers:
+            - severity="warning"
+          receiver: alertmanager-eu-warning
+
+    # ── us ───────────────────────────────────────────────────────────────────
+    - matchers:
+        - region="us"
+      receiver: alertmanager-us-warning
+      continue: true
+      routes:
+        - matchers:
+            - severity="critical"
+          receiver: alertmanager-us-critical
+        - matchers:
+            - severity="warning"
+          receiver: alertmanager-us-warning
+
+    # ── asia ─────────────────────────────────────────────────────────────────
+    - matchers:
+        - region="asia"
+      receiver: alertmanager-asia-warning
+      continue: true
+      routes:
+        - matchers:
+            - severity="critical"
+          receiver: alertmanager-asia-critical
+        - matchers:
+            - severity="warning"
+          receiver: alertmanager-asia-warning
+
+# PLACEHOLDER receivers — replace URLs + creds in FAZA 23 (see header note).
+receivers:
+  - name: alertmanager-eu-critical
+    webhook_configs:
+      - url: https://alerts-eu-critical.invalid/animaxia
+        send_resolved: true
+  - name: alertmanager-eu-warning
+    webhook_configs:
+      - url: https://alerts-eu-warning.invalid/animaxia
+        send_resolved: true
+  - name: alertmanager-us-critical
+    webhook_configs:
+      - url: https://alerts-us-critical.invalid/animaxia
+        send_resolved: true
+  - name: alertmanager-us-warning
+    webhook_configs:
+      - url: https://alerts-us-warning.invalid/animaxia
+        send_resolved: true
+  - name: alertmanager-asia-critical
+    webhook_configs:
+      - url: https://alerts-asia-critical.invalid/animaxia
+        send_resolved: true
+  - name: alertmanager-asia-warning
+    webhook_configs:
+      - url: https://alerts-asia-warning.invalid/animaxia
+        send_resolved: true
+  - name: global-audit-placeholder
+    webhook_configs:
+      - url: https://alerts-global-audit.invalid/animaxia
+        send_resolved: true
+
+# Inhibition: a critical alert in a region silences the matching warning —
+# nobody needs the pager AND the chat ping for the same incident.
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: [region, alertname]
+
+  # A region-wide outage alert (e.g. the regional Prometheus down) inhibits
+  # the individual service-down noise from that region.
+  - source_matchers:
+      - alertname="AnimaxiaRegionPrometheusDown"
+    target_matchers:
+      - alertname=~"AnimaxiaServiceDown|AnimaxiaHighLatency"
+    equal: [region]

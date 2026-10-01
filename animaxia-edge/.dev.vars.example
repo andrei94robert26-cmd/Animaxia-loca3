@@ -1,0 +1,27 @@
+# animaxia-edge — local development secrets (.dev.vars)
+#
+# Copy to `.dev.vars` (git-ignored) for `wrangler dev`. In production use
+# `wrangler secret put <NAME> --config <module>/wrangler.toml` instead —
+# non-secret configuration lives in each wrangler.toml [vars] / the EDGE_CONFIG
+# KV namespace (key "config", see shared/config.ts).
+#
+# Every value below is read through shared/jwt.ts::resolveAuthSecret.
+
+# ── JWT verification secret ──────────────────────────────────────────────────
+# Option A — the exact HS256 secret (when the cloud auth-service runs with an
+# explicit AUTHSECRET, put the SAME bytes here):
+JWT_SECRET=replace-with-the-exact-cloud-hs256-secret
+
+# Option B — the cloud passthrough pair: the edge derives the identical secret
+# locally as sha256hex("animaxia-auth:<DATABASEURL>"). Preferred for parity
+# with the running monolith (mini-services/animaxia-backend/.env).
+# AUTHSECRET=
+# DATABASEURL=
+
+# ── Edge management ─────────────────────────────────────────────────────────
+# Bearer token for /edge/*, /search/refresh, /cron/*, /analytics/flush admin
+# endpoints (shared/http.ts::requireInternalAuth):
+EDGE_ADMIN_JWT=replace-with-a-long-random-string
+
+# x-internal-token value for edge → edge internal calls (cron flush, purge):
+EDGE_INTERNAL_TOKEN=replace-with-another-long-random-string

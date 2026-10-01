@@ -1,0 +1,79 @@
+# animaxia-edge-analytics — Cloudflare Worker config
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# The ANALYTICS worker ingests view/play/complete telemetry at the edge
+# (POST /analytics/view, /analytics/event, /beacon — navigator.sendBeacon
+# friendly), maintains hourly trending counters in KV (ANALYTICS_TREND,
+# trend:<hourBucket>:<contentId>) and guarantees delivery to the cloud
+# POST /api/analytics/views through Cloudflare Queues (ANALYTICS_QUEUE) with
+# a KV ring-buffer fallback (buf:*) drained by POST /analytics/flush (called
+# by the cron worker every 5 minutes via the SVC_ANALYTICS service binding).
+# Also runs the Queues consumer that fans events out to the cloud one POST
+# per event (the cloud accepts a single view per call). Full logic: src/index.ts.
+
+name = "animaxia-edge-analytics"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+# `wrangler whoami` shows your subdomain. Turn off once you route the zone
+# through the gateway worker if you don't want the extra public URL.
+workers_dev = true
+
+# --- Routes ------------------------------------------------------------------
+# Uncomment AFTER the zone (animaxia.com) is on your Cloudflare account and
+# the gateway worker routes /analytics/* + /beacon to this worker via a
+# service binding.
+#
+# routes = [
+#   { pattern = "analytics.animaxia.com/*", zone_name = "animaxia.com" },
+# ]
+
+# --- Bindings ----------------------------------------------------------------
+# KV: EDGE_CONFIG — runtime configuration (key "config", shared/config.ts
+# defaults + KV override). Create with:
+#   wrangler kv namespace create EDGE_CONFIG
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: ANALYTICS_TREND — hourly trending counters (trend:<hourBucket>:<contentId>,
+# TTL cfg.analytics.trendTtlSec) + the ring-buffer fallback for events when
+# the queue producer is unavailable (buf:<ts>:<rand>, TTL 24h).
+[[kv_namespaces]]
+binding = "ANALYTICS_TREND"
+id = "REPLACE_WITH_KV_ID"
+
+# --- Queues ------------------------------------------------------------------
+# Producer: every ingested AnalyticsEvent (shared/types.ts) is queued here.
+# Consumer: delivers each event to the cloud POST /api/analytics/views.
+# Create the queue before deploying:
+#   wrangler queues create animaxia-edge-analytics
+[[queues.producers]]
+binding = "ANALYTICS_QUEUE"
+queue = "animaxia-edge-analytics"
+
+[[queues.consumers]]
+queue = "animaxia-edge-analytics"
+max_batch_size = 25
+max_batch_timeout = 30
+
+# --- Vars --------------------------------------------------------------------
+# Where the cloud monolith / gateway is reached from the edge. The default
+# matches the local mini-services gateway for `wrangler dev` style setups —
+# production must point at the cloud gateway host.
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+
+# --- Secrets -----------------------------------------------------------------
+# NEVER put secrets in this file — use:  wrangler secret put <NAME>
+# (read them from `env.<NAME>`). This worker uses:
+#
+#   EDGE_ADMIN_JWT /     — optional pair guarding POST /analytics/flush
+#   EDGE_INTERNAL_TOKEN    (requireInternalAuth: Bearer EDGE_ADMIN_JWT or
+#                          x-internal-token EDGE_INTERNAL_TOKEN). The cron
+#                          worker calls flush with x-internal-token — set the
+#                          SAME EDGE_INTERNAL_TOKEN on animaxia-edge-cron, or
+#                          the 5-minute flush will be rejected with 401.

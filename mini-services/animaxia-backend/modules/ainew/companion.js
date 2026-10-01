@@ -34,7 +34,7 @@ export async function buildContext(contentId) {
       [contentId],
     );
     const agg = await one(
-      `SELECT ROUND(AVG(rating)::numeric, 1) AS avg, COUNT(*) AS n FROM reviews WHERE contentid = $1`,
+      `SELECT ROUND(AVG(rating), 1) AS avg, COUNT(*) AS n FROM reviews WHERE contentid = $1`,
       [contentId],
     );
     if (agg && Number(agg.n) > 0) avgRating = Number(agg.avg);

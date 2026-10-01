@@ -1,0 +1,227 @@
+# =============================================================================
+# FAZA 24 — HPA pentru cele 4 MOTOARE AI (capacitate, nu logică).
+#
+#   AI Home (FAZA 15) · AI Hub (FAZA 16) · Personal AI · RAG engine
+#
+#   metrici: cereri/minut per replică · latență LLM · timeout rate
+#   scale-out: req/min/replică > 24 (80% din 30) | LLM > 3000ms | timeout > 2%
+#   scale-in:  req/min/replică < 9 (30%) & timeout < 0.5%
+#   min 2 / max 10 replici per motor.
+#
+# Logica AI-urilor (FAZA 15/16) NU este modificată — doar capacitatea.
+# Valorile = AI_POLICIES din mini-services/animaxia-stability/config.ts.
+# Contoarele per rută: animaxia_ai_usage_calls_total{route=...}
+# (:4000/api/observability/metrics, FAZA 23-b).
+# =============================================================================
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-home-faza24
+  namespace: animaxia-ai
+  labels:
+    app.kubernetes.io/name: ai-home
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-home
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_requests_per_min
+        target:
+          type: AverageValue
+          averageValue: "30"    # AI_REQ_PER_MIN_PER_REPLICA
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_llm_latency_ms
+        target:
+          type: AverageValue
+          averageValue: "3000"  # AI_LLM_LATENCY_MS
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_timeout_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"     # AI_TIMEOUT_RATE_PCT
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180   # fereastra 3 min (identic :4060)
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-hub-faza24
+  namespace: animaxia-ai
+  labels:
+    app.kubernetes.io/name: ai-hub
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-hub
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_requests_per_min
+        target:
+          type: AverageValue
+          averageValue: "30"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_llm_latency_ms
+        target:
+          type: AverageValue
+          averageValue: "3000"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_timeout_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-personal-faza24
+  namespace: animaxia-ai
+  labels:
+    app.kubernetes.io/name: ai-personal
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-personal
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_requests_per_min
+        target:
+          type: AverageValue
+          averageValue: "30"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_llm_latency_ms
+        target:
+          type: AverageValue
+          averageValue: "3000"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_timeout_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-rag-faza24
+  namespace: animaxia-ai
+  labels:
+    app.kubernetes.io/name: ai-rag
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-rag
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_requests_per_min
+        target:
+          type: AverageValue
+          averageValue: "30"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_llm_latency_ms
+        target:
+          type: AverageValue
+          averageValue: "3000"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_ai_timeout_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

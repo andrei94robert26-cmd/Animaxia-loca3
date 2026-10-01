@@ -1,0 +1,1027 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * party-room.tsx — Watch party room (#/social/party/:id). Synchronized player
+     5→ * (host drives playback via realtime `party:control`, members follow with a
+     6→ * 1.5s drift tolerance), live chat with typing indicators, member presence
+     7→ * and a REST fallback for chat when the socket is down. Reuses the
+     8→ * player-view rendering approach (mp4 / m3u8 via hls.js, embeds without sync).
+     9→ */
+    10→
+    11→import { useEffect, useRef, useState } from 'react';
+    12→import {
+    13→  ArrowLeft,
+    14→  Check,
+    15→  Copy,
+    16→  Crown,
+    17→  Loader2,
+    18→  LogIn,
+    19→  LogOut,
+    20→  MonitorPlay,
+    21→  RefreshCw,
+    22→  Send,
+    23→  Users,
+    24→  WifiOff,
+    25→} from 'lucide-react';
+    26→import { toast } from 'sonner';
+    27→import { api } from '@/lib/animaxia/api';
+    28→import { tokenStore, tryRefresh } from '@/lib/animaxia/platform';
+    29→import {
+    30→  createSocialSocket,
+    31→  social,
+    32→  type ChatMessage,
+    33→  type PartyState,
+    34→  type SocketMemberRow,
+    35→} from '@/lib/animaxia/social';
+    36→import { useApi } from '@/lib/animaxia/hooks';
+    37→import { navigate } from '@/lib/animaxia/router';
+    38→import type { PlayerSource } from '@/lib/animaxia/types';
+    39→import { useAuth } from '@/components/animaxia/auth-provider';
+    40→import { Button } from '@/components/ui/button';
+    41→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    42→import { Input } from '@/components/ui/input';
+    43→import { Skeleton } from '@/components/ui/skeleton';
+    44→import { cn } from '@/lib/utils';
+    45→import { Container } from '../section';
+    46→import { EmptyState, ErrorState, TypeBadge } from '../states';
+    47→import { UserAvatar, timeAgo } from './social-ui';
+    48→import type { Socket } from 'socket.io-client';
+    49→
+    50→/* --------------------------------- helpers --------------------------------- */
+    51→
+    52→interface PartyStateEvent {
+    53→  partyId: number;
+    54→  title: string;
+    55→  hostid: number;
+    56→  state: PartyState;
+    57→  members: SocketMemberRow[];
+    58→  degraded: boolean;
+    59→}
+    60→
+    61→interface PartyControlEvent {
+    62→  partyId: number;
+    63→  action: 'play' | 'pause' | 'seek' | 'rate' | 'source';
+    64→  by: number;
+    65→  state: PartyState;
+    66→}
+    67→
+    68→interface PartyChatEvent {
+    69→  partyId: number;
+    70→  message: ChatMessage;
+    71→  persisted?: boolean;
+    72→}
+    73→
+    74→function isNotFound(message?: string | null): boolean {
+    75→  return Boolean(message && message.toLowerCase().includes('not found'));
+    76→}
+    77→
+    78→function formatCode(code: string | undefined, masked: boolean): string {
+    79→  if (!code) return '······';
+    80→  return masked ? '••••••' : code.toUpperCase();
+    81→}
+    82→
+    83→/* ---------------------------------- room ---------------------------------- */
+    84→
+    85→export function PartyRoom({ partyId }: { partyId: number }) {
+    86→  const { user } = useAuth();
+    87→  const validId = Number.isInteger(partyId) && partyId > 0;
+    88→
+    89→  const detail = useApi(`social-party-${partyId}`, () => social.partyDetail(partyId), { enabled: validId });
+    90→  const current = detail.data && detail.data.party.id === partyId ? detail.data : null;
+    91→
+    92→  const [ended, setEnded] = useState(false);
+    93→  const [members, setMembers] = useState<SocketMemberRow[]>([]);
+    94→  const [messages, setMessages] = useState<ChatMessage[]>([]);
+    95→  const [typingUser, setTypingUser] = useState<string | null>(null);
+    96→  const [socketConnected, setSocketConnected] = useState(false);
+    97→  const [lastPersisted, setLastPersisted] = useState<boolean | null>(null);
+    98→  const [leaving, setLeaving] = useState(false);
+    99→  const [copied, setCopied] = useState(false);
+   100→  const [chatInput, setChatInput] = useState('');
+   101→  const [lastState, setLastState] = useState<PartyState | null>(null);
+   102→
+   103→  const socketRef = useRef<Socket | null>(null);
+   104→  const videoRef = useRef<HTMLVideoElement>(null);
+   105→  const chatScrollRef = useRef<HTMLDivElement>(null);
+   106→  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   107→  const lastTypingEmitRef = useRef(0);
+   108→  const lastStateRef = useRef<PartyState | null>(null);
+   109→  const seededRef = useRef(false);
+   110→  const isHostRef = useRef(false);
+   111→
+   112→  const party = current?.party ?? null;
+   113→  const isHost = Boolean(user && party && party.host.id === user.id);
+   114→  const partyActive = Boolean(party && party.status === 'active') && !ended;
+   115→
+   116→  /* Player sources — same client and rendering rules as player-view (with a
+   117→     source switcher: the host's switch broadcasts a `source` control). */
+   118→  const contentId = party?.content.id ?? 0;
+   119→  const player = useApi(`party-player-${contentId}`, () => api.player(contentId), { enabled: contentId > 0 });
+   120→  const playerData = player.data && player.data.content.id === contentId ? player.data : null;
+   121→  const [sourceIndex, setSourceIndex] = useState(0);
+   122→  const sources = playerData?.sources ?? [];
+   123→  const source: PlayerSource | null =
+   124→    sources.length > 0 ? sources[Math.min(sourceIndex, sources.length - 1)] : null;
+   125→
+   126→  /* Reset the picked source when the underlying player payload changes. */
+   127→  useEffect(() => {
+   128→    setSourceIndex(0);
+   129→  }, [playerData]);
+   130→
+   131→  /* TS2b: mini-fallback chain — on a native <video> error (or a 12s
+   132→     watchdog when the source never delivers data) advance LOCALLY to the
+   133→     next source; when the last one dies, an honest recovery card takes over
+   134→     below the player. Host sync/chat logic is untouched — the advance is
+   135→     local-only for every member (each client retries independently). */
+   136→  const [sourceFailed, setSourceFailed] = useState(false);
+   137→
+   138→  useEffect(() => {
+   139→    setSourceFailed(false);
+   140→  }, [playerData, sourceIndex]);
+   141→
+   142→  function advanceAfterFailure(reason: string): void {
+   143→    if (sourceIndex < sources.length - 1) {
+   144→      toast(`Sursa ${sourceIndex + 1} nu răspunde (${reason}) — trec la următoarea…`);
+   145→      setSourceIndex((i) => Math.min(i + 1, sources.length - 1));
+   146→    } else {
+   147→      setSourceFailed(true);
+   148→    }
+   149→  }
+   150→
+   151→  /* 12s watchdog — fires only when a native source never reached
+   152→     readyState ≥ 2 (HAVE_CURRENT_DATA): a paused-but-loaded video passes. */
+   153→  useEffect(() => {
+   154→    if (!source || (source.type !== 'mp4' && source.type !== 'm3u8')) return undefined;
+   155→    const kind = source.type;
+   156→    const timer = setTimeout(() => {
+   157→      const v = videoRef.current;
+   158→      if (!v || v.readyState < 2) {
+   159→        advanceAfterFailure(kind === 'mp4' ? 'fără date mp4' : 'fără date m3u8');
+   160→      }
+   161→    }, 12_000);
+   162→    return () => clearTimeout(timer);
+   163→  }, [source?.url, source?.type, sourceIndex, sources.length]);
+   164→
+   165→  /* Sync isHost into a ref so socket handlers (registered once) stay fresh. */
+   166→  useEffect(() => {
+   167→    isHostRef.current = isHost;
+   168→  }, [isHost]);
+   169→
+   170→  /* Seed local state from the REST detail (members / messages / state). */
+   171→  useEffect(() => {
+   172→    if (!current) return;
+   173→    setMembers(current.members.map((m) => ({ userid: m.userid, username: m.username, avatar: m.avatar, online: false })));
+   174→    setMessages(current.messages ?? []);
+   175→    setLastState(current.state);
+   176→    lastStateRef.current = current.state;
+   177→    seededRef.current = false;
+   178→  }, [current]);
+   179→
+   180→  /* Apply a party state to the <video> element (seek + pause/play + rate). */
+   181→  function applyStateToVideo(state: PartyState): void {
+   182→    const v = videoRef.current;
+   183→    if (!v || !Number.isFinite(state.positionSec) || state.positionSec < 0) return;
+   184→    try {
+   185→      if (Math.abs(v.currentTime - state.positionSec) > 0.3 || v.readyState < 1) {
+   186→        v.currentTime = state.positionSec;
+   187→      }
+   188→    } catch {
+   189→      /* seeking before metadata is loaded — the loadedmetadata seed retries */
+   190→      return;
+   191→    }
+   192→    if (Number.isFinite(state.playbackRate) && state.playbackRate > 0) v.playbackRate = state.playbackRate;
+   193→    if (state.isPaused) v.pause();
+   194→    else v.play().catch(() => {});
+   195→  }
+   196→
+   197→  /* Seed the video position once the join ack (or REST state) arrives. */
+   198→  function seedFromState(state: PartyState): void {
+   199→    lastStateRef.current = state;
+   200→    setLastState(state);
+   201→    if (seededRef.current) return;
+   202→    seededRef.current = true;
+   203→    if (state.positionSec <= 0.5 && state.isPaused) return; // nothing to seed
+   204→    applyStateToVideo(state);
+   205→  }
+   206→
+   207→  /* Realtime socket — created for signed-in users while the party is active. */
+   208→  useEffect(() => {
+   209→    if (!user || !partyActive || !validId) return;
+   210→
+   211→    /* Idempotent REST join (also keeps membership when the socket degrades). */
+   212→    social.partyJoin(partyId).catch(() => {
+   213→      /* silent — the socket join below retries membership too */
+   214→    });
+   215→
+   216→    const socket = createSocialSocket();
+   217→    socketRef.current = socket;
+   218→
+   219→    /* The realtime service finishes its per-connection bootstrap (an async
+   220→       profile fetch) before it registers the `party:join` handler — a join
+   221→       emitted the instant `connect` fires can land too early and be dropped.
+   222→       Join is idempotent server-side, so: emit immediately, re-emit on `hello`
+   223→       (server sends it right after bootstrap) and retry until the join ack
+   224→       (`party:state`) arrives. */
+   225→    let joinTimer: ReturnType<typeof setTimeout> | null = null;
+   226→    let joinAttempts = 0;
+   227→    let stateAcked = false;
+   228→    const emitJoin = (): void => {
+   229→      socket.emit('party:join', { partyId });
+   230→      joinAttempts += 1;
+   231→      if (!stateAcked && joinAttempts < 6 && !joinTimer) {
+   232→        joinTimer = setTimeout(() => {
+   233→          joinTimer = null;
+   234→          if (!stateAcked) emitJoin();
+   235→        }, 1500);
+   236→      }
+   237→    };
+   238→
+   239→    socket.on('connect', () => {
+   240→      setSocketConnected(true);
+   241→      stateAcked = false;
+   242→      if (joinTimer) {
+   243→        clearTimeout(joinTimer);
+   244→        joinTimer = null;
+   245→      }
+   246→      joinAttempts = 0;
+   247→      emitJoin();
+   248→    });
+   249→    /* `hello` arrives after the server registered its handlers — a join sent
+   250→       here always reaches the listener (covers both first connect and any
+   251→       reconnect). */
+   252→    socket.on('hello', () => {
+   253→      if (!stateAcked) emitJoin();
+   254→    });
+   255→    socket.on('disconnect', () => setSocketConnected(false));
+   256→    socket.on('connect_error', (err: Error) => {
+   257→      setSocketConnected(false);
+   258→      /* Auth rejected (e.g. the access token expired mid-session): rotate
+   259→         once and re-arm the handshake for the next reconnection attempt. */
+   260→      if (!/token/i.test(err.message)) return;
+   261→      void (async () => {
+   262→        if (tokenStore.refresh) await tryRefresh().catch(() => {});
+   263→        socket.auth = tokenStore.access ? { token: tokenStore.access } : {};
+   264→      })();
+   265→    });
+   266→
+   267→    socket.on('party:state', (d: PartyStateEvent) => {
+   268→      if (d.partyId !== partyId) return;
+   269→      stateAcked = true;
+   270→      if (joinTimer) {
+   271→        clearTimeout(joinTimer);
+   272→        joinTimer = null;
+   273→      }
+   274→      setMembers(d.members ?? []);
+   275→      seedFromState(d.state);
+   276→      if (d.degraded) toast('Serviciul realtime este în modul offline — este posibil ca mesajele să nu fie salvate');
+   277→    });
+   278→
+   279→    socket.on('party:member-joined', (d: { partyId: number; user: SocketMemberRow }) => {
+   280→      if (d.partyId !== partyId) return;
+   281→      setMembers((prev) =>
+   282→        prev.some((m) => m.userid === d.user.userid)
+   283→          ? prev.map((m) => (m.userid === d.user.userid ? { ...m, online: true } : m))
+   284→          : [...prev, { ...d.user, online: true }],
+   285→      );
+   286→    });
+   287→
+   288→    socket.on('party:member-left', (d: { partyId: number; user: { userid: number } }) => {
+   289→      if (d.partyId !== partyId) return;
+   290→      setMembers((prev) => prev.filter((m) => m.userid !== d.user.userid));
+   291→    });
+   292→
+   293→    socket.on('party:control', (d: PartyControlEvent) => {
+   294→      if (d.partyId !== partyId) return;
+   295→      lastStateRef.current = d.state;
+   296→      setLastState(d.state);
+   297→      if (isHostRef.current) return; // the host drives — never loop back
+   298→      if (d.action === 'source' && Number.isInteger(d.state.sourceIndex) && d.state.sourceIndex >= 0) {
+   299→        setSourceIndex(d.state.sourceIndex);
+   300→      }
+   301→      const v = videoRef.current;
+   302→      if (!v) return;
+   303→      const drift = Number.isFinite(d.state.positionSec) ? Math.abs(v.currentTime - d.state.positionSec) : 0;
+   304→      if (d.action === 'seek' || d.action === 'source' || drift > 1.5) {
+   305→        try {
+   306→          v.currentTime = d.state.positionSec;
+   307→        } catch {
+   308→          /* not seekable yet */
+   309→        }
+   310→      }
+   311→      if (Number.isFinite(d.state.playbackRate) && d.state.playbackRate > 0 && d.state.playbackRate !== v.playbackRate) {
+   312→        v.playbackRate = d.state.playbackRate;
+   313→      }
+   314→      if (d.state.isPaused && !v.paused) v.pause();
+   315→      else if (!d.state.isPaused && v.paused) v.play().catch(() => {});
+   316→    });
+   317→
+   318→    socket.on('party:chat', (d: PartyChatEvent) => {
+   319→      if (d.partyId !== partyId) return;
+   320→      setLastPersisted(d.persisted !== false);
+   321→      setTypingUser((current) => (current === d.message.user.username ? null : current));
+   322→      setMessages((prev) => {
+   323→        if (d.message.id != null && prev.some((m) => m.id === d.message.id)) return prev;
+   324→        const next = [...prev, d.message];
+   325→        return next.length > 200 ? next.slice(next.length - 200) : next;
+   326→      });
+   327→    });
+   328→
+   329→    socket.on('party:typing', (d: { partyId: number; user: { userid: number; username: string } }) => {
+   330→      if (d.partyId !== partyId || !d.user) return;
+   331→      if (user && d.user.userid === user.id) return;
+   332→      setTypingUser(d.user.username);
+   333→      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+   334→      typingTimerRef.current = setTimeout(() => setTypingUser(null), 3000);
+   335→    });
+   336→
+   337→    socket.on('party:error', (d: { code: string; message: string }) => {
+   338→      if (d.code === 'ended') {
+   339→        setEnded(true);
+   340→        toast('Această vizionare în grup s-a încheiat');
+   341→        return;
+   342→      }
+   343→      if (d.code === 'auth') return; // anon flow is handled by the sign-in prompt
+   344→      toast.error(d.message || 'Eroare de vizionare în grup');
+   345→    });
+   346→
+   347→    return () => {
+   348→      if (joinTimer) clearTimeout(joinTimer);
+   349→      socket.removeAllListeners();
+   350→      socket.disconnect();
+   351→      socketRef.current = null;
+   352→      setSocketConnected(false);
+   353→    };
+   354→  }, [user?.id, partyId, partyActive, validId, user]);
+   355→  /* NOTE: `user` is listed for identity freshness (same id, refreshed profile);
+   356→     the effect only ever creates one socket at a time. */
+   357→
+   358→  /* Host: periodic state snapshot to the monolith (fire-and-forget, 10s). */
+   359→  useEffect(() => {
+   360→    if (!isHost || !partyActive) return;
+   361→    const timer = setInterval(() => {
+   362→      const v = videoRef.current;
+   363→      if (!v) return;
+   364→      social
+   365→        .partySync(partyId, {
+   366→          positionSec: v.currentTime,
+   367→          isPaused: v.paused,
+   368→          playbackRate: Number.isFinite(v.playbackRate) && v.playbackRate > 0 ? v.playbackRate : 1,
+   369→          sourceIndex,
+   370→          updatedAt: new Date().toISOString(),
+   371→        })
+   372→        .then((res) => {
+   373→          lastStateRef.current = res.state;
+   374→        })
+   375→        .catch(() => {});
+   376→    }, 10_000);
+   377→    return () => clearInterval(timer);
+   378→  }, [isHost, partyActive, partyId, sourceIndex]);
+   379→
+   380→  /* HLS (m3u8) sources — identical to player-view's dynamic hls.js attach. */
+   381→  useEffect(() => {
+   382→    const url = source?.url;
+   383→    const el = videoRef.current;
+   384→    if (source?.type !== 'm3u8' || !url || !el) return;
+   385→    let hls: { destroy: () => void } | null = null;
+   386→    let cancelled = false;
+   387→    (async () => {
+   388→      try {
+   389→        const mod = await import('hls.js');
+   390→        const Hls = mod.default;
+   391→        if (cancelled) return;
+   392→        if (Hls.isSupported()) {
+   393→          const instance = new Hls({ enableWorker: true });
+   394→          instance.loadSource(url);
+   395→          instance.attachMedia(el);
+   396→          hls = instance;
+   397→        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+   398→          el.src = url;
+   399→        }
+   400→      } catch {
+   401→        /* hls failed to init */
+   402→      }
+   403→    })();
+   404→    return () => {
+   405→      cancelled = true;
+   406→      hls?.destroy();
+   407→    };
+   408→  }, [source?.type, source?.url]);
+   409→
+   410→  /* Auto-scroll chat to the newest message. */
+   411→  useEffect(() => {
+   412→    const el = chatScrollRef.current;
+   413→    if (el) el.scrollTop = el.scrollHeight;
+   414→  }, [messages.length, typingUser]);
+   415→
+   416→  /* Clear the typing timer on unmount. */
+   417→  useEffect(() => {
+   418→    return () => {
+   419→      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+   420→    };
+   421→  }, []);
+   422→
+   423→  /* ------------------------------ host controls ----------------------------- */
+   424→
+   425→  function emitControl(action: 'play' | 'pause' | 'seek' | 'rate' | 'source', overrideIndex?: number): void {
+   426→    const socket = socketRef.current;
+   427→    const v = videoRef.current;
+   428→    if (!socket || !isHost) return;
+   429→    socket.emit('party:control', {
+   430→      partyId,
+   431→      action,
+   432→      positionSec: v?.currentTime ?? 0,
+   433→      playbackRate: v?.playbackRate ?? 1,
+   434→      sourceIndex: overrideIndex ?? sourceIndex,
+   435→    });
+   436→  }
+   437→
+   438→  /** Host picks a different stream source — members follow via `source`. */
+   439→  function switchSource(nextIndex: number): void {
+   440→    setSourceIndex(nextIndex);
+   441→    if (isHost) emitControl('source', nextIndex);
+   442→  }
+   443→
+   444→  /* --------------------------------- actions -------------------------------- */
+   445→
+   446→  function sendChat(): void {
+   447→    const body = chatInput.trim();
+   448→    if (!body || !user) return;
+   449→    setChatInput('');
+   450→    const socket = socketRef.current;
+   451→    if (socket && socket.connected) {
+   452→      socket.emit('party:chat', { partyId, body });
+   453→      return;
+   454→    }
+   455→    /* REST fallback (socket down): optimistic append, replaced by the reply. */
+   456→    const temp: ChatMessage = {
+   457→      id: `tmp-${Date.now()}`,
+   458→      body,
+   459→      createdat: new Date().toISOString(),
+   460→      user: { id: user.id, username: user.username, avatar: user.avatar },
+   461→    };
+   462→    setMessages((prev) => [...prev, temp]);
+   463→    social
+   464→      .partySendMessage(partyId, body)
+   465→      .then((res) => {
+   466→        setLastPersisted(true);
+   467→        setMessages((prev) => prev.map((m) => (m.id === temp.id ? res.message : m)));
+   468→      })
+   469→      .catch((err) => {
+   470→        setMessages((prev) => prev.filter((m) => m.id !== temp.id));
+   471→        toast.error(err instanceof Error ? err.message : 'Nu am putut trimite mesajul');
+   472→      });
+   473→  }
+   474→
+   475→  function handleChatInputChange(value: string): void {
+   476→    setChatInput(value);
+   477→    const socket = socketRef.current;
+   478→    const now = Date.now();
+   479→    if (socket && socket.connected && now - lastTypingEmitRef.current > 2000) {
+   480→      lastTypingEmitRef.current = now;
+   481→      socket.emit('party:typing', { partyId });
+   482→    }
+   483→  }
+   484→
+   485→  async function copyInviteCode(): Promise<void> {
+   486→    if (!party?.code) return;
+   487→    try {
+   488→      await navigator.clipboard.writeText(party.code);
+   489→      setCopied(true);
+   490→      toast.success('Codul de invitație a fost copiat');
+   491→      setTimeout(() => setCopied(false), 1500);
+   492→    } catch {
+   493→      toast.error('Clipboardul nu este disponibil în acest browser');
+   494→    }
+   495→  }
+   496→
+   497→  async function leaveParty(): Promise<void> {
+   498→    if (leaving) return;
+   499→    setLeaving(true);
+   500→    try {
+   501→      socketRef.current?.emit('party:leave', { partyId });
+   502→      await social.partyLeave(partyId);
+   503→      if (isHost) toast('Vizionarea în grup s-a încheiat');
+   504→      else toast('Ai părăsit vizionarea în grup');
+   505→    } catch (err) {
+   506→      toast.error(err instanceof Error ? err.message : 'Nu am putut părăsi vizionarea în grup');
+   507→    } finally {
+   508→      navigate('/social');
+   509→    }
+   510→  }
+   511→
+   512→  /* -------------------------------- rendering ------------------------------- */
+   513→
+   514→  if (!validId) {
+   515→    return (
+   516→      <Container className="py-20">
+   517→        <EmptyState
+   518→          title="Vizionare în grup negăsită"
+   519→          message="URL-ului îi lipsește un id de vizionare valid."
+   520→          action={
+   521→            <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/social')}>
+   522→              Back to Social
+   523→            </Button>
+   524→          }
+   525→        />
+   526→      </Container>
+   527→    );
+   528→  }
+   529→
+   530→  if (detail.loading && !current) {
+   531→    return (
+   532→      <Container className="py-8 sm:py-10">
+   533→        <div className="mx-auto w-full max-w-6xl space-y-5">
+   534→          <div className="flex items-center gap-3">
+   535→            <Skeleton className="h-9 w-9 rounded-lg" />
+   536→            <div className="flex-1 space-y-2">
+   537→              <Skeleton className="h-6 w-72 max-w-full" />
+   538→              <Skeleton className="h-4 w-44" />
+   539→            </div>
+   540→            <Skeleton className="h-9 w-24 rounded-lg" />
+   541→          </div>
+   542→          <Skeleton className="aspect-video w-full rounded-2xl" />
+   543→          <div className="grid gap-5 lg:grid-cols-3">
+   544→            <Skeleton className="h-40 rounded-2xl lg:col-span-2" />
+   545→            <Skeleton className="h-64 rounded-2xl" />
+   546→          </div>
+   547→        </div>
+   548→      </Container>
+   549→    );
+   550→  }
+   551→
+   552→  if (detail.error && !current) {
+   553→    if (isNotFound(detail.error)) {
+   554→      return (
+   555→        <Container className="py-20">
+   556→          <EmptyState
+   557→            title="Vizionare încheiată sau negăsită"
+   558→            message="Această vizionare în grup nu mai este activă."
+   559→            action={
+   560→              <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/social')}>
+   561→                <ArrowLeft aria-hidden /> Back to Social
+   562→              </Button>
+   563→            }
+   564→          />
+   565→        </Container>
+   566→      );
+   567→    }
+   568→    return (
+   569→      <Container className="py-20">
+   570→        <ErrorState message={detail.error} onRetry={detail.refetch} />
+   571→      </Container>
+   572→    );
+   573→  }
+   574→
+   575→  if (!party) return null;
+   576→
+   577→  if (ended || party.status !== 'active') {
+   578→    return (
+   579→      <Container className="py-20">
+   580→        <EmptyState
+   581→          icon={<Users className="h-6 w-6" aria-hidden />}
+   582→          title="Vizionare încheiată sau negăsită"
+   583→          message="This watch party has ended. Start a new one from the Social hub — or join another live party."
+   584→          action={
+   585→            <div className="flex flex-wrap justify-center gap-2">
+   586→              <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/social')}>
+   587→                <ArrowLeft aria-hidden /> Back to Social
+   588→              </Button>
+   589→              <Button variant="outline" className="border-white/15 bg-white/5 hover:bg-white/10" onClick={() => navigate(`/content/${party.content.id}`)}>
+   590→                Open {party.content.title}
+   591→              </Button>
+   592→            </div>
+   593→          }
+   594→        />
+   595→      </Container>
+   596→    );
+   597→  }
+   598→
+   599→  const embedSource = source && (source.type === 'youtube' || source.type === 'iframe') ? source : null;
+   600→
+   601→  return (
+   602→    <Container className="space-y-5 py-6 sm:py-8">
+   603→      {/* Header */}
+   604→      <header className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 sm:p-5">
+   605→        <div className="flex flex-wrap items-start justify-between gap-3">
+   606→          <div className="flex min-w-0 items-start gap-3">
+   607→            <Button
+   608→              variant="outline"
+   609→              size="icon"
+   610→              aria-label="Înapoi la Social"
+   611→              onClick={() => navigate('/social')}
+   612→              className="shrink-0 border-white/15 bg-white/5 hover:bg-white/10"
+   613→            >
+   614→              <ArrowLeft aria-hidden />
+   615→            </Button>
+   616→            <div className="min-w-0">
+   617→              <div className="flex flex-wrap items-center gap-2">
+   618→                <h1 className="min-w-0 truncate text-lg font-black tracking-tight text-white sm:text-xl">{party.title}</h1>
+   619→                <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-bold text-rose-300">
+   620→                  <span className="relative flex h-1.5 w-1.5">
+   621→                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
+   622→                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-rose-400" />
+   623→                  </span>
+   624→                  Live
+   625→                </span>
+   626→              </div>
+   627→              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+   628→                <span className="inline-flex items-center gap-1.5">
+   629→                  <Crown className="h-3.5 w-3.5 text-amber-400" aria-hidden />
+   630→                  Host <span className="font-semibold text-zinc-200">{party.host.username}</span>
+   631→                </span>
+   632→                <button
+   633→                  type="button"
+   634→                  onClick={() => navigate(`/content/${party.content.id}`)}
+   635→                  className="font-semibold text-rose-300 underline decoration-rose-500/40 underline-offset-2 transition hover:text-rose-200"
+   636→                >
+   637→                  {party.content.title}
+   638→                </button>
+   639→                <TypeBadge type={party.content.type} />
+   640→                <span className="inline-flex items-center gap-1">
+   641→                  <Users className="h-3.5 w-3.5" aria-hidden /> {Math.max(members.length, party.members)}{' '}
+   642→                  {members.length === 1 ? 'member' : 'members'}
+   643→                </span>
+   644→              </div>
+   645→            </div>
+   646→          </div>
+   647→
+   648→          <div className="flex flex-wrap items-center gap-2">
+   649→            {/* Invite code: full for the host, masked for members */}
+   650→            <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-3 py-1.5" title="Cod de invitație">
+   651→              <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Cod</span>
+   652→              <span className="font-mono text-sm font-bold tracking-[0.2em] text-zinc-100">
+   653→                {formatCode(party.code, !isHost)}
+   654→              </span>
+   655→            </div>
+   656→            {isHost && (
+   657→              <Button
+   658→                variant="outline"
+   659→                size="sm"
+   660→                onClick={() => void copyInviteCode()}
+   661→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   662→              >
+   663→                {copied ? <Check className="text-emerald-400" aria-hidden /> : <Copy aria-hidden />}
+   664→                Copiază codul de invitație
+   665→              </Button>
+   666→            )}
+   667→            {user && (
+   668→              <Button
+   669→                variant="outline"
+   670→                size="sm"
+   671→                onClick={() => void leaveParty()}
+   672→                disabled={leaving}
+   673→                className="border-rose-500/40 bg-rose-500/10 font-semibold text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
+   674→              >
+   675→                {leaving ? <Loader2 className="animate-spin" aria-hidden /> : <LogOut aria-hidden />}
+   676→                Ieși
+   677→              </Button>
+   678→            )}
+   679→          </div>
+   680→        </div>
+   681→      </header>
+   682→
+   683→      <div className="grid items-start gap-5 lg:grid-cols-3">
+   684→        {/* Player + sync + members */}
+   685→        <div className="space-y-4 lg:col-span-2">
+   686→          {player.loading && !playerData ? (
+   687→            <Skeleton className="aspect-video w-full rounded-2xl" aria-busy="true" />
+   688→          ) : !source ? (
+   689→            <EmptyState
+   690→              icon={<MonitorPlay className="h-6 w-6" aria-hidden />}
+   691→              title="Nicio sursă de stream disponibilă"
+   692→              message="Acest titlu nu are încă un stream redabil — deschide pagina lui pentru a extrage o sursă, apoi revino."
+   693→              action={
+   694→                <Button
+   695→                  variant="outline"
+   696→                  className="border-white/15 bg-white/5 hover:bg-white/10"
+   697→                  onClick={() => navigate(`/content/${party.content.id}`)}
+   698→                >
+   699→                  Open title page
+   700→                </Button>
+   701→              }
+   702→            />
+   703→          ) : (
+   704→            <div className="space-y-3">
+   705→              <div className="aspect-video w-full overflow-hidden rounded-2xl border border-white/10 bg-black">
+   706→                {source.type === 'mp4' && (
+   707→                  <video
+   708→                    ref={videoRef}
+   709→                    key={source.url}
+   710→                    controls
+   711→                    playsInline
+   712→                    className="h-full w-full"
+   713→                    src={source.url}
+   714→                    onPlay={() => emitControl('play')}
+   715→                    onPause={() => emitControl('pause')}
+   716→                    onSeeked={() => emitControl('seek')}
+   717→                    onRateChange={() => emitControl('rate')}
+   718→                    onError={() => advanceAfterFailure('eroare mp4')}
+   719→                    onLoadedMetadata={() => {
+   720→                      const st = lastStateRef.current;
+   721→                      if (!seededRef.current && st) {
+   722→                        seedFromState(st);
+   723→                      } else if (st && st.positionSec > 0.3) {
+   724→                        /* source switch: restore the party position */
+   725→                        try {
+   726→                          if (videoRef.current) videoRef.current.currentTime = st.positionSec;
+   727→                        } catch {
+   728→                          /* not seekable yet */
+   729→                        }
+   730→                      }
+   731→                    }}
+   732→                  />
+   733→                )}
+   734→                {source.type === 'm3u8' && (
+   735→                  <video
+   736→                    ref={videoRef}
+   737→                    controls
+   738→                    playsInline
+   739→                    className="h-full w-full"
+   740→                    onPlay={() => emitControl('play')}
+   741→                    onPause={() => emitControl('pause')}
+   742→                    onSeeked={() => emitControl('seek')}
+   743→                    onRateChange={() => emitControl('rate')}
+   744→                    onError={() => advanceAfterFailure('eroare m3u8')}
+   745→                    onLoadedMetadata={() => {
+   746→                      const st = lastStateRef.current;
+   747→                      if (!seededRef.current && st) {
+   748→                        seedFromState(st);
+   749→                      } else if (st && st.positionSec > 0.3) {
+   750→                        /* source switch: restore the party position */
+   751→                        try {
+   752→                          if (videoRef.current) videoRef.current.currentTime = st.positionSec;
+   753→                        } catch {
+   754→                          /* not seekable yet */
+   755→                        }
+   756→                      }
+   757→                    }}
+   758→                  />
+   759→                )}
+   760→                {source.type === 'youtube' && (
+   761→                  <iframe
+   762→                    key={source.url}
+   763→                    src={`${source.url}${source.url.includes('?') ? '&' : '?'}rel=0`}
+   764→                    title={party.content.title}
+   765→                    className="h-full w-full"
+   766→                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+   767→                    allowFullScreen
+   768→                  />
+   769→                )}
+   770→                {source.type === 'iframe' && (
+   771→                  <iframe
+   772→                    key={source.url}
+   773→                    src={source.url}
+   774→                    title="Player încorporat"
+   775→                    className="h-full w-full"
+   776→                    sandbox="allow-scripts; allow-same-origin; allow-presentation; allow-popups; allow-forms"
+   777→                    allowFullScreen
+   778→                    referrerPolicy="no-referrer"
+   779→                  />
+   780→                )}
+   781→              </div>
+   782→
+   783→              {/* TS2b: honest recovery card — every listed source failed. */}
+   784→              {sourceFailed && (
+   785→                <div
+   786→                  role="alert"
+   787→                  className="rounded-xl border border-red-500/30 bg-red-500/[0.07] px-4 py-3 text-sm text-red-200"
+   788→                >
+   789→                  <p className="font-semibold">Sursa a picat — toate sursele listate au refuzat conexiunea.</p>
+   790→                  <p className="mt-1 text-xs leading-relaxed text-red-200/80">
+   791→                    Deschide titlul în playerul principal (lanțul complet de fallback FAZA 17 + watchdog) sau reîncearcă
+   792→                    sursele în party.
+   793→                  </p>
+   794→                  <div className="mt-2.5 flex flex-wrap gap-2">
+   795→                    <Button
+   796→                      size="sm"
+   797→                      onClick={() => navigate(`/player/${party.content.id}`)}
+   798→                      className="h-8 bg-rose-600 text-xs font-bold hover:bg-rose-500"
+   799→                    >
+   800→                      Deschide în playerul principal
+   801→                    </Button>
+   802→                    <Button
+   803→                      size="sm"
+   804→                      variant="outline"
+   805→                      onClick={() => {
+   806→                        setSourceIndex(0);
+   807→                        setSourceFailed(false);
+   808→                      }}
+   809→                      className="h-8 border-white/15 bg-white/5 text-xs font-semibold hover:bg-white/10"
+   810→                    >
+   811→                      <RefreshCw className="h-3.5 w-3.5" aria-hidden /> Reîncearcă sursele
+   812→                    </Button>
+   813→                  </div>
+   814→                </div>
+   815→              )}
+   816→
+   817→              {embedSource && (
+   818→                <p className="rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-200/90">
+   819→                  Stream-urile încorporate nu pot fi sincronizate — gazda anunță redarea în chat.
+   820→                </p>
+   821→              )}
+   822→
+   823→              {/* Source switcher — the host's pick broadcasts to the room */}
+   824→              {sources.length > 1 && (
+   825→                <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Surse de stream">
+   826→                  {sources.map((s, i) => {
+   827→                    const isActive = source?.url === s.url && source?.type === s.type;
+   828→                    return (
+   829→                      <button
+   830→                        key={`${s.type}-${i}-${s.url}`}
+   831→                        type="button"
+   832→                        onClick={() => switchSource(i)}
+   833→                        aria-pressed={isActive}
+   834→                        className={cn(
+   835→                          'rounded-full border px-3 py-1.5 text-xs font-semibold transition',
+   836→                          isActive
+   837→                            ? 'border-rose-500/60 bg-rose-600 text-white shadow-lg shadow-rose-900/30'
+   838→                            : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+   839→                        )}
+   840→                      >
+   841→                        {s.label || `${s.type} ${i + 1}`}
+   842→                      </button>
+   843→                    );
+   844→                  })}
+   845→                </div>
+   846→              )}
+   847→
+   848→              {/* Sync bar */}
+   849→              <div className="flex flex-wrap items-center gap-2">
+   850→                {isHost ? (
+   851→                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-300">
+   852→                    <Crown className="h-3.5 w-3.5" aria-hidden />
+   853→                    Ești gazda — redarea ta îi sincronizează pe toți
+   854→                  </span>
+   855→                ) : (
+   856→                  <>
+   857→                    <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+   858→                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+   859→                      Sincronizat cu gazda
+   860→                    </span>
+   861→                    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-zinc-400">
+   862→                      Gazdă: <span className="font-semibold text-zinc-200">{party.host.username}</span>
+   863→                    </span>
+   864→                    <Button
+   865→                      variant="outline"
+   866→                      size="sm"
+   867→                      onClick={() => lastStateRef.current && applyStateToVideo(lastStateRef.current)}
+   868→                      disabled={!lastState}
+   869→                      className="h-7 border-white/15 bg-white/5 px-2.5 text-[11px] font-semibold hover:bg-white/10"
+   870→                    >
+   871→                      <RefreshCw aria-hidden /> Re-sincronizează acum
+   872→                    </Button>
+   873→                  </>
+   874→                )}
+   875→                {user && !socketConnected && (
+   876→                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-300">
+   877→                    <WifiOff className="h-3.5 w-3.5" aria-hidden /> Se reconectează…
+   878→                  </span>
+   879→                )}
+   880→              </div>
+   881→            </div>
+   882→          )}
+   883→
+   884→          {/* Members */}
+   885→          <Card className="border-white/10 bg-white/[0.03]">
+   886→            <CardHeader className="pb-3">
+   887→              <CardTitle className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-zinc-400">
+   888→                <Users className="h-4 w-4 text-rose-400" aria-hidden />
+   889→                Membri ({Math.max(members.length, party.members)})
+   890→              </CardTitle>
+   891→            </CardHeader>
+   892→            <CardContent>
+   893→              {members.length === 0 ? (
+   894→                <p className="text-sm text-zinc-500">Membrii apar aici pe măsură ce se conectează.</p>
+   895→              ) : (
+   896→                <ul className="grid gap-2 sm:grid-cols-2" aria-label="Membrii vizionării">
+   897→                  {[...members]
+   898→                    .sort((a, b) => (a.userid === party.host.id ? -1 : b.userid === party.host.id ? 1 : a.username.localeCompare(b.username)))
+   899→                    .map((m) => (
+   900→                      <li
+   901→                        key={m.userid}
+   902→                        className="flex items-center gap-2.5 rounded-lg border border-white/10 bg-black/20 px-3 py-2"
+   903→                      >
+   904→                        <span className="relative shrink-0">
+   905→                          <UserAvatar username={m.username} avatar={m.avatar} className="h-8 w-8" />
+   906→                          {m.online && (
+   907→                            <span
+   908→                              className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#0a0a10] bg-emerald-400"
+   909→                              title="Online"
+   910→                            />
+   911→                          )}
+   912→                        </span>
+   913→                        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">{m.username}</span>
+   914→                        {m.userid === party.host.id && (
+   915→                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+   916→                            <Crown className="h-3 w-3" aria-hidden /> Host
+   917→                          </span>
+   918→                        )}
+   919→                      </li>
+   920→                    ))}
+   921→                </ul>
+   922→              )}
+   923→            </CardContent>
+   924→          </Card>
+   925→        </div>
+   926→
+   927→        {/* Chat */}
+   928→        <Card className="flex h-[480px] flex-col border-white/10 bg-white/[0.03] lg:h-[calc(100vh-16rem)] lg:min-h-[560px]">
+   929→          <CardHeader className="shrink-0 border-b border-white/10 pb-3">
+   930→            <CardTitle className="text-xs font-bold uppercase tracking-widest text-zinc-400">Chat-ul vizionării</CardTitle>
+   931→          </CardHeader>
+   932→          <CardContent className="flex min-h-0 flex-1 flex-col gap-2 pt-3">
+   933→            <div
+   934→              ref={chatScrollRef}
+   935→              className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto pr-1"
+   936→              role="log"
+   937→              aria-label="Mesaje din chat-ul vizionării"
+   938→            >
+   939→              {messages.length === 0 ? (
+   940→                <p className="py-6 text-center text-sm text-zinc-500">Încă niciun mesaj — salută camera.</p>
+   941→              ) : (
+   942→                messages.map((m, i) => {
+   943→                  const own = Boolean(user && m.user.id === user.id);
+   944→                  return (
+   945→                    <div key={m.id != null ? `m-${m.id}` : `i-${i}`} className={cn('flex flex-col', own ? 'items-end' : 'items-start')}>
+   946→                      <div className={cn('flex max-w-[85%] items-start gap-2', own && 'flex-row-reverse')}>
+   947→                        {!own && <UserAvatar username={m.user.username} avatar={m.user.avatar} className="h-7 w-7" />}
+   948→                        <div
+   949→                          className={cn(
+   950→                            'rounded-xl px-3 py-2 text-sm leading-relaxed break-words',
+   951→                            own ? 'bg-rose-600 text-white' : 'border border-white/10 bg-white/[0.05] text-zinc-200',
+   952→                          )}
+   953→                        >
+   954→                          {!own && <span className="mb-0.5 block text-[11px] font-bold text-zinc-400">{m.user.username}</span>}
+   955→                          {m.body}
+   956→                        </div>
+   957→                      </div>
+   958→                      <time className="mt-0.5 px-1 text-[10px] text-zinc-500" dateTime={m.createdat}>
+   959→                        {timeAgo(m.createdat)}
+   960→                      </time>
+   961→                    </div>
+   962→                  );
+   963→                })
+   964→              )}
+   965→              {typingUser && (
+   966→                <p className="px-1 text-xs italic text-zinc-500" aria-live="polite">
+   967→                  {typingUser} is typing…
+   968→                </p>
+   969→              )}
+   970→            </div>
+   971→
+   972→            {user && lastPersisted === false && (
+   973→              <p className="shrink-0 rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-2.5 py-1.5 text-[11px] text-amber-200/90">
+   974→                Offline mode — message not saved
+   975→              </p>
+   976→            )}
+   977→
+   978→            {user ? (
+   979→              <form
+   980→                className="flex shrink-0 items-center gap-2 pt-1"
+   981→                onSubmit={(e) => {
+   982→                  e.preventDefault();
+   983→                  sendChat();
+   984→                }}
+   985→              >
+   986→                <label htmlFor="party-chat-input" className="sr-only">
+   987→                  Message the party
+   988→                </label>
+   989→                <Input
+   990→                  id="party-chat-input"
+   991→                  value={chatInput}
+   992→                  onChange={(e) => handleChatInputChange(e.target.value)}
+   993→                  placeholder={socketConnected ? 'Scrie grupului…' : 'Chat (offline — se trimite prin server)'}
+   994→                  maxLength={500}
+   995→                  autoComplete="off"
+   996→                  className="border-white/10 bg-black/40 text-sm text-zinc-100 placeholder:text-zinc-500"
+   997→                />
+   998→                <Button
+   999→                  type="submit"
+  1000→                  size="icon"
+  1001→                  aria-label="Trimite mesajul"
+  1002→                  disabled={!chatInput.trim()}
+  1003→                  className="shrink-0 bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1004→                >
+  1005→                  <Send className="h-4 w-4" aria-hidden />
+  1006→                </Button>
+  1007→              </form>
+  1008→            ) : (
+  1009→              <div className="flex shrink-0 flex-col items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-center">
+  1010→                <p className="text-sm text-zinc-400">Sign in to join the party and chat.</p>
+  1011→                <Button
+  1012→                  type="button"
+  1013→                  size="sm"
+  1014→                  className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1015→                  onClick={() => navigate('/auth')}
+  1016→                >
+  1017→                  <LogIn aria-hidden /> Sign in
+  1018→                </Button>
+  1019→              </div>
+  1020→            )}
+  1021→          </CardContent>
+  1022→        </Card>
+  1023→      </div>
+  1024→    </Container>
+  1025→  );
+  1026→}
+  1027→

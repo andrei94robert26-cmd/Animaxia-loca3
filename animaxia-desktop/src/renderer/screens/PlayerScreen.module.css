@@ -1,0 +1,200 @@
+/* PlayerScreen.module.css — player page layout (source chips, offline cards,
+   AI companion strip, next-up card). Shared atoms come from globals.css. */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.toolbarSpacer {
+  flex: 1;
+}
+
+.sectionLabel {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 16px 0 8px;
+}
+
+.sourceRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.externalRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.externalRow:hover {
+  border-color: var(--rose-line);
+  color: var(--rose-soft);
+}
+
+.noStream {
+  aspect-ratio: 16 / 9;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  text-align: center;
+}
+
+.noStreamTitle {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.noStreamText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 460px;
+}
+
+.offlineCard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--amber-line);
+  background: var(--amber-tint);
+}
+
+.offlineCardText {
+  flex: 1;
+  min-width: 180px;
+  color: var(--amber);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.overview {
+  margin: 16px 0 0;
+  max-width: 760px;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.companion {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 22px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.companionHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.companionTitle {
+  flex: 1;
+  min-width: 140px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.companionText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.companionRow {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.nextUp {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font);
+  transition: border-color 0.15s ease;
+}
+
+.nextUp:hover {
+  border-color: var(--rose-line);
+}
+
+.nextUpThumb {
+  width: 96px;
+  height: 58px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--skeleton);
+}
+
+.nextUpLabel {
+  color: var(--text-dim);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+}
+
+.nextUpTitle {
+  display: block;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.miniNote {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

@@ -1,0 +1,857 @@
+     1→/**
+     2→ * ai/RagLabTab.tsx — "RAG Lab" segment of the mobile AI hub (NEW in Phase 6).
+     3→ *
+     4→ * A public playground over the Animaxia RAG surface (pgvector embeddings):
+     5→ *
+     6→ *   Recommend  POST /api/ai/rag/recommend { query, limit }  → vector-ranked
+     7→ *              picks with reasons + score badges (works signed-out — anonymous
+     8→ *              5/day quota; signed-in answers are personalized)
+     9→ *   Summarize  POST /api/ai/rag/summarize { contentId }     → grounded summary
+    10→ *              rendered as a quote panel
+    11→ *   Explain    POST /api/ai/rag/explain { contentId, question? } → match %
+    12→ *              + explanation + vector-neighbour rows (tap → Content)
+    13→ *   Chat       POST /api/ai/rag/chat { contentId, message, history } →
+    14→ *              chat-with-a-title with tappable source chips (auth)
+    15→ *
+    16→ * Every mode handles the full state matrix: inline validation, loading
+    17→ * (RowSkeleton / ActivityIndicator), ErrorState + Retry, 402 UpgradeCard,
+    18→ * provider/degraded badges and the per-plan quota meter. Responses are
+    19→ * treated defensively (?? [] / ?? '' guards) so a malformed payload can
+    20→ * never crash the tab.
+    21→ */
+    22→
+    23→import React, { useCallback, useMemo, useState } from 'react';
+    24→import {
+    25→  ActivityIndicator,
+    26→  KeyboardAvoidingView,
+    27→  Platform,
+    28→  Pressable,
+    29→  StyleSheet,
+    30→  Text,
+    31→  TextInput,
+    32→  View,
+    33→  useWindowDimensions,
+    34→} from 'react-native';
+    35→import { Ionicons } from '@expo/vector-icons';
+    36→import { colors, radii, spacing, typography } from '../utils/theme';
+    37→import { useAuth } from '../hooks/useAuth';
+    38→import { isApiError } from '../api/client';
+    39→import * as aiApi from '../api/ai';
+    40→import type {
+    41→  AiChatTurn,
+    42→  AiCloudQuota,
+    43→  AiRagExplainResponse,
+    44→  AiRagRecommendResponse,
+    45→  AiRagSummarizeResponse,
+    46→} from '../api/ai';
+    47→import { navigateTo } from '../navigation/helpers';
+    48→import { Segmented } from '../components/Segmented';
+    49→import { ContentCard, Thumb } from '../components/content';
+    50→import { QuotaMeter } from '../components/QuotaMeter';
+    51→import { ErrorState, RowSkeleton, SignInCard, UpgradeCard } from '../components/states';
+    52→
+    53→/* --------------------------------- modes ---------------------------------- */
+    54→
+    55→type RagMode = 'recommend' | 'summarize' | 'explain' | 'chat';
+    56→
+    57→const MODES: { value: RagMode; label: string }[] = [
+    58→  { value: 'recommend', label: 'Recommend' },
+    59→  { value: 'summarize', label: 'Summarize' },
+    60→  { value: 'explain', label: 'Explain' },
+    61→  { value: 'chat', label: 'Chat' },
+    62→];
+    63→
+    64→/** Result-count options for the Recommend mode. */
+    65→const LIMITS = [3, 6, 10];
+    66→
+    67→/* ------------------------------ shared helpers ----------------------------- */
+    68→
+    69→function isQuotaError(err: unknown): boolean {
+    70→  return isApiError(err) && (err.upgrade || err.status === 402);
+    71→}
+    72→
+    73→/** "42" → 42; "" / "abc" / "-1" → null. */
+    74→function parseContentId(raw: string): number | null {
+    75→  const n = Number.parseInt(raw.trim(), 10);
+    76→  return Number.isFinite(n) && n > 0 ? n : null;
+    77→}
+    78→
+    79→function quotaMessage(err: unknown): string {
+    80→  return isApiError(err) ? err.message : 'Daily AI quota reached';
+    81→}
+    82→
+    83→function ragError(err: unknown): string {
+    84→  return isApiError(err) ? err.message : 'The RAG engine is unreachable';
+    85→}
+    86→
+    87→/** Small provider chip — amber "degraded" variant when the LLM is offline. */
+    88→function ProviderBadge({
+    89→  provider,
+    90→  degraded,
+    91→}: {
+    92→  provider?: string;
+    93→  degraded?: boolean;
+    94→}): React.JSX.Element | null {
+    95→  if (!provider) return null;
+    96→  return (
+    97→    <View style={[styles.providerChip, degraded && styles.providerChipDegraded]}>
+    98→      <Ionicons
+    99→        name={degraded ? 'cloud-offline-outline' : 'server-outline'}
+   100→        size={10}
+   101→        color={degraded ? colors.amber : colors.emerald}
+   102→      />
+   103→      <Text style={[styles.providerText, degraded && styles.providerTextDegraded]}>
+   104→        {degraded ? `${provider} · degraded` : provider.toUpperCase()}
+   105→      </Text>
+   106→    </View>
+   107→  );
+   108→}
+   109→
+   110→/** Primary "run this query" pill shared by the three POST modes. */
+   111→function RunButton({
+   112→  label,
+   113→  onPress,
+   114→  disabled,
+   115→  busy,
+   116→}: {
+   117→  label: string;
+   118→  onPress: () => void;
+   119→  disabled?: boolean;
+   120→  busy?: boolean;
+   121→}): React.JSX.Element {
+   122→  return (
+   123→    <Pressable
+   124→      accessibilityRole="button"
+   125→      accessibilityLabel={label}
+   126→      style={[styles.runButton, (disabled || busy) && styles.runButtonDisabled]}
+   127→      disabled={disabled || busy}
+   128→      onPress={onPress}
+   129→    >
+   130→      {busy ? (
+   131→        <ActivityIndicator size="small" color="#fff" />
+   132→      ) : (
+   133→        <Ionicons name="search" size={15} color="#fff" />
+   134→      )}
+   135→      <Text style={styles.runButtonText}>{busy ? 'Working…' : label}</Text>
+   136→    </Pressable>
+   137→  );
+   138→}
+   139→
+   140→/** Numeric content-id field + the "where do I find ids?" hint. */
+   141→function IdInput({ value, onChange }: { value: string; onChange: (v: string) => void }): React.JSX.Element {
+   142→  return (
+   143→    <View style={{ gap: 6 }}>
+   144→      <TextInput
+   145→        style={styles.input}
+   146→        value={value}
+   147→        onChangeText={onChange}
+   148→        placeholder="Content id — e.g. 42"
+   149→        placeholderTextColor={colors.textDim}
+   150→        keyboardType="number-pad"
+   151→        maxLength={9}
+   152→        accessibilityLabel="Content id"
+   153→      />
+   154→      <Text style={styles.idHint}>
+   155→        The numeric id is in any content page URL — animaxia://content/42 → 42.
+   156→      </Text>
+   157→    </View>
+   158→  );
+   159→}
+   160→
+   161→/** Inline "engine is thinking" row for the summarize/explain modes. */
+   162→function BusyRow({ label }: { label: string }): React.JSX.Element {
+   163→  return (
+   164→    <View style={styles.busyRow}>
+   165→      <ActivityIndicator color={colors.rose} />
+   166→      <Text style={styles.busyText}>{label}</Text>
+   167→    </View>
+   168→  );
+   169→}
+   170→
+   171→/* --------------------------------- the tab --------------------------------- */
+   172→
+   173→export function RagLabTab(): React.JSX.Element {
+   174→  const [mode, setMode] = useState<RagMode>('recommend');
+   175→
+   176→  return (
+   177→    <View style={styles.wrap}>
+   178→      <View style={styles.labHeader}>
+   179→        <Ionicons name="flask-outline" size={14} color={colors.roseSoft} />
+   180→        <Text style={styles.labHeaderText}>RAG Lab — vector search over the whole library</Text>
+   181→      </View>
+   182→      <Segmented options={MODES} value={mode} onChange={setMode} />
+   183→      <View style={styles.pane}>
+   184→        {mode === 'recommend' ? <RecommendPane /> : null}
+   185→        {mode === 'summarize' ? <SummarizePane /> : null}
+   186→        {mode === 'explain' ? <ExplainPane /> : null}
+   187→        {mode === 'chat' ? <ChatPane /> : null}
+   188→      </View>
+   189→    </View>
+   190→  );
+   191→}
+   192→
+   193→/* ------------------------------ Recommend mode ------------------------------ */
+   194→
+   195→function RecommendPane(): React.JSX.Element {
+   196→  const { width } = useWindowDimensions();
+   197→  const [query, setQuery] = useState('');
+   198→  const [limit, setLimit] = useState<number>(6);
+   199→  const [loading, setLoading] = useState(false);
+   200→  const [error, setError] = useState<string | null>(null);
+   201→  const [quotaBlocked, setQuotaBlocked] = useState<string | null>(null);
+   202→  const [result, setResult] = useState<AiRagRecommendResponse | null>(null);
+   203→
+   204→  const run = useCallback(async () => {
+   205→    const q = query.trim();
+   206→    if (!q || loading) return;
+   207→    setLoading(true);
+   208→    setError(null);
+   209→    setQuotaBlocked(null);
+   210→    try {
+   211→      setResult(await aiApi.aiRagRecommend(q, limit));
+   212→    } catch (err) {
+   213→      setResult(null);
+   214→      if (isQuotaError(err)) setQuotaBlocked(quotaMessage(err));
+   215→      else setError(ragError(err));
+   216→    } finally {
+   217→      setLoading(false);
+   218→    }
+   219→  }, [query, limit, loading]);
+   220→
+   221→  // Two responsive poster columns inside the hub's horizontal padding.
+   222→  const cardWidth = Math.min(190, Math.max(120, Math.floor((width - spacing.lg * 2 - spacing.md) / 2)));
+   223→  const picks = result?.data ?? [];
+   224→
+   225→  return (
+   226→    <View style={{ gap: spacing.md }}>
+   227→      <Text style={styles.paneHint}>
+   228→        Describe what you feel like — the vector engine ranks the whole library and explains every pick.
+   229→      </Text>
+   230→      <TextInput
+   231→        style={styles.input}
+   232→        value={query}
+   233→        onChangeText={setQuery}
+   234→        placeholder="e.g. dark sci-fi anime with mechs"
+   235→        placeholderTextColor={colors.textDim}
+   236→        returnKeyType="search"
+   237→        autoCapitalize="none"
+   238→        autoCorrect={false}
+   239→        maxLength={200}
+   240→        accessibilityLabel="Recommendation query"
+   241→        onSubmitEditing={run}
+   242→      />
+   243→      <View style={styles.limitRow}>
+   244→        <Text style={styles.limitLabel}>results</Text>
+   245→        {LIMITS.map((n) => {
+   246→          const active = limit === n;
+   247→          return (
+   248→            <Pressable
+   249→              key={n}
+   250→              accessibilityRole="button"
+   251→              accessibilityLabel={`${n} results`}
+   252→              accessibilityState={{ selected: active }}
+   253→              style={[styles.limitChip, active && styles.limitChipActive]}
+   254→              onPress={() => setLimit(n)}
+   255→            >
+   256→              <Text style={[styles.limitText, active && styles.limitTextActive]}>{n}</Text>
+   257→            </Pressable>
+   258→          );
+   259→        })}
+   260→      </View>
+   261→      <RunButton label="Find titles" onPress={run} disabled={!query.trim()} busy={loading} />
+   262→
+   263→      {loading ? <RowSkeleton /> : null}
+   264→      {!loading && quotaBlocked ? <UpgradeCard message={quotaBlocked} /> : null}
+   265→      {!loading && error ? <ErrorState message={error} onRetry={run} /> : null}
+   266→
+   267→      {!loading && result ? (
+   268→        <View style={{ gap: spacing.md }}>
+   269→          <View style={styles.metaRow}>
+   270→            <ProviderBadge provider={result.provider} degraded={result.degraded} />
+   271→            {result.personalized ? (
+   272→              <View style={styles.personalizedChip}>
+   273→                <Ionicons name="person" size={9} color={colors.roseSoft} />
+   274→                <Text style={styles.personalizedText}>personalized ranking</Text>
+   275→              </View>
+   276→            ) : null}
+   277→          </View>
+   278→          {result.intro ? <Text style={styles.lead}>{result.intro}</Text> : null}
+   279→          {picks.length === 0 ? (
+   280→            <Text style={styles.emptyText}>Nothing matched — try a broader description.</Text>
+   281→          ) : (
+   282→            <View style={styles.picksWrap}>
+   283→              {picks.map((pick, index) => (
+   284→                <View key={`${pick.id}-${index}`} style={[styles.pickCell, { width: cardWidth }]}>
+   285→                  <ContentCard item={pick} width={cardWidth} reason={pick.reason} />
+   286→                  <View style={styles.scoreBadge}>
+   287→                    <Ionicons name="sparkles" size={9} color={colors.roseSoft} />
+   288→                    <Text style={styles.scoreText}>{Number(pick.score ?? 0).toFixed(2)}</Text>
+   289→                  </View>
+   290→                </View>
+   291→              ))}
+   292→            </View>
+   293→          )}
+   294→          {result.quota ? <QuotaMeter quota={result.quota} /> : null}
+   295→        </View>
+   296→      ) : null}
+   297→    </View>
+   298→  );
+   299→}
+   300→
+   301→/* ------------------------------ Summarize mode ------------------------------ */
+   302→
+   303→function SummarizePane(): React.JSX.Element {
+   304→  const [idDraft, setIdDraft] = useState('');
+   305→  const [loading, setLoading] = useState(false);
+   306→  const [error, setError] = useState<string | null>(null);
+   307→  const [quotaBlocked, setQuotaBlocked] = useState<string | null>(null);
+   308→  const [result, setResult] = useState<AiRagSummarizeResponse | null>(null);
+   309→
+   310→  const id = parseContentId(idDraft);
+   311→
+   312→  const run = useCallback(async () => {
+   313→    if (!id || loading) return;
+   314→    setLoading(true);
+   315→    setError(null);
+   316→    setQuotaBlocked(null);
+   317→    try {
+   318→      setResult(await aiApi.aiRagSummarize(id));
+   319→    } catch (err) {
+   320→      setResult(null);
+   321→      if (isQuotaError(err)) setQuotaBlocked(quotaMessage(err));
+   322→      else setError(ragError(err));
+   323→    } finally {
+   324→      setLoading(false);
+   325→    }
+   326→  }, [id, loading]);
+   327→
+   328→  return (
+   329→    <View style={{ gap: spacing.md }}>
+   330→      <Text style={styles.paneHint}>
+   331→        Spoiler-light summary of any title, cited from the library metadata.
+   332→      </Text>
+   333→      <IdInput value={idDraft} onChange={setIdDraft} />
+   334→      <RunButton label="Summarize" onPress={run} disabled={!id} busy={loading} />
+   335→
+   336→      {loading ? <BusyRow label="reading the library…" /> : null}
+   337→      {!loading && quotaBlocked ? <UpgradeCard message={quotaBlocked} /> : null}
+   338→      {!loading && error ? <ErrorState message={error} onRetry={run} /> : null}
+   339→
+   340→      {!loading && result ? (
+   341→        <View style={{ gap: spacing.md }}>
+   342→          <View style={styles.summaryCard}>
+   343→            <View style={styles.summaryHeader}>
+   344→              <Ionicons name="document-text-outline" size={14} color={colors.roseSoft} />
+   345→              <Text style={styles.summaryTitle} numberOfLines={2}>
+   346→                {result.title}
+   347→              </Text>
+   348→            </View>
+   349→            <Text style={styles.summaryBody}>{result.summary}</Text>
+   350→          </View>
+   351→          <View style={styles.metaRow}>
+   352→            <ProviderBadge provider={result.provider} degraded={result.degraded} />
+   353→            <Pressable
+   354→              accessibilityRole="button"
+   355→              accessibilityLabel={`Open ${result.title}`}
+   356→              style={styles.openChip}
+   357→              onPress={() => id && navigateTo('Content', { id })}
+   358→            >
+   359→              <Ionicons name="open-outline" size={10} color={colors.text} />
+   360→              <Text style={styles.openChipText}>open title</Text>
+   361→            </Pressable>
+   362→          </View>
+   363→        </View>
+   364→      ) : null}
+   365→    </View>
+   366→  );
+   367→}
+   368→
+   369→/* ------------------------------- Explain mode ------------------------------- */
+   370→
+   371→function ExplainPane(): React.JSX.Element {
+   372→  const [idDraft, setIdDraft] = useState('');
+   373→  const [question, setQuestion] = useState('');
+   374→  const [loading, setLoading] = useState(false);
+   375→  const [error, setError] = useState<string | null>(null);
+   376→  const [quotaBlocked, setQuotaBlocked] = useState<string | null>(null);
+   377→  const [result, setResult] = useState<AiRagExplainResponse | null>(null);
+   378→
+   379→  const id = parseContentId(idDraft);
+   380→
+   381→  const run = useCallback(async () => {
+   382→    if (!id || loading) return;
+   383→    const q = question.trim();
+   384→    setLoading(true);
+   385→    setError(null);
+   386→    setQuotaBlocked(null);
+   387→    try {
+   388→      setResult(await aiApi.aiRagExplain(id, q || undefined));
+   389→    } catch (err) {
+   390→      setResult(null);
+   391→      if (isQuotaError(err)) setQuotaBlocked(quotaMessage(err));
+   392→      else setError(ragError(err));
+   393→    } finally {
+   394→      setLoading(false);
+   395→    }
+   396→  }, [id, question, loading]);
+   397→
+   398→  const similar = result?.similar ?? [];
+   399→
+   400→  return (
+   401→    <View style={{ gap: spacing.md }}>
+   402→      <Text style={styles.paneHint}>
+   403→        Ask “will I like this?” — the engine matches the title against your taste vectors (works anonymously too).
+   404→      </Text>
+   405→      <IdInput value={idDraft} onChange={setIdDraft} />
+   406→      <TextInput
+   407→        style={styles.input}
+   408→        value={question}
+   409→        onChangeText={setQuestion}
+   410→        placeholder="Optional question — e.g. is it slow-paced?"
+   411→        placeholderTextColor={colors.textDim}
+   412→        autoCapitalize="none"
+   413→        autoCorrect={false}
+   414→        maxLength={200}
+   415→        accessibilityLabel="Optional question for the RAG engine"
+   416→      />
+   417→      <RunButton label="Explain the match" onPress={run} disabled={!id} busy={loading} />
+   418→
+   419→      {loading ? <BusyRow label="matching your taste…" /> : null}
+   420→      {!loading && quotaBlocked ? <UpgradeCard message={quotaBlocked} /> : null}
+   421→      {!loading && error ? <ErrorState message={error} onRetry={run} /> : null}
+   422→
+   423→      {!loading && result ? (
+   424→        <View style={{ gap: spacing.md }}>
+   425→          <View style={styles.resultHeader}>
+   426→            <Ionicons name="person-circle-outline" size={16} color={colors.emerald} />
+   427→            <Text style={styles.resultTitle} numberOfLines={1}>
+   428→              {result.title}
+   429→            </Text>
+   430→            {result.matchScore != null ? (
+   431→              <View style={styles.matchChip}>
+   432→                <Text style={styles.matchText}>match {Math.round(result.matchScore * 100)}%</Text>
+   433→              </View>
+   434→            ) : null}
+   435→          </View>
+   436→          <View style={styles.panel}>
+   437→            <Text style={styles.panelText}>{result.explanation}</Text>
+   438→          </View>
+   439→          <ProviderBadge provider={result.provider} degraded={result.degraded} />
+   440→          {similar.length > 0 ? (
+   441→            <View style={{ gap: spacing.sm }}>
+   442→              <Text style={styles.subLabel}>Vector neighbours</Text>
+   443→              {similar.slice(0, 8).map((n) => (
+   444→                <Pressable
+   445→                  key={`${n.id}-${n.title}`}
+   446→                  accessibilityRole="button"
+   447→                  accessibilityLabel={`Open ${n.title}`}
+   448→                  style={styles.simRow}
+   449→                  onPress={() => navigateTo('Content', { id: n.id })}
+   450→                >
+   451→                  <Thumb uri={n.thumbnail} style={styles.simThumb} iconSize={13} />
+   452→                  <View style={{ flex: 1, gap: 2 }}>
+   453→                    <Text style={styles.simTitle} numberOfLines={1}>
+   454→                      {n.title}
+   455→                    </Text>
+   456→                    {n.genres && n.genres.length > 0 ? (
+   457→                      <Text style={styles.simMeta} numberOfLines={1}>
+   458→                        {n.genres.slice(0, 3).join(' · ')}
+   459→                      </Text>
+   460→                    ) : null}
+   461→                  </View>
+   462→                  <Text style={styles.simScore}>{Number(n.score ?? 0).toFixed(2)}</Text>
+   463→                </Pressable>
+   464→              ))}
+   465→            </View>
+   466→          ) : null}
+   467→          {result.quota ? <QuotaMeter quota={result.quota} /> : null}
+   468→        </View>
+   469→      ) : null}
+   470→    </View>
+   471→  );
+   472→}
+   473→
+   474→/* -------------------------------- Chat mode -------------------------------- */
+   475→
+   476→interface RagTurn {
+   477→  role: 'user' | 'assistant';
+   478→  content: string;
+   479→  sources?: { id: number; title: string; score: number }[];
+   480→  provider?: string;
+   481→  degraded?: boolean;
+   482→}
+   483→
+   484→function ChatPane(): React.JSX.Element {
+   485→  const { user } = useAuth();
+   486→  const [idDraft, setIdDraft] = useState('');
+   487→  const [draft, setDraft] = useState('');
+   488→  const [turns, setTurns] = useState<RagTurn[]>([]);
+   489→  /** The content id the current conversation belongs to (switch → fresh chat). */
+   490→  const [conversationId, setConversationId] = useState<number | null>(null);
+   491→  const [sending, setSending] = useState(false);
+   492→  const [error, setError] = useState<string | null>(null);
+   493→  const [quotaBlocked, setQuotaBlocked] = useState<string | null>(null);
+   494→  const [quota, setQuota] = useState<AiCloudQuota | null>(null);
+   495→
+   496→  const id = parseContentId(idDraft);
+   497→
+   498→  const history = useMemo<AiChatTurn[]>(
+   499→    () => turns.slice(-8).map((t) => ({ role: t.role, content: t.content })),
+   500→    [turns],
+   501→  );
+   502→
+   503→  const send = useCallback(async () => {
+   504→    const message = draft.trim();
+   505→    if (!message || !id || sending) return;
+   506→    setError(null);
+   507→    setQuotaBlocked(null);
+   508→    setSending(true);
+   509→    setDraft('');
+   510→
+   511→    // New content id → the old conversation is irrelevant: start clean.
+   512→    const switching = conversationId !== id;
+   513→    const hist = switching ? [] : history;
+   514→    setConversationId(id);
+   515→    setTurns((prev) =>
+   516→      switching ? [{ role: 'user', content: message }] : [...prev, { role: 'user', content: message }],
+   517→    );
+   518→
+   519→    try {
+   520→      const res = await aiApi.aiRagChat(id, message, hist);
+   521→      setTurns((prev) => [
+   522→        ...prev,
+   523→        {
+   524→          role: 'assistant',
+   525→          content: res.reply,
+   526→          sources: res.sources ?? [],
+   527→          provider: res.provider,
+   528→          degraded: res.degraded,
+   529→        },
+   530→      ]);
+   531→      if (res.quota) setQuota(res.quota);
+   532→    } catch (err) {
+   533→      // Roll back the optimistic user bubble and give the draft back.
+   534→      setTurns((prev) => prev.slice(0, -1));
+   535→      setDraft(message);
+   536→      if (isQuotaError(err)) setQuotaBlocked(quotaMessage(err));
+   537→      else setError(ragError(err));
+   538→    } finally {
+   539→      setSending(false);
+   540→    }
+   541→  }, [draft, id, sending, conversationId, history]);
+   542→
+   543→  if (!user) {
+   544→    return (
+   545→      <SignInCard message="Sign in to chat with a title — every answer is grounded in the library metadata (RAG)." />
+   546→    );
+   547→  }
+   548→
+   549→  return (
+   550→    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ gap: spacing.md }}>
+   551→      <Text style={styles.paneHint}>
+   552→        Pick a title and ask anything about it — every answer lists the sources it was grounded on.
+   553→      </Text>
+   554→      <IdInput value={idDraft} onChange={setIdDraft} />
+   555→
+   556→      {turns.length === 0 && !sending ? (
+   557→        <View style={styles.emptyChat}>
+   558→          <Ionicons name="chatbubbles-outline" size={20} color={colors.textDim} />
+   559→          <Text style={styles.emptyChatText}>
+   560→            No messages yet — your last 8 turns are sent back as context.
+   561→          </Text>
+   562→        </View>
+   563→      ) : null}
+   564→
+   565→      <View style={styles.chatLog}>
+   566→        {turns.map((turn, index) => (
+   567→          <View
+   568→            key={`${turn.role}-${index}`}
+   569→            style={[styles.bubble, turn.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}
+   570→          >
+   571→            <Text style={turn.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>
+   572→              {turn.content}
+   573→            </Text>
+   574→            {turn.role === 'assistant' && turn.sources && turn.sources.length > 0 ? (
+   575→              <View style={styles.sourceRow}>
+   576→                <Text style={styles.sourceLabel}>based on:</Text>
+   577→                {turn.sources.slice(0, 4).map((s) => (
+   578→                  <Pressable
+   579→                    key={`${s.id}-${s.title}`}
+   580→                    accessibilityRole="button"
+   581→                    accessibilityLabel={`Open ${s.title}`}
+   582→                    style={styles.sourceChip}
+   583→                    onPress={() => navigateTo('Content', { id: s.id })}
+   584→                  >
+   585→                    <Text style={styles.sourceChipText} numberOfLines={1}>
+   586→                      {s.title} · {Number(s.score ?? 0).toFixed(2)}
+   587→                    </Text>
+   588→                  </Pressable>
+   589→                ))}
+   590→              </View>
+   591→            ) : null}
+   592→            {turn.role === 'assistant' ? (
+   593→              <ProviderBadge provider={turn.provider} degraded={turn.degraded} />
+   594→            ) : null}
+   595→          </View>
+   596→        ))}
+   597→        {sending ? (
+   598→          <View style={[styles.bubble, styles.bubbleAi]}>
+   599→            <Text style={styles.bubbleAiText}>reading the library…</Text>
+   600→          </View>
+   601→        ) : null}
+   602→      </View>
+   603→
+   604→      {quotaBlocked ? <UpgradeCard message={quotaBlocked} /> : null}
+   605→      {error ? <ErrorState message={error} compact onRetry={() => setError(null)} /> : null}
+   606→      {quota ? <QuotaMeter quota={quota} /> : null}
+   607→
+   608→      <View style={styles.inputRow}>
+   609→        <TextInput
+   610→          style={styles.input}
+   611→          value={draft}
+   612→          onChangeText={setDraft}
+   613→          placeholder={id ? 'Ask about the title…' : 'Enter a content id first…'}
+   614→          placeholderTextColor={colors.textDim}
+   615→          multiline
+   616→          maxLength={2000}
+   617→          accessibilityLabel="Message the RAG chat"
+   618→        />
+   619→        <Pressable
+   620→          accessibilityRole="button"
+   621→          accessibilityLabel="Send message"
+   622→          style={[styles.sendButton, (!draft.trim() || !id || sending) && styles.sendButtonDisabled]}
+   623→          disabled={!draft.trim() || !id || sending}
+   624→          onPress={send}
+   625→        >
+   626→          <Ionicons name="arrow-up" size={17} color="#fff" />
+   627→        </Pressable>
+   628→      </View>
+   629→    </KeyboardAvoidingView>
+   630→  );
+   631→}
+   632→
+   633→/* ---------------------------------- styles --------------------------------- */
+   634→
+   635→const styles = StyleSheet.create({
+   636→  wrap: { gap: spacing.md, paddingTop: spacing.sm },
+   637→  labHeader: {
+   638→    flexDirection: 'row',
+   639→    alignItems: 'center',
+   640→    gap: 7,
+   641→    backgroundColor: 'rgba(217,70,239,0.07)',
+   642→    borderWidth: 1,
+   643→    borderColor: 'rgba(217,70,239,0.25)',
+   644→    borderRadius: radii.md,
+   645→    paddingHorizontal: spacing.md,
+   646→    paddingVertical: 8,
+   647→  },
+   648→  labHeaderText: { flex: 1, color: colors.textMuted, fontSize: typography.tiny, lineHeight: 15 },
+   649→  pane: { minHeight: 120 },
+   650→
+   651→  paneHint: { color: colors.textMuted, fontSize: typography.tiny, lineHeight: 16 },
+   652→
+   653→  input: {
+   654→    backgroundColor: colors.card,
+   655→    borderWidth: 1,
+   656→    borderColor: colors.border,
+   657→    borderRadius: radii.lg,
+   658→    color: colors.text,
+   659→    fontSize: typography.small,
+   660→    paddingHorizontal: 14,
+   661→    paddingTop: 10,
+   662→    paddingBottom: 10,
+   663→    maxHeight: 110,
+   664→  },
+   665→  idHint: { color: colors.textDim, fontSize: 10 },
+   666→
+   667→  limitRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+   668→  limitLabel: {
+   669→    color: colors.textDim,
+   670→    fontSize: 10,
+   671→    fontWeight: '700',
+   672→    textTransform: 'uppercase',
+   673→    letterSpacing: 0.5,
+   674→  },
+   675→  limitChip: {
+   676→    backgroundColor: colors.cardSoft,
+   677→    borderWidth: 1,
+   678→    borderColor: colors.border,
+   679→    borderRadius: radii.pill,
+   680→    paddingHorizontal: 14,
+   681→    paddingVertical: 6,
+   682→  },
+   683→  limitChipActive: { backgroundColor: colors.rose, borderColor: colors.rose },
+   684→  limitText: { color: colors.textMuted, fontSize: typography.tiny, fontWeight: '700' },
+   685→  limitTextActive: { color: '#fff' },
+   686→
+   687→  runButton: {
+   688→    flexDirection: 'row',
+   689→    alignItems: 'center',
+   690→    justifyContent: 'center',
+   691→    gap: 8,
+   692→    backgroundColor: colors.rose,
+   693→    borderRadius: radii.pill,
+   694→    paddingVertical: 11,
+   695→  },
+   696→  runButtonDisabled: { opacity: 0.4 },
+   697→  runButtonText: { color: '#fff', fontSize: typography.small, fontWeight: '700' },
+   698→
+   699→  busyRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: spacing.md },
+   700→  busyText: { color: colors.textDim, fontSize: typography.tiny },
+   701→
+   702→  metaRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
+   703→  providerChip: {
+   704→    flexDirection: 'row',
+   705→    alignItems: 'center',
+   706→    gap: 5,
+   707→    backgroundColor: 'rgba(52,211,153,0.12)',
+   708→    borderWidth: 1,
+   709→    borderColor: 'rgba(52,211,153,0.3)',
+   710→    borderRadius: radii.sm,
+   711→    paddingHorizontal: 8,
+   712→    paddingVertical: 3,
+   713→  },
+   714→  providerChipDegraded: {
+   715→    backgroundColor: 'rgba(251,191,36,0.1)',
+   716→    borderColor: 'rgba(251,191,36,0.35)',
+   717→  },
+   718→  providerText: { color: colors.emerald, fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
+   719→  providerTextDegraded: { color: colors.amber },
+   720→  personalizedChip: {
+   721→    flexDirection: 'row',
+   722→    alignItems: 'center',
+   723→    gap: 4,
+   724→    backgroundColor: 'rgba(244,63,94,0.1)',
+   725→    borderRadius: radii.sm,
+   726→    paddingHorizontal: 8,
+   727→    paddingVertical: 3,
+   728→  },
+   729→  personalizedText: { color: colors.roseSoft, fontSize: 9, fontWeight: '800' },
+   730→
+   731→  lead: { color: colors.text, fontSize: typography.body, lineHeight: 21, fontWeight: '600' },
+   732→  emptyText: { color: colors.textMuted, fontSize: typography.small },
+   733→
+   734→  picksWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md },
+   735→  pickCell: { position: 'relative' },
+   736→  scoreBadge: {
+   737→    position: 'absolute',
+   738→    top: 6,
+   739→    right: 6,
+   740→    flexDirection: 'row',
+   741→    alignItems: 'center',
+   742→    gap: 3,
+   743→    backgroundColor: 'rgba(0,0,0,0.78)',
+   744→    borderRadius: radii.sm,
+   745→    paddingHorizontal: 5,
+   746→    paddingVertical: 2,
+   747→  },
+   748→  scoreText: { color: colors.roseSoft, fontSize: 10, fontWeight: '800' },
+   749→
+   750→  summaryCard: {
+   751→    backgroundColor: colors.card,
+   752→    borderLeftWidth: 3,
+   753→    borderLeftColor: colors.rose,
+   754→    borderWidth: 1,
+   755→    borderColor: colors.border,
+   756→    borderRadius: radii.md,
+   757→    padding: spacing.lg,
+   758→    gap: spacing.sm,
+   759→  },
+   760→  summaryHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+   761→  summaryTitle: { flex: 1, color: colors.text, fontSize: typography.body, fontWeight: '800' },
+   762→  summaryBody: { color: colors.textMuted, fontSize: typography.small, lineHeight: 20 },
+   763→
+   764→  openChip: {
+   765→    flexDirection: 'row',
+   766→    alignItems: 'center',
+   767→    gap: 5,
+   768→    backgroundColor: colors.cardSoft,
+   769→    borderWidth: 1,
+   770→    borderColor: colors.border,
+   771→    borderRadius: radii.pill,
+   772→    paddingHorizontal: 10,
+   773→    paddingVertical: 5,
+   774→  },
+   775→  openChipText: { color: colors.text, fontSize: 10, fontWeight: '700' },
+   776→
+   777→  resultHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+   778→  resultTitle: { flex: 1, color: colors.text, fontSize: typography.body, fontWeight: '800' },
+   779→  matchChip: {
+   780→    backgroundColor: 'rgba(52,211,153,0.14)',
+   781→    borderRadius: radii.sm,
+   782→    paddingHorizontal: 9,
+   783→    paddingVertical: 4,
+   784→  },
+   785→  matchText: { color: colors.emerald, fontSize: 11, fontWeight: '800' },
+   786→
+   787→  panel: {
+   788→    backgroundColor: colors.card,
+   789→    borderWidth: 1,
+   790→    borderColor: colors.border,
+   791→    borderRadius: radii.md,
+   792→    padding: spacing.lg,
+   793→  },
+   794→  panelText: { color: colors.textMuted, fontSize: typography.small, lineHeight: 20 },
+   795→
+   796→  subLabel: {
+   797→    color: colors.textDim,
+   798→    fontSize: 10,
+   799→    fontWeight: '700',
+   800→    textTransform: 'uppercase',
+   801→    letterSpacing: 0.5,
+   802→  },
+   803→  simRow: {
+   804→    flexDirection: 'row',
+   805→    alignItems: 'center',
+   806→    gap: spacing.md,
+   807→    backgroundColor: colors.card,
+   808→    borderWidth: 1,
+   809→    borderColor: colors.borderSoft,
+   810→    borderRadius: radii.md,
+   811→    padding: spacing.md,
+   812→  },
+   813→  simThumb: { width: 46, height: 46, borderRadius: radii.sm },
+   814→  simTitle: { color: colors.text, fontSize: typography.small, fontWeight: '700' },
+   815→  simMeta: { color: colors.textDim, fontSize: 10 },
+   816→  simScore: { color: colors.roseSoft, fontSize: 11, fontWeight: '800' },
+   817→
+   818→  emptyChat: { alignItems: 'center', gap: 8, paddingVertical: spacing.lg },
+   819→  emptyChatText: { color: colors.textDim, fontSize: typography.tiny, textAlign: 'center' },
+   820→
+   821→  chatLog: { gap: 8 },
+   822→  bubble: { borderRadius: radii.md, padding: 11, maxWidth: '92%', gap: 7 },
+   823→  bubbleUser: { backgroundColor: colors.rose, alignSelf: 'flex-end' },
+   824→  bubbleAi: {
+   825→    backgroundColor: colors.card,
+   826→    borderWidth: 1,
+   827→    borderColor: colors.borderSoft,
+   828→    alignSelf: 'flex-start',
+   829→  },
+   830→  bubbleUserText: { color: '#fff', fontSize: typography.small, lineHeight: 19 },
+   831→  bubbleAiText: { color: colors.text, fontSize: typography.small, lineHeight: 19 },
+   832→
+   833→  sourceRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+   834→  sourceLabel: { color: colors.textDim, fontSize: 9 },
+   835→  sourceChip: {
+   836→    backgroundColor: 'rgba(244,63,94,0.1)',
+   837→    borderRadius: radii.sm,
+   838→    paddingHorizontal: 7,
+   839→    paddingVertical: 3,
+   840→    maxWidth: 150,
+   841→  },
+   842→  sourceChipText: { color: colors.roseSoft, fontSize: 9, fontWeight: '700' },
+   843→
+   844→  inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
+   845→  sendButton: {
+   846→    width: 42,
+   847→    height: 42,
+   848→    borderRadius: radii.pill,
+   849→    backgroundColor: colors.rose,
+   850→    alignItems: 'center',
+   851→    justifyContent: 'center',
+   852→  },
+   853→  sendButtonDisabled: { opacity: 0.4 },
+   854→});
+   855→
+   856→export default RagLabTab;
+   857→

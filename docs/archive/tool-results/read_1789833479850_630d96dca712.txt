@@ -1,0 +1,667 @@
+     1→/**
+     2→ * api.ts — Animaxia API client. All requests go through the gateway using
+     3→ * relative URLs with the XTransformPort query param (backend runs on :4000).
+     4→ * Never hardcode hosts or ports in fetch URLs.
+     5→ */
+     6→
+     7→import type {
+     8→  AiBrowseResponse,
+     9→  AiExternalStatsResponse,
+    10→  AiFeedItem,
+    11→  AiFeedResponse,
+    12→  AiHomeSettings,
+    13→  AiHomeSettingsResponse,
+    14→  AiHubKey,
+    15→  AiHubStatusResponse,
+    16→  AiMetadataResponse,
+    17→  AiNarrationResponse,
+    18→  AiTaxonomyResponse,
+    19→  AiTrailerResponse,
+    20→  AllResponse,
+    21→  AnimeItem,
+    22→  Competition,
+    23→  CuratorEnrichResponse,
+    24→  CuratorScan,
+    25→  DbContent,
+    26→  DiscoverResponse,
+    27→  F1Race,
+    28→  F1Standing,
+    29→  FootballMatch,
+    30→  FootballTableEntry,
+    31→  FranchisesResponse,
+    32→  GlobalFeedResponse,
+    33→  HealthResponse,
+    34→  HubContentResponse,
+    35→  HubFeedResponse,
+    36→  HubScaleResponse,
+    37→  HubStatsResponse,
+    38→  IngestCheckResponse,
+    39→  IngestRegisterResponse,
+    40→  IngestSourcesResponse,
+    41→  IngestStats,
+    42→  MarathonCreateResponse,
+    43→  MarathonListResponse,
+    44→  MarathonSuggestionsResponse,
+    45→  MediaItem,
+    46→  MetaDimension,
+    47→  MinerExtraction,
+    48→  NewsItem,
+    49→  NormalizedItem,
+    50→  PlayerExternalResponse,
+    51→  PlayerHubPlaylistDetailResponse,
+    52→  PlayerHubPlaylistSummary,
+    53→  PlayerHubContinueWatchingItem,
+    54→  PlayerHubProgress,
+    55→  PlayerHubStatsResponse,
+    56→  PlayerHubStatus,
+    57→  PlayerHubSubtitleTrack,
+    58→  PlayerResponse,
+    59→  RadioCountry,
+    60→  RadioLiveResponse,
+    61→  ScaleMetrics,
+    62→  ScaleReport,
+    63→  SearchAdvancedResponse,
+    64→  SearchAutocompleteResponse,
+    65→  SearchFilters,
+    66→  SearchFiltersOptions,
+    67→  SearchFlowConsole,
+    68→  SearchRateConsole,
+    69→  SearchOptConsole,
+    70→  SearchStressConsole,
+    71→  SearchStatus,
+    72→  SeedResponse,
+    73→  SemanticQueryResponse,
+    74→  SemanticSimilarResponse,
+    75→  SemanticStatus,
+    76→  StabilitySnapshot,
+    77→  StressRunRequest,
+    78→  StressRunResponse,
+    79→  TranslateResponse,
+    80→  TranslateStatusResponse,
+    81→  TrendForecast,
+    82→  TvScheduleItem,
+    83→  VirtualCatalogResponse,
+    84→  WatchdogHealth,
+    85→} from './types';
+    86→
+    87→export const BACKEND_PORT = 4000;
+    88→
+    89→/** API error with the parsed JSON body attached (FAZA 16: 429 pacing
+    90→ *  responses carry { error, code, retryInMs } the UI needs for its
+    91→ *  „Așteaptă un moment…” affordance). */
+    92→export class ApiError extends Error {
+    93→  status: number;
+    94→  body: Record<string, unknown> | null;
+    95→  constructor(message: string, status: number, body: Record<string, unknown> | null = null) {
+    96→    super(message);
+    97→    this.name = 'ApiError';
+    98→    this.status = status;
+    99→    this.body = body;
+   100→  }
+   101→}
+   102→
+   103→type ParamValue = string | number | boolean | undefined | null;
+   104→
+   105→export function apiUrl(path: string, params?: Record<string, ParamValue>): string {
+   106→  const search = new URLSearchParams();
+   107→  search.set('XTransformPort', String(BACKEND_PORT));
+   108→  if (params) {
+   109→    for (const [key, value] of Object.entries(params)) {
+   110→      if (value !== undefined && value !== null && value !== '') search.set(key, String(value));
+   111→    }
+   112→  }
+   113→  return `${path}?${search.toString()}`;
+   114→}
+   115→
+   116→/** FAZA 19 — direct `<track src>` URL for a WebVTT subtitle track. The URL
+   117→ *  is relative (same origin) with the gateway port marker, exactly like every
+   118→ *  other request: the browser fetches it through Caddy, which forwards to the
+   119→ *  backend where the raw VTT is served public with a 1h cache. */
+   120→export function playerHubSubtitleUrl(contentId: number, trackId: number): string {
+   121→  return apiUrl(`/api/playerhub/subtitles/${contentId}/${trackId}`);
+   122→}
+   123→
+   124→async function request<T>(path: string, init?: RequestInit): Promise<T> {
+   125→  let res: Response;
+   126→  try {
+   127→    res = await fetch(path, {
+   128→      ...init,
+   129→      headers: { 'Content-Type': 'application/json', ...(init?.headers as Record<string, string> | undefined) },
+   130→    });
+   131→  } catch {
+   132→    throw new ApiError('Cannot reach the Animaxia backend — it may be restarting', 0);
+   133→  }
+   134→  let body: unknown = null;
+   135→  try {
+   136→    body = await res.json();
+   137→  } catch {
+   138→    body = null;
+   139→  }
+   140→  if (!res.ok) {
+   141→    const message =
+   142→      (body as { error?: string } | null)?.error || `Request failed with status ${res.status}`;
+   143→    throw new ApiError(message, res.status, body as Record<string, unknown> | null);
+   144→  }
+   145→  return body as T;
+   146→}
+   147→
+   148→/** Bearer header for FAZA 16 auth endpoints (same storage key as platform.ts
+   149→ *  tokenStore — read directly here to avoid a circular import). */
+   150→function authHeaders(): Record<string, string> {
+   151→  try {
+   152→    const token = window.localStorage.getItem('animaxia.accessToken');
+   153→    return token ? { Authorization: `Bearer ${token}` } : {};
+   154→  } catch {
+   155→    return {};
+   156→  }
+   157→}
+   158→
+   159→export const api = {
+   160→  /* ------------------------------- core ------------------------------- */
+   161→  health: () => request<HealthResponse>(apiUrl('/api/health')),
+   162→  all: (p: { page?: number; limit?: number; type?: string; search?: string; sort?: string } = {}) =>
+   163→    request<AllResponse>(apiUrl('/api/all', p)),
+   164→  content: (id: number | string) => request<DbContent>(apiUrl(`/api/content/${id}`)),
+   165→  contentByExternalId: (externalid: string) =>
+   166→    request<DbContent>(apiUrl(`/api/content/external/${encodeURIComponent(externalid)}`)),
+   167→  player: (id: number | string) => request<PlayerResponse>(apiUrl(`/api/content/${id}/player`)),
+   168→  /** FAZA 14 — GET /api/player/external — universal, DB-free source
+   169→   *  resolution (rule 4: playback never depends on the real library size).
+   170→   *  400 errors surface as ApiError with the backend message. */
+   171→  playerExternal: (url: string) =>
+   172→    request<PlayerExternalResponse>(apiUrl('/api/player/external', { url })),
+   173→
+   174→  /* ------------- FAZA 19: Player Hub (/api/playerhub) — task 19-1 ------------- */
+   175→  /** GET /api/playerhub/status — hub contract + live totals (public). */
+   176→  playerHubStatus: () => request<PlayerHubStatus>(apiUrl('/api/playerhub/status')),
+   177→  /** GET /api/playerhub/progress/:contentId — the caller's resume point
+   178→   *  (auth). 404 when the content id does not exist. */
+   179→  playerHubProgress: (contentId: number) =>
+   180→    request<PlayerHubProgress>(apiUrl(`/api/playerhub/progress/${contentId}`), {
+   181→      headers: authHeaders(),
+   182→    }),
+   183→  /** POST /api/playerhub/progress — fire-and-forget friendly: the player
+   184→   *  pings every ~10s of playback; callers may `.catch(() => {})` safely.
+   185→   *  `duration` is validated but intentionally not persisted server-side. */
+   186→  playerHubSaveProgress: (contentId: number, seconds: number, duration?: number) =>
+   187→    request<{ ok: boolean; saved: boolean; progress: number }>(apiUrl('/api/playerhub/progress'), {
+   188→      method: 'POST',
+   189→      headers: authHeaders(),
+   190→      body: JSON.stringify({ contentId, seconds, ...(duration != null ? { duration } : {}) }),
+   191→    }),
+   192→  /** GET /api/playerhub/subtitles/:contentId — public WebVTT track listing
+   193→   *  (no VTT payloads; the raw tracks live at playerHubSubtitleUrl). */
+   194→  playerHubSubtitles: (contentId: number) =>
+   195→    request<{ data: PlayerHubSubtitleTrack[] }>(apiUrl(`/api/playerhub/subtitles/${contentId}`)),
+   196→
+   197→  /* ----- FAZA 19 (task 19-3b): playlists (/api/playerhub/playlists) ----- */
+   198→  /** GET /api/playerhub/playlists — the caller's playlists, most recently
+   199→   *  updated first (auth). */
+   200→  playerHubPlaylists: () =>
+   201→    request<{ data: PlayerHubPlaylistSummary[] }>(apiUrl('/api/playerhub/playlists'), {
+   202→      headers: authHeaders(),
+   203→    }),
+   204→  /** POST /api/playerhub/playlists — create a playlist (auth, max 20/user). */
+   205→  playerHubCreatePlaylist: (title: string, description?: string) =>
+   206→    request<{ ok: true; playlist: PlayerHubPlaylistSummary }>(apiUrl('/api/playerhub/playlists'), {
+   207→      method: 'POST',
+   208→      headers: authHeaders(),
+   209→      body: JSON.stringify({ title, ...(description ? { description } : {}) }),
+   210→    }),
+   211→  /** GET /api/playerhub/playlists/:id — detail with ordered items (owner). */
+   212→  playerHubPlaylistDetail: (id: number) =>
+   213→    request<PlayerHubPlaylistDetailResponse>(apiUrl(`/api/playerhub/playlists/${id}`), {
+   214→      headers: authHeaders(),
+   215→    }),
+   216→  /** DELETE /api/playerhub/playlists/:id — remove a playlist (owner). */
+   217→  playerHubDeletePlaylist: (id: number) =>
+   218→    request<{ ok: true; deleted: boolean }>(apiUrl(`/api/playerhub/playlists/${id}`), {
+   219→      method: 'DELETE',
+   220→      headers: authHeaders(),
+   221→    }),
+   222→  /** POST /api/playerhub/playlists/:id/items — add a content (dedupe →
+   223→   *  { added: false, duplicate: true }). */
+   224→  playerHubAddPlaylistItem: (playlistId: number, contentId: number) =>
+   225→    request<{ ok: true; added: boolean; duplicate: boolean }>(
+   226→      apiUrl(`/api/playerhub/playlists/${playlistId}/items`),
+   227→      {
+   228→        method: 'POST',
+   229→        headers: authHeaders(),
+   230→        body: JSON.stringify({ contentId }),
+   231→      },
+   232→    ),
+   233→  /** DELETE /api/playerhub/playlists/:id/items/:contentId — remove + renumber. */
+   234→  playerHubRemovePlaylistItem: (playlistId: number, contentId: number) =>
+   235→    request<{ ok: true; removed: boolean }>(
+   236→      apiUrl(`/api/playerhub/playlists/${playlistId}/items/${contentId}`),
+   237→      {
+   238→        method: 'DELETE',
+   239→        headers: authHeaders(),
+   240→      },
+   241→    ),
+   242→  /** POST /api/playerhub/playlists/:id/reorder — exact-set reorder. */
+   243→  playerHubReorderPlaylist: (playlistId: number, contentIds: number[]) =>
+   244→    request<{ ok: true; reordered: boolean; count: number }>(
+   245→      apiUrl(`/api/playerhub/playlists/${playlistId}/reorder`),
+   246→      {
+   247→        method: 'POST',
+   248→        headers: authHeaders(),
+   249→        body: JSON.stringify({ contentIds }),
+   250→      },
+   251→    ),
+   252→  /* ---- FAZA 21 (task 21-2): Player Hub admin console extras ---- */
+   253→  /** GET /api/playerhub/stats — public hub totals (+ watch entries) and the
+   254→   *  top-5 continue-watching titles; the `admin` section only comes back
+   255→   *  for admin tokens (send the Bearer header whenever we have one). */
+   256→  playerHubStats: () =>
+   257→    request<PlayerHubStatsResponse>(apiUrl('/api/playerhub/stats'), {
+   258→      headers: authHeaders(),
+   259→    }),
+   260→  /** GET /api/playerhub/continue-watching — the caller's last watched
+   261→   *  titles with unified progress/resume info (auth). */
+   262→  playerHubContinueWatching: () =>
+   263→    request<{ data: PlayerHubContinueWatchingItem[] }>(
+   264→      apiUrl('/api/playerhub/continue-watching'),
+   265→      {
+   266→        headers: authHeaders(),
+   267→      },
+   268→    ),
+   269→  /** POST /api/playerhub/subtitles/:contentId — attach a WebVTT track
+   270→   *  (admin only; max 8 per content, VTT must start with "WEBVTT"). */
+   271→  playerHubAttachSubtitle: (
+   272→    contentId: number,
+   273→    body: { label: string; lang: string; vtt: string },
+   274→  ) =>
+   275→    request<{ ok: true; track: PlayerHubSubtitleTrack }>(
+   276→      apiUrl(`/api/playerhub/subtitles/${contentId}`),
+   277→      {
+   278→        method: 'POST',
+   279→        headers: authHeaders(),
+   280→        body: JSON.stringify(body),
+   281→      },
+   282→    ),
+   283→  /** DELETE /api/playerhub/subtitles/:contentId/:trackId — detach a track
+   284→   *  (admin only, audit-logged server-side). */
+   285→  playerHubDeleteSubtitle: (contentId: number, trackId: number) =>
+   286→    request<{ ok: true; deleted: boolean }>(
+   287→      apiUrl(`/api/playerhub/subtitles/${contentId}/${trackId}`),
+   288→      {
+   289→        method: 'DELETE',
+   290→        headers: authHeaders(),
+   291→      },
+   292→    ),
+   293→
+   294→  /* ------- FAZA 21 (task 21-1): public platform hubs (/api/hub) ------- */
+   295→  /** GET /api/hub/stats — platform totals, engagement tops, 7-day recency. */
+   296→  hubStats: () => request<HubStatsResponse>(apiUrl('/api/hub/stats')),
+   297→  /** GET /api/hub/scale — real Neon numbers vs. the logical 30B capacity. */
+   298→  hubScale: () => request<HubScaleResponse>(apiUrl('/api/hub/scale')),
+   299→  /** GET /api/hub/feed — the 3 live shelves (recent / popular / rated). */
+   300→  hubFeed: () => request<HubFeedResponse>(apiUrl('/api/hub/feed')),
+   301→  /** GET /api/hub/content — faceted browse (sort: recent|rating|title|popular). */
+   302→  hubContent: (
+   303→    p: { sort?: string; type?: string; genre?: string; year?: string; q?: string; limit?: number; page?: number } = {},
+   304→  ) => request<HubContentResponse>(apiUrl('/api/hub/content', p)),
+   305→
+   306→  upsertContent: (body: {
+   307→    externalid: string;
+   308→    type?: string;
+   309→    title: string;
+   310→    thumbnail?: string | null;
+   311→    metadata?: Record<string, unknown>;
+   312→  }) =>
+   313→    request<{ ok: true; record: DbContent; created: boolean }>(apiUrl('/api/content'), {
+   314→      method: 'POST',
+   315→      body: JSON.stringify(body),
+   316→    }),
+   317→  deleteContent: (id: number) =>
+   318→    request<{ ok: true; deleted: DbContent }>(apiUrl(`/api/content/${id}`), { method: 'DELETE' }),
+   319→  miner: (body: { url: string; type?: string; externalId?: string }) =>
+   320→    request<{ ok: true; extraction: MinerExtraction; record: DbContent }>(apiUrl('/api/miner'), {
+   321→      method: 'POST',
+   322→      body: JSON.stringify(body),
+   323→    }),
+   324→  seed: () =>
+   325→    request<SeedResponse>(apiUrl('/api/admin/seed'), { method: 'POST', body: '{}' }),
+   326→
+   327→  /* ------------------------------- anime ------------------------------- */
+   328→  animeTop: (page = 1) => request<{ data: AnimeItem[] }>(apiUrl('/api/anime/top', { page })),
+   329→  animeSearch: (q: string, limit = 20) =>
+   330→    request<{ data: AnimeItem[] }>(apiUrl('/api/anime/search', { q, limit })),
+   331→  animeSeason: () => request<{ data: AnimeItem[] }>(apiUrl('/api/anime/season')),
+   332→  animeRandom: () => request<{ data: AnimeItem }>(apiUrl('/api/anime/random')),
+   333→  animeById: (id: string | number) => request<{ data: AnimeItem }>(apiUrl(`/api/anime/${id}`)),
+   334→
+   335→  /* ------------------------------ movies / tv ------------------------------ */
+   336→  moviesTrending: (window: 'day' | 'week' = 'day', page = 1) =>
+   337→    request<{ data: MediaItem[] }>(apiUrl('/api/movies/trending', { window, page })),
+   338→  moviesPopular: (page = 1) => request<{ data: MediaItem[] }>(apiUrl('/api/movies/popular', { page })),
+   339→  moviesTop: (page = 1) => request<{ data: MediaItem[] }>(apiUrl('/api/movies/top', { page })),
+   340→  moviesUpcoming: (page = 1) => request<{ data: MediaItem[] }>(apiUrl('/api/movies/upcoming', { page })),
+   341→  moviesSearch: (q: string, page = 1) =>
+   342→    request<{ data: MediaItem[] }>(apiUrl('/api/movies/search', { q, page })),
+   343→  movieById: (id: string | number) => request<{ data: MediaItem }>(apiUrl(`/api/movies/${id}`)),
+   344→  tvTrending: (window: 'day' | 'week' = 'day', page = 1) =>
+   345→    request<{ data: MediaItem[] }>(apiUrl('/api/tv/trending', { window, page })),
+   346→  tvPopular: (page = 1) => request<{ data: MediaItem[] }>(apiUrl('/api/tv/popular', { page })),
+   347→  tvTop: (page = 1) => request<{ data: MediaItem[] }>(apiUrl('/api/tv/top', { page })),
+   348→  tvSearch: (q: string, page = 1) => request<{ data: MediaItem[] }>(apiUrl('/api/tv/search', { q, page })),
+   349→  tvById: (id: string | number) => request<{ data: MediaItem }>(apiUrl(`/api/tv/${id}`)),
+   350→  tvSchedule: () => request<{ data: TvScheduleItem[] }>(apiUrl('/api/tv/schedule')),
+   351→
+   352→  /* -------------------------------- news -------------------------------- */
+   353→  news: (source: string = 'all', limit = 20) =>
+   354→    request<{ data: NewsItem[] }>(apiUrl('/api/news', { source, limit })),
+   355→
+   356→  /* ------------------------------- sports ------------------------------- */
+   357→  footballCompetitions: () => request<{ data: Competition[] }>(apiUrl('/api/sports/football/competitions')),
+   358→  footballStandings: (competition = 'PL') =>
+   359→    request<{ data: { competition: string; table: FootballTableEntry[] } }>(
+   360→      apiUrl('/api/sports/football/standings', { competition }),
+   361→    ),
+   362→  footballMatches: (competition = 'PL', limit = 10) =>
+   363→    request<{ data: FootballMatch[] }>(apiUrl('/api/sports/football/matches', { competition, limit })),
+   364→  f1Standings: () => request<{ data: F1Standing[] }>(apiUrl('/api/sports/f1/standings')),
+   365→  f1Schedule: () => request<{ data: F1Race[] }>(apiUrl('/api/sports/f1/schedule')),
+   366→
+   367→  /* -------------------- FAZA 14: live menus, radio, hubs -------------------- */
+   368→  discover: (slug: string, page = 1) =>
+   369→    request<DiscoverResponse>(apiUrl(`/api/discover/${encodeURIComponent(slug)}`, { page })),
+   370→  radioLive: (p: { countrycode?: string; tag?: string; name?: string; limit?: number } = {}) =>
+   371→    request<RadioLiveResponse>(apiUrl('/api/radio/live', p)),
+   372→  radioCountries: () =>
+   373→    request<{ total: number; data: RadioCountry[] }>(apiUrl('/api/radio/countries')),
+   374→  franchises: () => request<FranchisesResponse>(apiUrl('/api/franchises')),
+   375→  trilogies: () => request<FranchisesResponse>(apiUrl('/api/trilogies')),
+   376→
+   377→  /* -------------------- FAZA 15: AI Home engine (/api/ai/home) -------------------- */
+   378→  aiHome: {
+   379→    feed: (page = 1, limit = 20) =>
+   380→      request<AiFeedResponse>(apiUrl('/api/ai/home/feed', { page, limit })),
+   381→    taxonomy: () => request<AiTaxonomyResponse>(apiUrl('/api/ai/home/taxonomy')),
+   382→    narration: () => request<AiNarrationResponse>(apiUrl('/api/ai/home/taxonomy/narration')),
+   383→    stats: (since?: string) =>
+   384→      request<AiExternalStatsResponse>(apiUrl('/api/ai/home/stats', { since })),
+   385→    metadata: () => request<AiMetadataResponse>(apiUrl('/api/ai/home/metadata')),
+   386→    metadataRefresh: () =>
+   387→      request<{ ok: boolean; running: boolean; enriched: number; refreshedAt: string }>(
+   388→        apiUrl('/api/ai/home/metadata/refresh'),
+   389→        { method: 'POST', body: '{}' },
+   390→      ),
+   391→    browse: (dim: MetaDimension, value: string, page = 1) =>
+   392→      request<AiBrowseResponse>(apiUrl('/api/ai/home/browse', { dim, value, page })),
+   393→    trailer: (key: string, title?: string) =>
+   394→      request<AiTrailerResponse>(apiUrl('/api/ai/home/trailers', { key, title })),
+   395→    trailerStatus: () =>
+   396→      request<{
+   397→        resolved: number;
+   398→        byProvider: Record<string, number>;
+   399→        store: string;
+   400→        updatedAt: string;
+   401→      }>(apiUrl('/api/ai/home/trailers/status')),
+   402→    trailerWarm: (keys: string[]) =>
+   403→      request<{ queued: number }>(apiUrl('/api/ai/home/trailers/warm'), {
+   404→        method: 'POST',
+   405→        body: JSON.stringify({ keys }),
+   406→      }),
+   407→    settings: () => request<AiHomeSettingsResponse>(apiUrl('/api/ai/home/settings')),
+   408→    updateSettings: (patch: Partial<AiHomeSettings>) =>
+   409→      request<AiHomeSettingsResponse>(apiUrl('/api/ai/home/settings'), {
+   410→        method: 'POST',
+   411→        body: JSON.stringify(patch),
+   412→      }),
+   413→  },
+   414→
+   415→  /* ------------- FAZA 16: Neon FTS search (animaxia-neon-fts) ------------- */
+   416→  searchAdvanced: (filters: SearchFilters) =>
+   417→    request<SearchAdvancedResponse>(
+   418→      apiUrl('/api/search/advanced', {
+   419→        q: filters.q,
+   420→        type: filters.type,
+   421→        genre: filters.genre,
+   422→        year: filters.year,
+   423→        minRating: filters.minRating,
+   424→        actor: filters.actor,
+   425→        studio: filters.studio,
+   426→        category: filters.category,
+   427→        sort: filters.sort,
+   428→        fuzzy: filters.fuzzy,
+   429→        limit: filters.limit,
+   430→        page: filters.page,
+   431→      }),
+   432→    ),
+   433→  searchAutocomplete: (q: string) =>
+   434→    request<SearchAutocompleteResponse>(apiUrl('/api/search/autocomplete', { q })),
+   435→  searchFilters: () => request<SearchFiltersOptions>(apiUrl('/api/search/filters')),
+   436→  searchStatus: () => request<SearchStatus>(apiUrl('/api/search/status')),
+   437→  /** FAZA 15 — GET /api/search/flow — the full search flow console
+   438→   *  (flowControl + windowing + config + history + perShard). Public, in-memory
+   439→   *  and fast; the admin tab polls it every 2 s. */
+   440→  searchFlow: () => request<SearchFlowConsole>(apiUrl('/api/search/flow')),
+   441→  /** FAZA 16 — GET /api/search/rate — the full Search Rate Management
+   442→   *  console (rateLimit + burstControl + config + counters + history +
+   443→   *  perShard). Public, in-memory and fast; the admin tab polls it every 2 s. */
+   444→  searchRate: () => request<SearchRateConsole>(apiUrl('/api/search/rate')),
+   445→  /** FAZA 17 — GET /api/search/opt — the full Search Optimization Layer
+   446→   *  console (batching + cache + dedup + pipeline + config + counters +
+   447→   *  active batch list + history + perShard). Public, in-memory and fast;
+   448→   *  the admin tab polls it every 2 s. */
+   449→  searchOpt: () => request<SearchOptConsole>(apiUrl('/api/search/opt')),
+   450→  /** FAZA 18 — GET /api/search/stress — the Full Integration + Stress Test
+   451→   *  console (pipelineIntegrated + the pinned sections + the last full run
+   452→   *  report with all assertions + the 10M projection + runs history).
+   453→   *  Public read-only; the admin tab polls it every 2 s. */
+   454→  searchStress: () => request<SearchStressConsole>(apiUrl('/api/search/stress')),
+   455→
+   456→  /* ------------------- FAZA 16: ingest dedup registry ------------------- */
+   457→  ingestCheck: (url: string) =>
+   458→    request<IngestCheckResponse>(apiUrl('/api/ingest/check'), {
+   459→      method: 'POST',
+   460→      body: JSON.stringify({ url }),
+   461→    }),
+   462→  ingestRegister: (body: { url: string; kind?: string; contentId?: number; externalId?: string; addedBy?: string }) =>
+   463→    request<IngestRegisterResponse>(apiUrl('/api/ingest/register'), {
+   464→      method: 'POST',
+   465→      body: JSON.stringify(body),
+   466→    }),
+   467→  ingestSources: (p: { limit?: number; page?: number; kind?: string } = {}) =>
+   468→    request<IngestSourcesResponse>(apiUrl('/api/ingest/sources', p)),
+   469→  ingestStats: () => request<IngestStats>(apiUrl('/api/ingest/stats')),
+   470→
+   471→  /* --------------------- FAZA 16: real scale report --------------------- */
+   472→  scaleReport: () => request<ScaleReport>(apiUrl('/api/scale/report')),
+   473→  scaleMetrics: () => request<ScaleMetrics>(apiUrl('/api/scale/metrics')),
+   474→
+   475→  /* ------------------------ FAZA 16: AI Hub (6 AI) ----------------------- */
+   476→  aiHubStatus: () => request<AiHubStatusResponse>(apiUrl('/api/ai/hub/status')),
+   477→  aiHubToggle: (key: AiHubKey, enabled: boolean) =>
+   478→    request<{ ok: boolean; key: AiHubKey; enabled: boolean }>(apiUrl('/api/ai/hub/settings'), {
+   479→      method: 'POST',
+   480→      body: JSON.stringify({ key, enabled }),
+   481→    }),
+   482→  curatorScan: () => request<CuratorScan>(apiUrl('/api/ai/hub/curator/scan')),
+   483→  curatorEnrich: (body: { contentId?: number; missing?: boolean; limit?: number } = { missing: true, limit: 5 }) =>
+   484→    request<CuratorEnrichResponse>(apiUrl('/api/ai/hub/curator/enrich'), {
+   485→      method: 'POST',
+   486→      headers: authHeaders(),
+   487→      body: JSON.stringify(body),
+   488→    }),
+   489→  curatorMerge: (keepId: number, mergeId: number) =>
+   490→    request<{ ok: boolean; keepId: number; merged: number }>(apiUrl('/api/ai/hub/curator/merge'), {
+   491→      method: 'POST',
+   492→      headers: authHeaders(),
+   493→      body: JSON.stringify({ keepId, mergeId }),
+   494→    }),
+   495→  trendsForecast: (window: '1d' | '7d' | '30d' = '7d') =>
+   496→    request<TrendForecast>(apiUrl('/api/ai/hub/trends/forecast', { window })),
+   497→  semanticQuery: (query: string, limit = 12) =>
+   498→    request<SemanticQueryResponse>(apiUrl('/api/ai/hub/semantic/query'), {
+   499→      method: 'POST',
+   500→      body: JSON.stringify({ query, limit }),
+   501→    }),
+   502→  semanticSimilar: (contentId: number | string) =>
+   503→    request<SemanticSimilarResponse>(apiUrl(`/api/ai/hub/semantic/similar/${encodeURIComponent(String(contentId))}`)),
+   504→  semanticStatus: () => request<SemanticStatus>(apiUrl('/api/ai/hub/semantic/status')),
+   505→  watchdogHealth: () => request<WatchdogHealth>(apiUrl('/api/ai/hub/watchdog/health')),
+   506→  marathonSuggestions: () => request<MarathonSuggestionsResponse>(apiUrl('/api/ai/hub/marathon/suggestions')),
+   507→  marathonCreate: (key: string) =>
+   508→    request<MarathonCreateResponse>(apiUrl('/api/ai/hub/marathon/create'), {
+   509→      method: 'POST',
+   510→      headers: authHeaders(),
+   511→      body: JSON.stringify({ key }),
+   512→    }),
+   513→  marathonList: () => request<MarathonListResponse>(apiUrl('/api/ai/hub/marathon/list')),
+   514→  translateContent: (contentId: number, lang: 'ro' | 'en' | 'es' | 'fr' | 'de') =>
+   515→    request<TranslateResponse>(apiUrl('/api/ai/hub/translate'), {
+   516→      method: 'POST',
+   517→      headers: authHeaders(),
+   518→      body: JSON.stringify({ contentId, lang }),
+   519→    }),
+   520→  translateStatus: () => request<TranslateStatusResponse>(apiUrl('/api/ai/hub/translate/status')),
+   521→
+   522→  /* ------- FAZA 17: stability lab — live resilience, real stress, 30B ------- */
+   523→  platform: {
+   524→    /** GET /api/platform/stability — uncached live snapshot (UI polls at 5s). */
+   525→    stability: () => request<StabilitySnapshot>(apiUrl('/api/platform/stability')),
+   526→    /** POST /api/platform/stress/run — real in-process load test.
+   527→     *  Server errors (409 lock / 429 rate limit / 400 bad suite) surface as
+   528→     *  ApiError with the backend message; the view maps them to RO toasts. */
+   529→    stressRun: (body: StressRunRequest) =>
+   530→      request<StressRunResponse>(apiUrl('/api/platform/stress/run'), {
+   531→        method: 'POST',
+   532→        body: JSON.stringify(body),
+   533→      }),
+   534→    /** GET /api/platform/scale/virtual — deterministic 30B virtual catalog. */
+   535→    virtualCatalog: (params: { cursor?: string; limit?: number; seed?: string } = {}) =>
+   536→      request<VirtualCatalogResponse>(apiUrl('/api/platform/scale/virtual', params)),
+   537→    /** FAZA 14 — GET /api/platform/feed/global — the 30B logical feed with
+   538→     *  the REAL Neon overlay. Cursor = base64url {i,s} keyset over the whole
+   539→     *  30B space (page N → i=(N-1)*limit, global index even under ?shard=n,
+   540→     *  which narrows the window to [n*1e9,(n+1)*1e9)); deep jumps are O(1). */
+   541→    globalFeed: (params: { cursor?: string; limit?: number; shard?: number; seed?: string } = {}) =>
+   542→      request<GlobalFeedResponse>(apiUrl('/api/platform/feed/global', params)),
+   543→  },
+   544→};
+   545→
+   546→/** FAZA 17 — build a virtual-catalog cursor client-side, byte-for-byte like
+   547→ *  the backend: base64url(JSON {i:<index>, s:<seed>}). Enables O(1) jumps to
+   548→ *  ANY page without server round-trips (verified live against :4000). */
+   549→export function buildVirtualCursor(index: number, seed: string): string {
+   550→  const json = JSON.stringify({ i: index, s: seed });
+   551→  const b64 =
+   552→    typeof btoa === 'function'
+   553→      ? btoa(json)
+   554→      : Buffer.from(json, 'utf8').toString('base64');
+   555→  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+   556→}
+   557→
+   558→/* ----------------------------- normalizers ----------------------------- */
+   559→
+   560→export function dbToItem(c: DbContent): NormalizedItem {
+   561→  const md = c.metadata || {};
+   562→  const sources = md.player?.sources || md.sources;
+   563→  return {
+   564→    key: `db-${c.id}`,
+   565→    kind: 'db',
+   566→    dbId: c.id,
+   567→    title: c.title,
+   568→    image: c.thumbnail || md.backdrop || null,
+   569→    backdrop: md.backdrop || null,
+   570→    overview: md.overview || md.synopsis || md.description || undefined,
+   571→    rating: typeof md.rating === 'number' ? md.rating : typeof md.score === 'number' ? md.score : null,
+   572→    year: (md.year as string | number | undefined) ?? null,
+   573→    type: c.type || 'mined',
+   574→    genres: Array.isArray(md.genres) ? md.genres.map(String) : undefined,
+   575→    playable: Boolean(sources && sources.length > 0),
+   576→    source: typeof md.source === 'string' ? md.source : undefined,
+   577→  };
+   578→}
+   579→
+   580→export function animeToItem(a: AnimeItem): NormalizedItem {
+   581→  return {
+   582→    key: `anime-${a.id}`,
+   583→    kind: 'external',
+   584→    extType: 'anime',
+   585→    extId: String(a.id),
+   586→    title: a.title,
+   587→    image: a.image || null,
+   588→    overview: a.synopsis || undefined,
+   589→    rating: a.score ?? null,
+   590→    year: a.year ?? null,
+   591→    type: 'anime',
+   592→    genres: a.genres,
+   593→    url: a.url,
+   594→    source: a.source || 'jikan',
+   595→  };
+   596→}
+   597→
+   598→export function mediaToItem(m: MediaItem): NormalizedItem {
+   599→  return {
+   600→    key: `${m.mediaType}-${m.id}`,
+   601→    kind: 'external',
+   602→    extType: m.mediaType,
+   603→    extId: String(m.id),
+   604→    title: m.title,
+   605→    image: m.image || m.backdrop || null,
+   606→    backdrop: m.backdrop || null,
+   607→    overview: m.overview || undefined,
+   608→    rating: m.rating ?? null,
+   609→    year: m.year ?? null,
+   610→    type: m.mediaType,
+   611→    genres: m.genres,
+   612→    source: m.source || 'tmdb',
+   613→  };
+   614→}
+   615→
+   616→export function newsToItem(n: NewsItem): NormalizedItem {
+   617→  return {
+   618→    key: `news-${n.link}`,
+   619→    kind: 'link',
+   620→    title: n.title,
+   621→    image: n.image || null,
+   622→    overview: n.description || undefined,
+   623→    type: 'news',
+   624→    url: n.link,
+   625→    source: n.source,
+   626→  };
+   627→}
+   628→
+   629→export function scheduleToItem(s: TvScheduleItem): NormalizedItem {
+   630→  return {
+   631→    key: `tvschedule-${s.id}`,
+   632→    kind: 'link',
+   633→    title: `${s.show} — ${s.title}`,
+   634→    image: s.image || null,
+   635→    overview: s.summary || undefined,
+   636→    type: 'tv',
+   637→    url: s.url,
+   638→    source: s.network || 'TVmaze',
+   639→  };
+   640→}
+   641→
+   642→/**
+   643→ * FAZA 15: AI infinite-feed item → NormalizedItem.
+   644→ * mediaType 'db' is a Neon library row; anything else is a live external
+   645→ * provider item (movie / tv / anime) with the id as a string extId.
+   646→ */
+   647→export function feedToItem(i: AiFeedItem): NormalizedItem {
+   648→  const isDb = i.mediaType === 'db';
+   649→  const extType = isDb ? undefined : (i.mediaType as 'movie' | 'tv' | 'anime');
+   650→  return {
+   651→    key: isDb ? `db-${i.id}` : `${i.mediaType}-${i.id}`,
+   652→    kind: isDb ? 'db' : 'external',
+   653→    dbId: isDb ? i.id : undefined,
+   654→    extType,
+   655→    extId: isDb ? undefined : String(i.id),
+   656→    title: i.title,
+   657→    image: i.image || i.backdrop || null,
+   658→    backdrop: i.backdrop || null,
+   659→    overview: i.overview || undefined,
+   660→    rating: i.rating ?? null,
+   661→    year: i.year ?? null,
+   662→    type: isDb ? 'mined' : i.mediaType,
+   663→    genres: Array.isArray(i.genres) && i.genres.length > 0 ? i.genres : undefined,
+   664→    source: i.source,
+   665→  };
+   666→}
+   667→

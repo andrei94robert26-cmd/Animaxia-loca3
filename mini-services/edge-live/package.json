@@ -1,0 +1,11 @@
+{
+  "name": "animaxia-edge-live",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia public launch edge (FAZA 28-E) — runnable twin of Caddyfile.faza28-live. TLS+h2 on :8443, plain mirror on :8181, 308 redirect on :8080. All upstreams normalized to container hostnames (backend:4000, gateway:4040, ...) resolved through the internal DNS alias map. Failover chains per route — zero 502 by construction. The protected monolith (FAZA 18/20/21, Neon FTS, 30B, pipeline, hub, player, AI) is only proxied, never modified.",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  }
+}

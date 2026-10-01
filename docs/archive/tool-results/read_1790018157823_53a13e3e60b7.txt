@@ -1,0 +1,624 @@
+     1→/**
+     2→ * Scraper Prometheus + probe health — rulează la 10s, TOLERANT la erori/404
+     3→ * (animaxia_scrape_errors_total{job}; serviciul nu crapă niciodată din cauza
+     4→ * unei surse). Surse:
+     5→ *   - :4000/api/metrics                  (FAZA 9, Prometheus text — re-expus)
+     6→ *   - :4000/api/observability/metrics    (23-b, 404 tolerat până apare)
+     7→ *   - :4040/metrics                      (gateway, 23-b, tolerat)
+     8→ *   - probe health: backend, gateway health/status, watchdog, frontend,
+     9→ *     search status (pipeline FAZA 18), hub stats (FAZA 20)
+    10→ *   - redis :4030 prin client RESP propriu (PING + DBSIZE)
+    11→ * Familii proprii generate: vezi exposeOwnMetrics() — toate onest, fără date
+    12→ * inventate (familia lipsește sau e 0 dacă sursa nu răspunde încă).
+    13→ */
+    14→import { SCRAPE_INTERVAL_MS, SOURCES } from '../config.ts';
+    15→import { MetricsStore } from './metrics-store.ts';
+    16→import { probeRedis } from './resp-client.ts';
+    17→import { histogramQuantile } from './prometheus.ts';
+    18→
+    19→export interface PipelineStageStat {
+    20→  order: number;
+    21→  name: string;
+    22→  stats: Record<string, unknown>;
+    23→}
+    24→
+    25→export interface ScrapeState {
+    26→  startedAt: number;
+    27→  lastTick: number | null;
+    28→  ticks: number;
+    29→  backend: {
+    30→    up: boolean;
+    31→    neonConnected: boolean;
+    32→    totalItems: number;
+    33→    uptimeSec: number;
+    34→    latencyMs: number | null;
+    35→  };
+    36→  gateway: {
+    37→    up: boolean;
+    38→    redisMode: string | null;
+    39→    regions: { name: string; healthy: boolean; latencyMs: number | null }[];
+    40→    failovers: number | null;
+    41→    cacheHits: number | null;
+    42→    cacheMisses: number | null;
+    43→    requests: number | null;
+    44→    requestsPerRegion: Record<string, number>;
+    45→  };
+    46→  redis: { up: boolean; keys: number | null; latencyMs: number | null };
+    47→  watchdog: { up: boolean };
+    48→  frontend: { up: boolean };
+    49→  realtime: { up: boolean };
+    50→  search: {
+    51→    pipelineIntegrated: boolean | null;
+    52→    pipelineStages: PipelineStageStat[];
+    53→    ftsP95Ms: number | null;
+    54→    ftsP50Ms: number | null;
+    55→    clusterEnabled: boolean | null;
+    56→    clusterHealthy: boolean | null;
+    57→    clusterNodesHealthy: number | null;
+    58→    docs: number | null;
+    59→    latencyP95Ms: number | null;
+    60→  };
+    61→  hub: { up: boolean; totalItems: number | null; raw: Record<string, unknown> | null };
+    62→  hubFeed: {
+    63→    up: boolean;
+    64→    personal: number | null;
+    65→    global: number | null;
+    66→    ai: number | null;
+    67→    combined: number | null;
+    68→  };
+    69→  /** istoric (rate windows) pentru cache hits/misses pipeline + rate-limit */
+    70→  pipelineCacheHistory: { tsMs: number; hits: number; misses: number }[];
+    71→  rateLimitHistory: { tsMs: number; limited: number }[];
+    72→  cooldownHistory: { tsMs: number; served: number; deprioritized: number }[];
+    73→}
+    74→
+    75→async function fetchWithTimeout(
+    76→  url: string,
+    77→  timeoutMs = 6000,
+    78→): Promise<{ ok: boolean; status: number; text: string; error: string | null; latencyMs: number }> {
+    79→  const started = Date.now();
+    80→  try {
+    81→    const controller = new AbortController();
+    82→    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    83→    const res = await fetch(url, { signal: controller.signal, headers: { accept: '*/*' } });
+    84→    const text = await res.text();
+    85→    clearTimeout(timer);
+    86→    return { ok: res.ok, status: res.status, text, error: null, latencyMs: Date.now() - started };
+    87→  } catch (err) {
+    88→    return {
+    89→      ok: false,
+    90→      status: 0,
+    91→      text: '',
+    92→      error: err instanceof Error ? err.message : String(err),
+    93→      latencyMs: Date.now() - started,
+    94→    };
+    95→  }
+    96→}
+    97→
+    98→function tryJson(text: string): Record<string, unknown> | null {
+    99→  try {
+   100→    const v = JSON.parse(text);
+   101→    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null;
+   102→  } catch {
+   103→    return null;
+   104→  }
+   105→}
+   106→
+   107→export class Scraper {
+   108→  constructor(private store: MetricsStore) {}
+   109→
+   110→  state: ScrapeState = {
+   111→    startedAt: Date.now(),
+   112→    lastTick: null,
+   113→    ticks: 0,
+   114→    backend: { up: false, neonConnected: false, totalItems: 0, uptimeSec: 0, latencyMs: null },
+   115→    gateway: {
+   116→      up: false,
+   117→      redisMode: null,
+   118→      regions: [],
+   119→      failovers: null,
+   120→      cacheHits: null,
+   121→      cacheMisses: null,
+   122→      requests: null,
+   123→      requestsPerRegion: {},
+   124→    },
+   125→    redis: { up: false, keys: null, latencyMs: null },
+   126→    watchdog: { up: false },
+   127→    frontend: { up: false },
+   128→    realtime: { up: false },
+   129→    search: {
+   130→      pipelineIntegrated: null,
+   131→      pipelineStages: [],
+   132→      ftsP95Ms: null,
+   133→      ftsP50Ms: null,
+   134→      clusterEnabled: null,
+   135→      clusterHealthy: null,
+   136→      clusterNodesHealthy: null,
+   137→      docs: null,
+   138→      latencyP95Ms: null,
+   139→    },
+   140→    hub: { up: false, totalItems: null, raw: null },
+   141→    hubFeed: { up: false, personal: null, global: null, ai: null, combined: null },
+   142→    pipelineCacheHistory: [],
+   143→    rateLimitHistory: [],
+   144→    cooldownHistory: [],
+   145→  };
+   146→
+   147→  collectorTracesActive: number | null = null;
+   148→
+   149→  private timer: ReturnType<typeof setInterval> | null = null;
+   150→
+   151→  start(): void {
+   152→    // primul tick imediat (după 1s, să lase serviciul să ridice serverul HTTP)
+   153→    setTimeout(() => void this.tick(), 1000);
+   154→    this.timer = setInterval(() => void this.tick(), SCRAPE_INTERVAL_MS);
+   155→  }
+   156→
+   157→  stop(): void {
+   158→    if (this.timer) clearInterval(this.timer);
+   159→  }
+   160→
+   161→  private async scrapeJob(url: string, job: string): Promise<string | null> {
+   162→    const res = await fetchWithTimeout(url);
+   163→    if (res.ok && res.text) {
+   164→      const parsed = this.store.replaceScraped(job, res.text);
+   165→      if (parsed.series === 0) {
+   166→        this.store.scrapeError(job);
+   167→        return null;
+   168→      }
+   169→      return res.text;
+   170→    }
+   171→    this.store.scrapeError(job);
+   172→    return null;
+   173→  }
+   174→
+   175→  private async probe(
+   176→    url: string,
+   177→    label: string,
+   178→  ): Promise<{ up: boolean; json: Record<string, unknown> | null; status: number; latencyMs: number }> {
+   179→    const res = await fetchWithTimeout(url);
+   180→    const up = res.status > 0 && res.status < 500; // orice răspuns HTTP = serviciul e viu
+   181→    if (!up) this.store.scrapeError(label);
+   182→    return { up, json: tryJson(res.text), status: res.status, latencyMs: res.latencyMs };
+   183→  }
+   184→
+   185→  async tick(): Promise<void> {
+   186→    this.state.ticks++;
+   187→    this.state.lastTick = Date.now();
+   188→    const now = Date.now();
+   189→
+   190→    // ── 1. scrape Prometheus text (FAZA 9 + sursele 23-b tolerate la 404) ─
+   191→    await this.scrapeJob(SOURCES.backendMetrics, 'animaxia-backend');
+   192→    await this.scrapeJob(SOURCES.backendObservability, 'animaxia-backend-faza23');
+   193→    await this.scrapeJob(SOURCES.gatewayMetrics, 'animaxia-global-gateway');
+   194→
+   195→    // ── 2. probe backend health ───────────────────────────────────────────
+   196→    const backend = await this.probe(SOURCES.backendHealth, 'animaxia-backend-health');
+   197→    const bj = backend.json;
+   198→    const db = (bj?.db ?? {}) as { connected?: boolean; totalItems?: number };
+   199→    const totalItems =
+   200→      typeof db.totalItems === 'number'
+   201→        ? db.totalItems
+   202→        : typeof bj?.totalItems === 'number'
+   203→          ? (bj.totalItems as number)
+   204→          : 0;
+   205→    this.state.backend = {
+   206→      up: backend.up && backend.status === 200,
+   207→      neonConnected: db.connected === true,
+   208→      totalItems,
+   209→      uptimeSec: typeof bj?.uptimeSec === 'number' ? (bj.uptimeSec as number) : 0,
+   210→      latencyMs: backend.latencyMs,
+   211→    };
+   212→
+   213→    // ── 3. gateway health + status ────────────────────────────────────────
+   214→    const gwHealth = await this.probe(SOURCES.gatewayHealth, 'global-gateway-health');
+   215→    const gwStatus = await this.probe(SOURCES.gatewayStatus, 'global-gateway-status');
+   216→    const gwj = gwStatus.json;
+   217→    const counters = (gwj?.counters ?? null) as Record<string, unknown> | null;
+   218→    const perRegion = (counters?.perRegion ?? null) as Record<string, number> | null;
+   219→    const regionsRaw = Array.isArray(gwj?.regions) ? (gwj!.regions as unknown[]) : [];
+   220→    const regions = regionsRaw.map((r) => {
+   221→      const ro = (r ?? {}) as {
+   222→        name?: string;
+   223→        upstreams?: { healthy?: boolean; latencyMs?: number | null }[];
+   224→      };
+   225→      const healthyUps = (ro.upstreams ?? []).filter((u) => u.healthy);
+   226→      const firstHealthy = healthyUps[0];
+   227→      return {
+   228→        name: ro.name ?? 'unknown',
+   229→        healthy: healthyUps.length > 0,
+   230→        latencyMs: firstHealthy?.latencyMs ?? null,
+   231→      };
+   232→    });
+   233→    this.state.gateway = {
+   234→      up: gwHealth.up && gwHealth.json?.ok === true,
+   235→      redisMode: typeof gwj?.redisMode === 'string' ? (gwj.redisMode as string) : null,
+   236→      regions,
+   237→      failovers: counters && typeof counters.failovers === 'number' ? counters.failovers : null,
+   238→      cacheHits: counters && typeof counters.cacheHits === 'number' ? counters.cacheHits : null,
+   239→      cacheMisses: counters && typeof counters.cacheMisses === 'number' ? counters.cacheMisses : null,
+   240→      requests: counters && typeof counters.requests === 'number' ? counters.requests : null,
+   241→      requestsPerRegion: perRegion ? { ...perRegion } : {},
+   242→    };
+   243→
+   244→    // ── 4. redis global (RESP propriu) ────────────────────────────────────
+   245→    const redis = await probeRedis();
+   246→    this.state.redis = { up: redis.ok, keys: redis.keys, latencyMs: redis.latencyMs };
+   247→    if (!redis.ok) this.store.scrapeError('redis-global');
+   248→
+   249→    // ── 5. watchdog / frontend / realtime ─────────────────────────────────
+   250→    const watchdog = await this.probe(SOURCES.watchdogHealth, 'animaxia-watchdog');
+   251→    this.state.watchdog = { up: watchdog.up && watchdog.json?.ok === true };
+   252→    const frontend = await this.probe(SOURCES.frontend, 'animaxia-frontend');
+   253→    this.state.frontend = { up: frontend.status === 200 };
+   254→    // realtime: root răspunde 400 — orice răspuns HTTP = UP (ECONNREFUSED = DOWN)
+   255→    const realtime = await this.probe(SOURCES.realtime, 'animaxia-realtime');
+   256→    this.state.realtime = { up: realtime.status > 0 };
+   257→
+   258→    // ── 6. search status (pipeline FAZA 18) ───────────────────────────────
+   259→    const search = await this.probe(SOURCES.searchStatus, 'animaxia-search-status');
+   260→    const sj = search.json;
+   261→    const stages = Array.isArray(sj?.pipelineStages) ? (sj!.pipelineStages as PipelineStageStat[]) : [];
+   262→    const latency = (sj?.latency ?? null) as { p95Ms?: number } | null;
+   263→    const cluster = (sj?.cluster ?? null) as
+   264→      | { enabled?: boolean; healthy?: boolean; nodes?: { healthy?: boolean }[] }
+   265→      | null;
+   266→    this.state.search = {
+   267→      pipelineIntegrated: sj ? sj.pipelineIntegrated === true : null,
+   268→      pipelineStages: stages,
+   269→      ftsP95Ms: this.stageNumber(stages, 'neon-fts', 'p95Ms'),
+   270→      ftsP50Ms: this.stageNumber(stages, 'neon-fts', 'p50Ms'),
+   271→      clusterEnabled: cluster ? cluster.enabled === true : null,
+   272→      clusterHealthy: cluster ? cluster.healthy === true : null,
+   273→      clusterNodesHealthy: cluster?.nodes
+   274→        ? cluster.nodes.filter((n) => n.healthy === true).length
+   275→        : null,
+   276→      docs: typeof sj?.docs === 'number' ? (sj.docs as number) : null,
+   277→      latencyP95Ms: latency && typeof latency.p95Ms === 'number' ? latency.p95Ms : null,
+   278→    };
+   279→
+   280→    // istoric cache/rate-limit/cooldown din pipeline (pentru ferestre 10m)
+   281→    const cacheHits = this.stageNumber(stages, 'cache', 'hits') ?? 0;
+   282→    const cacheMisses = this.stageNumber(stages, 'cache', 'misses') ?? 0;
+   283→    const limited = this.stageNumber(stages, 'rate-limit', 'limited') ?? 0;
+   284→    const cooldownServed = this.stageNumber(stages, 'cooldown', 'servedFromCooldown') ?? 0;
+   285→    const cooldownDepri = this.stageNumber(stages, 'cooldown', 'deprioritized') ?? 0;
+   286→    this.state.pipelineCacheHistory.push({ tsMs: now, hits: cacheHits, misses: cacheMisses });
+   287→    this.state.rateLimitHistory.push({ tsMs: now, limited });
+   288→    this.state.cooldownHistory.push({ tsMs: now, served: cooldownServed, deprioritized: cooldownDepri });
+   289→    const historyCutoff = now - 11 * 60 * 1000; // puțin peste fereastra de 10m
+   290→    this.state.pipelineCacheHistory = this.state.pipelineCacheHistory.filter((p) => p.tsMs >= historyCutoff);
+   291→    this.state.rateLimitHistory = this.state.rateLimitHistory.filter((p) => p.tsMs >= historyCutoff);
+   292→    this.state.cooldownHistory = this.state.cooldownHistory.filter((p) => p.tsMs >= historyCutoff);
+   293→
+   294→    // ── 7. hub stats (FAZA 20) ────────────────────────────────────────────
+   295→    const hub = await this.probe(SOURCES.hubStats, 'animaxia-hub-stats');
+   296→    this.state.hub = {
+   297→      up: hub.up && hub.json?.ok === true,
+   298→      totalItems: typeof hub.json?.totalItems === 'number' ? (hub.json.totalItems as number) : null,
+   299→      raw: hub.json,
+   300→    };
+   301→
+   302→    // ── 7b. hub feed 3-surse (personal + global + ai) ─────────────────────
+   303→    const feedUrl = SOURCES.hubStats.replace('/api/hub/stats', '/api/hub/feed');
+   304→    const feed = await this.probe(`${feedUrl}?limit=1`, 'animaxia-hub-feed');
+   305→    const fj = feed.json;
+   306→    const countItems = (v: unknown): number | null => {
+   307→      if (v && typeof v === 'object' && Array.isArray((v as { items?: unknown }).items)) {
+   308→        return (v as { items: unknown[] }).items.length;
+   309→      }
+   310→      return null;
+   311→    };
+   312→    this.state.hubFeed = {
+   313→      up: feed.up && fj?.ok === true,
+   314→      personal: countItems(fj?.personal),
+   315→      global: countItems(fj?.global),
+   316→      ai: countItems(fj?.ai),
+   317→      combined: typeof fj?.combinedCount === 'number' ? (fj.combinedCount as number) : null,
+   318→    };
+   319→
+   320→    // ── 8. expune familiile proprii ───────────────────────────────────────
+   321→    this.exposeOwnMetrics();
+   322→  }
+   323→
+   324→  private stageNumber(stages: PipelineStageStat[], name: string, key: string): number | null {
+   325→    const st = stages.find((s) => s.name === name);
+   326→    if (!st) return null;
+   327→    const v = st.stats?.[key];
+   328→    return typeof v === 'number' ? v : null;
+   329→  }
+   330→
+   331→  /** scrie toate familiile proprii în store (chemat la fiecare tick). */
+   332→  exposeOwnMetrics(): void {
+   333→    const s = this.state;
+   334→    const svc = (name: string, up: boolean) =>
+   335→      this.store.set(
+   336→        'animaxia_up',
+   337→        { service: name },
+   338→        up ? 1 : 0,
+   339→        'gauge',
+   340→        '1 dacă serviciul platformei răspunde (probe health FAZA 23)',
+   341→      );
+   342→
+   343→    svc('animaxia-backend', s.backend.up);
+   344→    svc('animaxia-frontend', s.frontend.up);
+   345→    svc('animaxia-realtime', s.realtime.up);
+   346→    svc('animaxia-watchdog', s.watchdog.up);
+   347→    svc('redis-global', s.redis.up);
+   348→    svc('global-gateway', s.gateway.up);
+   349→    svc('animaxia-observability', true); // self — suntem vii dacă scriem asta
+   350→
+   351→    const upSec = (name: string, v: number | null) => {
+   352→      if (v === null) return;
+   353→      this.store.set(
+   354→        'animaxia_uptime_seconds',
+   355→        { service: name },
+   356→        Math.round(v),
+   357→        'gauge',
+   358→        'Uptime proces (secunde) raportat de serviciu',
+   359→      );
+   360→    };
+   361→    upSec('animaxia-backend', s.backend.uptimeSec || null);
+   362→
+   363→    // scrape errors (per job, cumulative de la pornirea observability)
+   364→    const jobs = [
+   365→      'animaxia-backend',
+   366→      'animaxia-backend-faza23',
+   367→      'animaxia-global-gateway',
+   368→      'animaxia-backend-health',
+   369→      'global-gateway-health',
+   370→      'global-gateway-status',
+   371→      'redis-global',
+   372→      'animaxia-watchdog',
+   373→      'animaxia-frontend',
+   374→      'animaxia-realtime',
+   375→      'animaxia-search-status',
+   376→      'animaxia-hub-stats',
+   377→      'animaxia-hub-feed',
+   378→    ];
+   379→    for (const job of jobs) {
+   380→      const errors = this.store.scrapeErrorCount(job);
+   381→      this.store.setCounter(
+   382→        'animaxia_scrape_errors_total',
+   383→        { job },
+   384→        errors,
+   385→        'Erori/404 cumulate la scrape-ul sursei {job} (sursă tolerantă — serviciul nu crapă)',
+   386→      );
+   387→    }
+   388→
+   389→    // OTel ingest counters
+   390→    for (const svcName of this.store.ingestServices()) {
+   391→      this.store.setCounter(
+   392→        'animaxia_otel_spans_received_total',
+   393→        { service: svcName },
+   394→        this.store.ingestCounterValue('spans', svcName),
+   395→        'Spans OTLP acceptați de /v1/traces per serviciu',
+   396→      );
+   397→      this.store.setCounter(
+   398→        'animaxia_otel_metrics_received_total',
+   399→        { service: svcName },
+   400→        this.store.ingestCounterValue('metrics', svcName),
+   401→        'Metrici OTLP acceptate de /v1/metrics per serviciu',
+   402→      );
+   403→    }
+   404→
+   405→    this.store.set(
+   406→      'animaxia_otel_traces_active',
+   407→      {},
+   408→      this.collectorTracesActive ?? 0,
+   409→      'gauge',
+   410→      'Traces active în ring buffer-ul collectorului (LRU 5000)',
+   411→    );
+   412→
+   413→    // Neon
+   414→    this.store.set(
+   415→      'animaxia_neon_connected',
+   416→      {},
+   417→      s.backend.neonConnected ? 1 : 0,
+   418→      'gauge',
+   419→      'Neon conectat (db.connected din /api/health)',
+   420→    );
+   421→    if (s.backend.latencyMs !== null)
+   422→      this.store.set('animaxia_neon_latency_ms', {}, s.backend.latencyMs, 'gauge', 'Latency probe /api/health (ms)');
+   423→    if (s.backend.totalItems > 0)
+   424→      this.store.set('animaxia_neon_docs', {}, s.backend.totalItems, 'gauge', 'Documente (itemi) în Neon');
+   425→
+   426→    // Redis
+   427→    this.store.set('animaxia_redis_connected', {}, s.redis.up ? 1 : 0, 'gauge', 'Redis global :4030 PING ok');
+   428→    if (s.redis.keys !== null)
+   429→      this.store.set('animaxia_redis_keys', {}, s.redis.keys, 'gauge', 'Chei în Redis global (DBSIZE)');
+   430→
+   431→    // Gateway
+   432→    this.store.set('animaxia_gateway_up', {}, s.gateway.up ? 1 : 0, 'gauge', 'Global gateway :4040 /api/infra/health ok');
+   433→    for (const r of s.gateway.regions) {
+   434→      this.store.set(
+   435→        'animaxia_gateway_region_healthy',
+   436→        { region: r.name },
+   437→        r.healthy ? 1 : 0,
+   438→        'gauge',
+   439→        'Regiune gateway cu cel puțin un upstream sănătos',
+   440→      );
+   441→      if (r.latencyMs !== null)
+   442→        this.store.set(
+   443→          'animaxia_gateway_region_latency_ms',
+   444→          { region: r.name },
+   445→          r.latencyMs,
+   446→          'gauge',
+   447→          'Latency upstream sănătos al regiunii (ms)',
+   448→        );
+   449→      const reqs = s.gateway.requestsPerRegion[r.name];
+   450→      if (typeof reqs === 'number')
+   451→        this.store.setCounter(
+   452→          'animaxia_gateway_requests_total',
+   453→          { region: r.name },
+   454→          reqs,
+   455→          'Cereri servite de gateway per regiune (counters.perRegion)',
+   456→        );
+   457→    }
+   458→    if (s.gateway.failovers !== null)
+   459→      this.store.setCounter('animaxia_gateway_failovers_total', {}, s.gateway.failovers, 'Failover-uri gateway (counters.failovers)');
+   460→    if (s.gateway.cacheHits !== null)
+   461→      this.store.setCounter('animaxia_gateway_cache_hits_total', {}, s.gateway.cacheHits, 'Cache hits gateway (counters.cacheHits)');
+   462→
+   463→    // Pipeline FAZA 18 (re-expus din /api/search/status)
+   464→    const stage = (name: string, key: string): number | null => this.stageNumber(s.search.pipelineStages, name, key);
+   465→    const setP = (metric: string, labels: Record<string, string>, v: number | null, help: string) => {
+   466→      if (v === null) return;
+   467→      this.store.set(metric, labels, v, 'gauge', help);
+   468→    };
+   469→    setP('animaxia_pipeline_antisam_hits_total', {}, stage('anti-spam', 'rejected'), 'Pipeline FAZA 18 strat 1 anti-spam: interogări respinse (cumulat)');
+   470→    setP('animaxia_pipeline_ratelimit_hits_total', {}, stage('rate-limit', 'limited'), 'Pipeline strat 2 rate-limit: cereri limitate (cumulat)');
+   471→    setP('animaxia_pipeline_cooldown_served_total', {}, stage('cooldown', 'servedFromCooldown'), 'Pipeline strat 3 cooldown: servite din cooldown (cumulat)');
+   472→    setP('animaxia_pipeline_cooldown_deprioritized_total', {}, stage('cooldown', 'deprioritized'), 'Pipeline strat 3 cooldown: deprioritized (cumulat)');
+   473→    setP('animaxia_pipeline_queue_length', {}, stage('queue', 'queueDepth'), 'Pipeline strat 4 queue: adâncime curentă');
+   474→    setP('animaxia_pipeline_queue_inflight', {}, stage('queue', 'inflight'), 'Pipeline strat 4 queue: în execuție');
+   475→    setP('animaxia_pipeline_windowing_rate_per_sec', {}, stage('windowing', 'executionsPerSec'), 'Pipeline strat 6 windowing: execuții/s');
+   476→    setP('animaxia_pipeline_dedup_coalesced_total', {}, stage('dedup', 'coalesced'), 'Pipeline strat 7 dedup: cereri coalesced (cumulat)');
+   477→    setP('animaxia_pipeline_batching_batches_total', {}, stage('batching', 'batches'), 'Pipeline strat 8 batching: batch-uri (cumulat)');
+   478→    setP('animaxia_pipeline_cache_hits_total', {}, stage('cache', 'hits'), 'Pipeline strat 9 cache: hits (cumulat)');
+   479→    setP('animaxia_pipeline_cache_misses_total', {}, stage('cache', 'misses'), 'Pipeline strat 9 cache: misses (cumulat)');
+   480→    const hitRate = stage('cache', 'hitRate');
+   481→    if (hitRate !== null)
+   482→      this.store.set('animaxia_pipeline_cache_hit_rate', {}, hitRate, 'gauge', 'Pipeline strat 9 cache: hit rate fracționar');
+   483→    setP('animaxia_pipeline_requests_total', {}, stage('neon-fts', 'executions'), 'Pipeline strat 10 neon-fts: execuții FTS (cumulat)');
+   484→    setP('animaxia_pipeline_rejections_total', {}, stage('neon-fts', 'errors'), 'Pipeline strat 10 neon-fts: erori (cumulat)');
+   485→    setP('animaxia_fts_latency_p95_ms', {}, s.search.ftsP95Ms ?? s.search.latencyP95Ms, 'FTS p95 (ms) — pipeline neon-fts sau /api/search/status latency.p95Ms');
+   486→    setP('animaxia_fts_latency_p50_ms', {}, s.search.ftsP50Ms, 'FTS p50 (ms) — pipeline neon-fts');
+   487→    if (s.search.docs !== null)
+   488→      this.store.set('animaxia_fts_docs', {}, s.search.docs, 'gauge', 'Documente indexate FTS');
+   489→
+   490→    // Hub FAZA 20 (re-expus din /api/hub/stats)
+   491→    if (s.hub.totalItems !== null)
+   492→      this.store.set('animaxia_hub_total_items', {}, s.hub.totalItems, 'gauge', 'Itemi total în hub (/api/hub/stats)');
+   493→    // rute hub din FAZA 9 (animaxia_http_requests_total{route="/api/hub/..."})
+   494→    this.exposeHubRoutes();
+   495→
+   496→    // feed activity / search activity — din FAZA 9 http_requests_total
+   497→    const feedReqs = this.store.scrapedSum('animaxia_http_requests_total', { route: '/api/hub/feed' });
+   498→    this.store.setCounter(
+   499→      'animaxia_feed_activity_total',
+   500→      { source: 'hub:feed' },
+   501→      feedReqs,
+   502→      'Activitate feed (cereri /api/hub/feed, din FAZA 9 re-expus)',
+   503→    );
+   504→    const searchReqs =
+   505→      this.store.scrapedSum('animaxia_http_requests_total', { route: '/api/search/advanced' }) +
+   506→      this.store.scrapedSum('animaxia_http_requests_total', { route: '/api/search/autocomplete' });
+   507→    this.store.setCounter(
+   508→      'animaxia_search_activity_total',
+   509→      { route: 'search' },
+   510→      searchReqs,
+   511→      'Activitate căutare (cereri /api/search/*, din FAZA 9 re-expus)',
+   512→    );
+   513→
+   514→    // proces backend (FAZA 9 re-expus, pentru dashboard global)
+   515→    const rss = this.store.scrapedValue('animaxia_process_memory_rss_bytes', {});
+   516→    if (rss !== null)
+   517→      this.store.set(
+   518→        'animaxia_backend_memory_rss_bytes',
+   519→        {},
+   520→        rss,
+   521→        'gauge',
+   522→        'RSS proces backend (re-expus FAZA 9 animaxia_process_memory_rss_bytes)',
+   523→      );
+   524→
+   525→    // familii așteptate de la 23-b / OTLP — emise onest ca 0 doar dacă NU au
+   526→    // venit deja date reale prin /v1/metrics (nu suprascriem ingest-ul real)
+   527→    const expectedOtlp: { name: string; help: string }[] = [
+   528→      { name: 'animaxia_player_resume_events_total', help: 'Resume events player FAZA 17/21 (sursă: OTLP /v1/metrics — 0 până sosește prima valoare reală)' },
+   529→      { name: 'animaxia_player_subtitle_requests_total', help: 'Cereri subtitrări WebVTT (sursă: OTLP — 0 până sosește)' },
+   530→      { name: 'animaxia_player_playback_errors_total', help: 'Erori de redare player (sursă: OTLP — 0 până sosește)' },
+   531→      { name: 'animaxia_player_fallback_chain_total', help: 'Utilizări lanț de fallback player FAZA 17 (sursă: OTLP — 0 până sosește)' },
+   532→      { name: 'animaxia_ai_usage_calls_total', help: 'Apeluri AI per rută (sursă: OTLP/23-b — 0 până sosește)' },
+   533→      { name: 'animaxia_ai_usage_errors_total', help: 'Erori AI per rută (sursă: OTLP/23-b — 0 până sosește)' },
+   534→      { name: 'animaxia_auth_events_total', help: 'Evenimente auth (sursă: OTLP/23-b — 0 până sosește)' },
+   535→      { name: 'animaxia_ratelimit_hits_total', help: 'Rate-limit hits la perimetru (sursă: OTLP/23-b — 0 până sosește)' },
+   536→      { name: 'animaxia_antispam_hits_total', help: 'Anti-spam hits la perimetru (sursă: OTLP/23-b — 0 până sosește)' },
+   537→      { name: 'animaxia_cooldown_active', help: 'Chei cooldown active (sursă: OTLP/23-b — 0 până sosește)' },
+   538→    ];
+   539→    for (const fam of expectedOtlp) {
+   540→      const hasReal = this.store
+   541→        .ownSeries(fam.name)
+   542→        .some((srs) => Object.keys(srs.labels).length > 0 && !('source' in srs.labels));
+   543→      if (!hasReal) {
+   544→        this.store.set(fam.name, { source: 'pending' }, 0, 'counter', fam.help);
+   545→      }
+   546→    }
+   547→  }
+   548→
+   549→  /** animaxia_hub_requests_total / animaxia_hub_duration_ms din FAZA 9
+   550→   *  (animaxia_http_requests_total{route="/api/hub/*"} + histogram _sum/_count). */
+   551→  private exposeHubRoutes(): void {
+   552→    const routes = new Set<string>();
+   553→    for (const s of this.store.scrapedSeries('animaxia_http_requests_total')) {
+   554→      const route = s.labels.route;
+   555→      if (route && route.startsWith('/api/hub/')) routes.add(route);
+   556→    }
+   557→    for (const route of routes) {
+   558→      const requests = this.store.scrapedSum('animaxia_http_requests_total', { route });
+   559→      this.store.setCounter(
+   560→        'animaxia_hub_requests_total',
+   561→        { route },
+   562→        requests,
+   563→        'Cereri hub FAZA 20 per rută (re-expus din FAZA 9 animaxia_http_requests_total)',
+   564→      );
+   565→      const sum = this.store.scrapedValue('animaxia_http_request_latency_ms_sum', { route });
+   566→      const count = this.store.scrapedValue('animaxia_http_request_latency_ms_count', { route });
+   567→      if (sum !== null && count !== null && count > 0) {
+   568→        this.store.set(
+   569→          'animaxia_hub_duration_ms',
+   570→          { route },
+   571→          Math.round((sum / count) * 100) / 100,
+   572→          'gauge',
+   573→          'Durata medie (ms) per rută hub = _sum/_count (FAZA 9 histogramă re-expusă)',
+   574→        );
+   575→      }
+   576→    }
+   577→  }
+   578→
+   579→  /** rate pe fereastră (per minut) din istoric — pentru alerte. */
+   580→  rateOverWindow(history: { tsMs: number; value: number }[], windowMs: number): number | null {
+   581→    if (history.length < 2) return null;
+   582→    const now = Date.now();
+   583→    const recent = history.filter((h) => now - h.tsMs <= windowMs);
+   584→    if (recent.length < 2) return null;
+   585→    const first = recent[0];
+   586→    const last = recent[recent.length - 1];
+   587→    const delta = last.value - first.value;
+   588→    if (delta < 0) return null; // counter reset
+   589→    const elapsedMin = Math.max(1 / 60, (last.tsMs - first.tsMs) / 60000);
+   590→    return delta / elapsedMin;
+   591→  }
+   592→
+   593→  /** cache miss rate pe fereastră (0..1) din istoricul hits/misses. */
+   594→  cacheMissRateOverWindow(windowMs: number): number | null {
+   595→    const h = this.state.pipelineCacheHistory;
+   596→    if (h.length < 2) return null;
+   597→    const now = Date.now();
+   598→    const recent = h.filter((p) => now - p.tsMs <= windowMs);
+   599→    if (recent.length < 2) return null;
+   600→    const dHits = recent[recent.length - 1].hits - recent[0].hits;
+   601→    const dMisses = recent[recent.length - 1].misses - recent[0].misses;
+   602→    const total = dHits + dMisses;
+   603→    if (total <= 0) return null;
+   604→    return dMisses / total;
+   605→  }
+   606→
+   607→  /** p95 real al cererilor /api/search/* din histograma FAZA 9 (bucket-e). */
+   608→  searchLatencyP95(): number | null {
+   609→    const fam = this.store.scrapedFamily('animaxia_http_request_latency_ms_bucket');
+   610→    if (!fam) return null;
+   611→    const buckets: { le: number; count: number }[] = [];
+   612→    for (const s of fam.series.values()) {
+   613→      if (!s.labels.route || !s.labels.route.startsWith('/api/search')) continue;
+   614→      const le = s.labels.le;
+   615→      if (le === undefined) continue;
+   616→      const leNum = le === '+Inf' ? Infinity : Number(le);
+   617→      if (!Number.isFinite(leNum) && le !== '+Inf') continue;
+   618→      buckets.push({ le: leNum, count: s.value });
+   619→    }
+   620→    if (buckets.length === 0) return null;
+   621→    return histogramQuantile(buckets, 0.95);
+   622→  }
+   623→}
+   624→

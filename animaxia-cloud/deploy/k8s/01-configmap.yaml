@@ -1,0 +1,108 @@
+# =============================================================================
+# Animaxia Cloud — shared non-secret configuration (ConfigMap "animaxia-config")
+#
+# Every Deployment envFrom's this ConfigMap plus the "animaxia-secrets" Secret.
+# Key names follow the Animaxia house style (BLUEPRINT §9 / .env.example):
+# mostly NO underscores except documented legacy keys.
+#
+# Values that differ per service (PORT, SERVICENAME) are set in each Deployment.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: animaxia-config
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: config
+data:
+  # ---- core ----------------------------------------------------------------
+  NODE_ENV: "production"
+  # Allowed browser origin (CORS). Change to your real public origin,
+  # e.g. https://animaxia.example.com — must match the Ingress host scheme.
+  CORS_ORIGIN: "https://animaxia.local"
+
+  # ---- database (connection string itself is SECRET — see 02-secret.yaml) ---
+  PGSSL: "true"
+  PGPOOLMAX: "10"
+
+  # ---- cache / rate limit ---------------------------------------------------
+  CACHETTLMS: "60000"
+  RATELIMITWINDOW_MS: "60000"
+  RATELIMITMAX: "120"
+
+  # ---- provider circuit breaker / cache -------------------------------------
+  PROVIDERCACHETTL_MS: "120000"
+  PROVIDERFAILURETHRESHOLD: "3"
+  PROVIDERCIRCUITOPEN_MS: "60000"
+
+  # ---- provider base URLs -----------------------------------------------------
+  TMDBBASEURL: "https://api.themoviedb.org/3"
+  TVMAZEBASEURL: "https://api.tvmaze.com"
+  JIKANBASEURL: "https://api.jikan.moe/v4"
+  FOOTBALLDATABASE_URL: "https://api.football-data.org/v4"
+  ERGASTBASEURL: "https://api.jolpi.ca/ergast/f1"
+  BBCRSSURL: "https://feeds.bbci.co.uk/news/rss.xml"
+  CNNRSSURL: "http://rss.cnn.com/rss/edition.rss"
+  NHKRSSURL: "https://www3.nhk.or.jp/rss/news/cat0.xml"
+  ALJAZEERARSSURL: "https://www.aljazeera.com/xml/rss/all.xml"
+
+  # ---- miner / player ---------------------------------------------------------
+  MINERTIMEOUTMS: "15000"
+  MINERMAXHTML_BYTES: "5242880"
+  MINERALLOWPRIVATE_NETWORK: "false"
+  PLAYERALLOWMP4: "true"
+  PLAYERALLOWM3U8: "true"
+  PLAYERALLOWIFRAME: "true"
+  PLAYERALLOWYOUTUBE: "true"
+  WORKERSREFRESHMS: "1800000"
+
+  # ---- queue-service (PG-backed durable queue + internal cron scheduler) ------
+  QUEUEPOLLMS: "2000"
+  QUEUECONCURRENCY: "4"
+  QUEUEWORKERTTLSEC: "180"
+  # queue-service ALSO runs an internal cron scheduler (BLUEPRINT §10).
+  # The k8s CronJobs in 90-cronjobs.yaml are belt & braces on top of this.
+  QUEUESCHEDULERENABLED: "true"
+  QUEUERETENTIONDAYS: "7"
+
+  # ---- gateway-service ---------------------------------------------------------
+  GATEWAYUPSTREAMTIMEOUTMS: "15000"
+  GATEWAYEDGECACHEENTRIES: "5000"
+  GATEWAYEDGEDEFAULTTTLMS: "30000"
+  GATEWAYRATELIMITMAX: "300"
+  GATEWAYRATELIMITWINDOW_MS: "60000"
+
+  # ---- Phase 4 — Animaxia AI Cloud (ai-service llm-core + vector backends) -----
+  # AI_PROVIDER: z-ai (default, sandbox SDK) | openai (needs AI_API_KEY, in the
+  # Secret) | mock. VECTOR_BACKEND: auto (pgvector when the extension is
+  # available, else mock) | pgvector | mock | qdrant | pinecone. QDRANTURL /
+  # PINECONEURL are the external vector adapter endpoints (their API keys are
+  # in 02-secret.yaml).
+  AI_PROVIDER: "z-ai"
+  AI_MODEL: "gpt-4o-mini"
+  AI_TIMEOUTMS: "25000"
+  VECTOR_BACKEND: "auto"
+  QDRANTURL: ""
+  PINECONEURL: ""
+
+  # ---- observability ------------------------------------------------------------
+  TRACINGENABLED: "true"
+  OTELSAMPLERATE: "1.0"
+  METRICSENABLED: "true"
+  # OTLP/HTTP trace endpoint lives in the Secret (02-secret.yaml) because it is
+  # environment-specific: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+
+  # ---- inter-service URLs (in-cluster DNS — must match the Service names) -----
+  # These override the http://localhost:<port> defaults of @animaxia/common/services.js.
+  GATEWAYSERVICEURL: "http://gateway-service:8080"
+  AUTHSERVICEURL: "http://auth-service:4001"
+  CONTENTSERVICEURL: "http://content-service:4002"
+  AISERVICEURL: "http://ai-service:4003"
+  ANALYTICSSERVICEURL: "http://analytics-service:4004"
+  SEARCHSERVICEURL: "http://search-service:4005"
+  PREMIUMSERVICEURL: "http://premium-service:4006"
+  SOCIALSERVICEURL: "http://social-service:4007"
+  MOBILESERVICEURL: "http://mobile-service:4008"
+  QUEUESERVICEURL: "http://queue-service:4009"

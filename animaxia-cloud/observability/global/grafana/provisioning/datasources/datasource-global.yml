@@ -1,0 +1,26 @@
+# =============================================================================
+# Animaxia — Grafana provisioning: GLOBAL datasource (FAZA 23 prep)
+# =============================================================================
+# Loaded by the `grafana` container of
+# observability/global/docker-compose.global-observability.yml
+# (profile "faza23" — never starts by default).
+#
+# One datasource: the GLOBAL Prometheus (federation tier). The per-region
+# stacks keep their own datasource (observability/grafana/provisioning/);
+# both Grafanas can coexist (host ports 3001 regional / 3002 global).
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus (global)
+    uid: animaxia-prometheus-global
+    type: prometheus
+    access: proxy
+    # Service name of the global Prometheus on the `animaxia` network.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 30s # matches the global scrape_interval
+      httpMethod: POST

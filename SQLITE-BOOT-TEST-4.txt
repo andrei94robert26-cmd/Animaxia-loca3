@@ -1,0 +1,131 @@
+[32m[2026-10-01T11:18:32.183Z] [INFO][0m [search-flow] FAZA 15 Search Flow Control ready — queue ENABLED · maxConcurrent=250 · window=80ms × batch=80 · cap=10000 · maxWait=30000ms
+[32m[2026-10-01T11:18:32.189Z] [INFO][0m [search-rate] FAZA 16 Search Rate Management ready — ENABLED · perUserMs=500 · cooldown=1200ms · spam=3 arrivals/200ms → block 1000ms · burst=1000/1000ms
+[32m[2026-10-01T11:18:32.191Z] [INFO][0m [search-opt] FAZA 17 Search Optimization Layer ready — ENABLED · cache ttl=3000ms max=5000 · batches max=10000 · pipeline 10 stages (dedup → batching → cache → fts)
+[33m[2026-10-01T11:18:32.209Z] [WARN][0m [searchux] curator-reaper probe failed (non-fatal): near "erval": syntax error
+[32m[2026-10-01T11:18:32.215Z] [INFO][0m [search-stress] FAZA 18 Full Integration + Stress engine ready — 10000 cereri simultane (identice 1000 · diferite 1000 · mixte 5000 · spam 2000 · cooldown 1000 · rate-limit 1000) · projecție 10M utilizatori · eșantion real 500 concurenți
+[32m[2026-10-01T11:18:32.226Z] [INFO][0m [ar10m/thumbs] route GET /thumb/:id registered (dir /data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/data/thumbnails, 320x180 q75)
+[32m[2026-10-01T11:18:32.230Z] [INFO][0m [DB] SQLite-only database ready
+[33m[2026-10-01T11:18:32.232Z] [WARN][0m [platform] Best-effort statement skipped: near "EXTENSION": syntax error
+[31m[2026-10-01T11:18:32.238Z] [ERROR][0m [platform] Migration statement failed: near "USING": syntax error
+[31m[2026-10-01T11:18:32.238Z] [ERROR][0m [boot] Platform schema migration failed (platform modules will answer 503): near "USING": syntax error
+[32m[2026-10-01T11:18:32.241Z] [INFO][0m [aicloud] schema ready (pgvector: no)
+[32m[2026-10-01T11:18:32.244Z] [INFO][0m [aicloud] vector backend: mock (configured: auto, embeds: local-hash-256)
+[32m[2026-10-01T11:18:32.245Z] [INFO][0m [social] Schema verified — 16/16 statements OK (follows, reviews, reviewlikes, activityevents, watchparties, watchpartymembers, partymessages)
+[32m[2026-10-01T11:18:32.246Z] [INFO][0m [social] activity bus wired (comment:added → activityevents + realtime webhook)
+[31m[2026-10-01T11:18:32.248Z] [ERROR][0m [tenant] Migration statement failed: no such table: vectorembeddings
+[33m[2026-10-01T11:18:32.249Z] [WARN][0m [boot] Tenant schema degraded (tenant routes will answer 503/404): no such table: vectorembeddings
+[32m[2026-10-01T11:18:32.250Z] [INFO][0m [miner] Schema verified — 11/11 statements OK (miner_jobs, miner_sources, miner_logs, miner_manifests)
+[32m[2026-10-01T11:18:32.253Z] [INFO][0m [miner] Boot: metrics collector attached, queue resumed
+[33m[2026-10-01T11:18:32.254Z] [WARN][0m [sharding] Migration statement skipped: near "EXISTS": syntax error — ALTER TABLE content ADD COLUMN IF NOT EXISTS shardid INT NOT…
+[33m[2026-10-01T11:18:32.255Z] [WARN][0m [sharding] Migration statement skipped: near "EXISTS": syntax error — ALTER TABLE searchdocs ADD COLUMN IF NOT EXISTS shardid INT …
+[33m[2026-10-01T11:18:32.256Z] [WARN][0m [sharding] Migration statement skipped: no such table: vectorembeddings — ALTER TABLE vectorembeddings ADD COLUMN IF NOT EXISTS shardi…
+[33m[2026-10-01T11:18:32.257Z] [WARN][0m [sharding] Migration statement skipped: no such column: shardid — CREATE INDEX IF NOT EXISTS idx_searchdocs_shardid ON searchd…
+[33m[2026-10-01T11:18:32.258Z] [WARN][0m [miner] pump error: near "FOR": syntax error
+[33m[2026-10-01T11:18:32.259Z] [WARN][0m [sharding] Migration statement skipped: no such table: main.vectorembeddings — CREATE INDEX IF NOT EXISTS idx_vectorembeddings_shardid ON v…
+[33m[2026-10-01T11:18:32.260Z] [WARN][0m [sharding] Schema degraded — 1/6 statements OK (shard routing falls back to legacy shard 0)
+[32m[2026-10-01T11:18:32.263Z] [INFO][0m [faza21] Schema verified — 6/6 statements OK (playlists, playlistitems, subtitles)
+[31m[2026-10-01T11:18:32.267Z] [ERROR][0m [integrity] Migration statement failed: no such table: contentsources
+[33m[2026-10-01T11:18:32.268Z] [WARN][0m [boot] Integrity schema degraded (uniqueness/FK enforcement partial): no such table: contentsources
+[33m[2026-10-01T11:18:32.268Z] [WARN][0m [boot] Auth-extra schema degraded (email-verify/2FA will be partial): near "EXISTS": syntax error
+[33m[2026-10-01T11:18:32.269Z] [WARN][0m [boot] Admin-users schema degraded (ban/unban will fail): near "EXISTS": syntax error
+[32m[2026-10-01T11:18:32.270Z] [INFO][0m [boot] Database already has 9 items — skipping seed
+[32m[2026-10-01T11:18:32.282Z] [INFO][0m ============================================================
+[32m[2026-10-01T11:18:32.283Z] [INFO][0m   ANIMAXIA BACKEND v1.0.0 — listening on http://localhost:4000
+[32m[2026-10-01T11:18:32.283Z] [INFO][0m   DB driver: sqlite (connected: true)
+[32m[2026-10-01T11:18:32.283Z] [INFO][0m   Env: development · Cache TTL: undefinedms · Miner: ready
+[32m[2026-10-01T11:18:32.283Z] [INFO][0m ============================================================
+[31m[2026-10-01T11:18:33.187Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:33.191Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:33.195Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:34.186Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:34.190Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:34.194Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:35.187Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:35.192Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:35.196Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:36.400Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:36.401Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:36.401Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:37.439Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:37.439Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:37.440Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[32m[2026-10-01T11:18:37.454Z] [INFO][0m [collections] trilogies warm-up: 10 collections, 0 failed
+[32m[2026-10-01T11:18:37.480Z] [INFO][0m [collections] franchises warm-up: 23 collections, 0 failed
+[33m[2026-10-01T11:18:37.672Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 1/4)
+[33m[2026-10-01T11:18:37.689Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 1/4)
+[31m[2026-10-01T11:18:38.440Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:38.442Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:38.444Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:39.440Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:39.443Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:39.445Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[33m[2026-10-01T11:18:39.764Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 2/4)
+[33m[2026-10-01T11:18:39.778Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 2/4)
+[33m[2026-10-01T11:18:40.144Z] [WARN][0m [ai-hub] z-ai probe failed (Configuration file not found or invalid. Please create .z-ai-config in your project, home directory, or /etc.) — hashed-bow embeddings
+[32m[2026-10-01T11:18:40.147Z] [INFO][0m [ai-hub] semantic embedding provider: hashed-bow
+[33m[2026-10-01T11:18:40.152Z] [WARN][0m [ai-hub] boot warm-up embed failed: no such table: aisemantic
+[31m[2026-10-01T11:18:40.440Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:40.442Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:40.444Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:41.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:41.490Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:41.490Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[33m[2026-10-01T11:18:42.201Z] [WARN][0m [workers] Thumbnail file migration skipped: no such table: thumbnailcache
+[31m[2026-10-01T11:18:42.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:42.492Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:42.494Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:43.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:43.491Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:43.494Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[33m[2026-10-01T11:18:44.051Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 3/4)
+[33m[2026-10-01T11:18:44.064Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 3/4)
+[31m[2026-10-01T11:18:44.488Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:44.492Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:44.493Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:45.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:45.493Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:45.494Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:46.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:46.493Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:46.495Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:47.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:47.493Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:47.495Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:48.489Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:48.494Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:48.496Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:49.490Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:49.493Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:49.495Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[32m[2026-10-01T11:18:50.353Z] [INFO][0m [ai-home] external chunk #1 warm: 40 posters
+[32m[2026-10-01T11:18:50.364Z] [INFO][0m [ai-home] boot enrichment: 0 items
+[31m[2026-10-01T11:18:50.490Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:50.494Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:50.495Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:51.490Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:51.493Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:51.496Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:52.491Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:52.494Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:52.496Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:53.490Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:53.495Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:53.497Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:54.491Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:54.495Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:54.497Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:55.491Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:55.496Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:55.498Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:56.492Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:56.496Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:56.498Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:57.492Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:57.497Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:57.498Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:58.493Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:58.498Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:58.499Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:59.494Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:59.499Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T11:18:59.500Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value

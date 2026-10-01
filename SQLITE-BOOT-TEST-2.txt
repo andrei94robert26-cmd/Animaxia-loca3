@@ -1,0 +1,46 @@
+[32m[2026-10-01T10:40:03.656Z] [INFO][0m [search-flow] FAZA 15 Search Flow Control ready — queue ENABLED · maxConcurrent=250 · window=80ms × batch=80 · cap=10000 · maxWait=30000ms
+[32m[2026-10-01T10:40:03.662Z] [INFO][0m [search-rate] FAZA 16 Search Rate Management ready — ENABLED · perUserMs=500 · cooldown=1200ms · spam=3 arrivals/200ms → block 1000ms · burst=1000/1000ms
+[32m[2026-10-01T10:40:03.663Z] [INFO][0m [search-opt] FAZA 17 Search Optimization Layer ready — ENABLED · cache ttl=3000ms max=5000 · batches max=10000 · pipeline 10 stages (dedup → batching → cache → fts)
+[32m[2026-10-01T10:40:03.686Z] [INFO][0m [search-stress] FAZA 18 Full Integration + Stress engine ready — 10000 cereri simultane (identice 1000 · diferite 1000 · mixte 5000 · spam 2000 · cooldown 1000 · rate-limit 1000) · projecție 10M utilizatori · eșantion real 500 concurenți
+[32m[2026-10-01T10:40:03.695Z] [INFO][0m [ar10m/thumbs] route GET /thumb/:id registered (dir /data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/data/thumbnails, 320x180 q75)
+[31m[2026-10-01T10:40:03.699Z] [ERROR][0m [DB] PostgreSQL unavailable (DATABASEURL missing) — switching to local fallback store
+[33m[2026-10-01T10:40:03.700Z] [WARN][0m [DB] Active driver: local fallback store (/data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/data/content.json)
+[33m[2026-10-01T10:40:03.704Z] [WARN][0m [platform] Best-effort statement skipped: near "EXTENSION": syntax error
+[31m[2026-10-01T10:40:03.706Z] [ERROR][0m [platform] Migration statement failed: near "USING": syntax error
+[31m[2026-10-01T10:40:03.707Z] [ERROR][0m [boot] Platform schema migration failed (platform modules will answer 503): near "USING": syntax error
+[32m[2026-10-01T10:40:03.709Z] [INFO][0m [aicloud] schema ready (pgvector: no)
+[32m[2026-10-01T10:40:03.711Z] [INFO][0m [aicloud] vector backend: mock (configured: auto, embeds: local-hash-256)
+[32m[2026-10-01T10:40:03.712Z] [INFO][0m [social] Schema verified — 16/16 statements OK (follows, reviews, reviewlikes, activityevents, watchparties, watchpartymembers, partymessages)
+[32m[2026-10-01T10:40:03.713Z] [INFO][0m [social] activity bus wired (comment:added → activityevents + realtime webhook)
+[31m[2026-10-01T10:40:03.715Z] [ERROR][0m [tenant] Migration statement failed: no such table: vectorembeddings
+[33m[2026-10-01T10:40:03.715Z] [WARN][0m [boot] Tenant schema degraded (tenant routes will answer 503/404): no such table: vectorembeddings
+[32m[2026-10-01T10:40:03.717Z] [INFO][0m [miner] Schema verified — 11/11 statements OK (miner_jobs, miner_sources, miner_logs, miner_manifests)
+[32m[2026-10-01T10:40:03.718Z] [INFO][0m [miner] Boot: metrics collector attached, queue resumed
+[33m[2026-10-01T10:40:03.719Z] [WARN][0m [sharding] Migration statement skipped: SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use) — ALTER TABLE content ADD COLUMN IF NOT EXISTS shardid INT NOT…
+[33m[2026-10-01T10:40:03.721Z] [WARN][0m [sharding] Migration statement skipped: SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use) — ALTER TABLE searchdocs ADD COLUMN IF NOT EXISTS shardid INT …
+[33m[2026-10-01T10:40:03.721Z] [WARN][0m [sharding] Migration statement skipped: SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use) — ALTER TABLE vectorembeddings ADD COLUMN IF NOT EXISTS shardi…
+[33m[2026-10-01T10:40:03.722Z] [WARN][0m [miner] pump error: near "FOR": syntax error
+[33m[2026-10-01T10:40:03.722Z] [WARN][0m [sharding] Migration statement skipped: SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use) — CREATE INDEX IF NOT EXISTS idx_content_shardid ON content (s…
+[33m[2026-10-01T10:40:03.723Z] [WARN][0m [sharding] Migration statement skipped: SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use) — CREATE INDEX IF NOT EXISTS idx_searchdocs_shardid ON searchd…
+[33m[2026-10-01T10:40:03.723Z] [WARN][0m [sharding] Migration statement skipped: SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use) — CREATE INDEX IF NOT EXISTS idx_vectorembeddings_shardid ON v…
+[33m[2026-10-01T10:40:03.723Z] [WARN][0m [sharding] Schema degraded — 0/6 statements OK (shard routing falls back to legacy shard 0)
+[32m[2026-10-01T10:40:03.726Z] [INFO][0m [faza21] Schema verified — 6/6 statements OK (playlists, playlistitems, subtitles)
+[31m[2026-10-01T10:40:03.728Z] [ERROR][0m [integrity] Migration statement failed: no such table: contentsources
+[33m[2026-10-01T10:40:03.729Z] [WARN][0m [boot] Integrity schema degraded (uniqueness/FK enforcement partial): no such table: contentsources
+[33m[2026-10-01T10:40:03.730Z] [WARN][0m [boot] Auth-extra schema degraded (email-verify/2FA will be partial): near "EXISTS": syntax error
+[33m[2026-10-01T10:40:03.730Z] [WARN][0m [boot] Admin-users schema degraded (ban/unban will fail): near "EXISTS": syntax error
+[32m[2026-10-01T10:40:03.731Z] [INFO][0m [boot] Empty database — seeding initial content…
+[32m[2026-10-01T10:40:04.284Z] [INFO][0m [seed] Seeded 20 trending movies from TMDB
+[32m[2026-10-01T10:40:04.500Z] [INFO][0m [seed] Seeded 20 trending TV shows from TMDB
+[31m[2026-10-01T10:40:04.659Z] [ERROR][0m [search-flow] history sampler failed: Invalid time value
+[31m[2026-10-01T10:40:04.664Z] [ERROR][0m [search-rate] history sampler failed: Invalid time value
+[31m[2026-10-01T10:40:04.668Z] [ERROR][0m [search-opt] history sampler failed: Invalid time value
+[32m[2026-10-01T10:40:05.037Z] [INFO][0m [seed] Seeded 20 anime from Jikan
+[32m[2026-10-01T10:40:05.038Z] [INFO][0m [boot] Seeded demo:3 movie:20 tv:20 anime:20 (animeSource=jikan, totalItems=63)
+[31m[2026-10-01T10:40:05.053Z] [ERROR][0m [process] Uncaught exception: Error: listen EADDRINUSE: address already in use :::4000
+    at Server.setupListenHandle [as _listen2] (node:net:2009:16)
+    at listenInCluster (node:net:2066:12)
+    at Server.listen (node:net:2171:7)
+    at app.listen (/data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/node_modules/express/lib/application.js:635:24)
+    at main (file:///data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/server.js:842:22)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)

@@ -1,0 +1,660 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * category-view.tsx — Browse by category. DB-backed categories render a live
+     5→     5→ * provider strip plus a paginated library grid; the news category is a live
+     6→     6→ * multi-source browser; the sports category is a football + Formula 1 hub.
+     7→     7→ * Sidebar categories added by the platform menu (Copii & Desene, Muzică,
+     8→     8→ * Universuri, Canale Kids, TV & Show-biz, Lumea…) are virtual views filtered
+     9→     9→ * client-side over the Neon library, plus dedicated panels for Lista Mea,
+    10→    10→ * Colecțiile Mele, Gestionare & Duplicate and Emisiuni TV.
+    11→    11→ */
+    12→    12→
+    13→    13→import { useMemo, useRef, useState } from 'react';
+    14→    14→import { Pickaxe, Plus } from 'lucide-react';
+    15→    15→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+    16→    16→import { Button } from '@/components/ui/button';
+    17→    17→import { Skeleton } from '@/components/ui/skeleton';
+    18→    18→import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+    19→    19→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    20→    20→import { api, animeToItem, dbToItem, mediaToItem, newsToItem } from '@/lib/animaxia/api';
+    21→    21→import { useApi, type UseApiResult } from '@/lib/animaxia/hooks';
+    22→    22→import { SPECIAL_CATEGORIES, VIRTUAL_CATEGORIES } from '@/lib/animaxia/menu';
+    23→    23→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    24→    24→import type {
+    25→    25→  FootballMatch,
+    26→    26→  FootballTableEntry,
+    27→    27→  F1Race,
+    28→    28→  F1Standing,
+    29→    29→  NewsItem,
+    30→    30→  NormalizedItem,
+    31→    31→} from '@/lib/animaxia/types';
+    32→    32→import { cn } from '@/lib/utils';
+    33→    33→import { CollectionsPanel, ManagePanel, MyListPanel, TvShowsPanel } from '../category-panels';
+    34→    34→import { ContentGrid } from '../content-grid';
+    35→    35→import { ContentRow } from '../content-row';
+    36→    36→import { AddContentDialog } from '../home-panels';
+    37→    37→import { Pagination } from '../pagination';
+    38→    38→import { Container, PageHeader, Section } from '../section';
+    39→    39→import { EmptyState, ErrorState } from '../states';
+    40→    40→
+    41→    41→/* ------------------------------- constants ------------------------------- */
+    42→    42→
+    43→    43→const CATEGORY_META: Record<string, { title: string; subtitle: string }> = {
+    44→    44→  all: { title: 'All titles', subtitle: 'Everything in your Animaxia library — movies, series, anime and more.' },
+    45→    45→  movie: { title: 'Movies', subtitle: 'Films in your collection, plus what is trending on TMDB right now.' },
+    46→    46→  tv: { title: 'TV Shows', subtitle: 'Series in your collection, plus popular shows from TMDB.' },
+    47→    47→  anime: { title: 'Anime', subtitle: 'Your anime collection, plus what is airing this season.' },
+    48→    48→  news: { title: 'News', subtitle: 'Latest headlines pulled live from BBC, CNN, NHK and Al Jazeera.' },
+    49→    49→  sports: { title: 'Sports', subtitle: 'Football tables and fixtures, plus the Formula 1 season at a glance.' },
+    50→    50→  mined: { title: 'Mined content', subtitle: 'Everything the Animaxia Miner extracted from stream URLs.' },
+    51→    51→  featured: { title: 'Featured', subtitle: 'Hand-picked highlights from the Animaxia team.' },
+    52→    52→  'my-list': { title: 'Lista Mea', subtitle: 'Favoritele tale, salvate în Neon și sincronizate pe toate dispozitivele.' },
+    53→    53→  'my-collections': { title: 'Colecțiile Mele', subtitle: 'Organizează-ți biblioteca în colecții tematice — maratoane gata de pornit.' },
+    54→    54→  manage: { title: 'Gestionare & Duplicate', subtitle: 'Panoul de administrare a bibliotecii — detectare duplicate și curățare.' },
+    55→    55→  tvshows: { title: 'Emisiuni TV', subtitle: 'Programul TV de astăzi — emisiuni în difuzare, live din TVmaze.' },
+    56→    56→};
+    57→    57→
+    58→    58→const NEWS_SOURCES: { value: string; label: string }[] = [
+    59→    59→  { value: 'all', label: 'All' },
+    60→    60→  { value: 'bbc', label: 'BBC' },
+    61→    61→  { value: 'cnn', label: 'CNN' },
+    62→    62→  { value: 'nhk', label: 'NHK' },
+    63→    63→  { value: 'aljazeera', label: 'Al Jazeera' },
+    64→    64→];
+    65→    65→
+    66→    66→const COMPETITIONS: { code: string; name: string }[] = [
+    67→    67→  { code: 'PL', name: 'Premier League' },
+    68→    68→  { code: 'BL1', name: 'Bundesliga' },
+    69→    69→  { code: 'PD', name: 'La Liga' },
+    70→    70→  { code: 'SA', name: 'Serie A' },
+    71→    71→  { code: 'FL1', name: 'Ligue 1' },
+    72→    72→  { code: 'CL', name: 'Champions League' },
+    73→    73→  { code: 'WC', name: 'World Cup' },
+    74→    74→];
+    75→    75→
+    76→    76→const MATCH_STATUS: Record<string, { label: string; className: string }> = {
+    77→    77→  FINISHED: { label: 'Finished', className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' },
+    78→    78→  IN_PLAY: { label: 'Live', className: 'border-rose-500/40 bg-rose-500/15 text-rose-300' },
+    79→    79→  PAUSED: { label: 'Live', className: 'border-rose-500/40 bg-rose-500/15 text-rose-300' },
+    80→    80→  TIMED: { label: 'Scheduled', className: 'border-white/10 bg-white/5 text-zinc-400' },
+    81→    81→  SCHEDULED: { label: 'Scheduled', className: 'border-white/10 bg-white/5 text-zinc-400' },
+    82→    82→  POSTPONED: { label: 'Postponed', className: 'border-amber-500/30 bg-amber-500/10 text-amber-300' },
+    83→    83→  SUSPENDED: { label: 'Suspended', className: 'border-amber-500/30 bg-amber-500/10 text-amber-300' },
+    84→    84→  CANCELLED: { label: 'Cancelled', className: 'border-white/10 bg-white/5 text-zinc-400' },
+    85→    85→};
+    86→    86→
+    87→    87→function capitalize(raw: string): string {
+    88→    88→  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : 'Category';
+    89→    89→}
+    90→    90→
+    91→    91→/* --------------------------------- view ---------------------------------- */
+    92→    92→
+    93→    93→export function CategoryView({ route }: { route: AppRoute }) {
+    94→    94→  const type = route.params[0] || 'all';
+    95→    95→
+    96→    96→  /* Reset pagination whenever the category changes (adjust during render). */
+    97→    97→  const [page, setPage] = useState(1);
+    98→    98→  const [lastType, setLastType] = useState(type);
+    99→    99→  if (lastType !== type) {
+   100→   100→    setLastType(type);
+   101→   101→    setPage(1);
+   102→   102→  }
+   103→   103→
+   104→   104→  const [newsSource, setNewsSource] = useState('all');
+   105→   105→  const [sportTab, setSportTab] = useState<'football' | 'f1'>('football');
+   106→   106→  const [competition, setCompetition] = useState('PL');
+   107→   107→  const [addOpen, setAddOpen] = useState(false);
+   108→   108→
+   109→   109→  const isNews = type === 'news';
+   110→   110→  const isSports = type === 'sports';
+   111→   111→  const isSpecial = SPECIAL_CATEGORIES.has(type);
+   112→   112→  const virtual = VIRTUAL_CATEGORIES[type];
+   113→   113→  const isVirtual = Boolean(virtual) && !isSpecial;
+   114→   114→  const isGrid = !isNews && !isSports && !isSpecial && !isVirtual;
+   115→   115→  const hasStrip = type === 'movie' || type === 'tv' || type === 'anime';
+   116→   116→
+   117→   117→  const meta =
+   118→   118→    CATEGORY_META[type] ??
+   119→   119→    (virtual
+   120→   120→      ? { title: virtual.title, subtitle: virtual.subtitle }
+   121→   121→      : {
+   122→   122→          title: capitalize(type),
+   123→   123→          subtitle: 'Browse every title Animaxia has filed under this category.',
+   124→   124→        });
+   125→   125→
+   126→   126→  const listRes = useApi(
+   127→   127→    `cat-${type}-${page}`,
+   128→   128→    () => api.all({ type: type === 'all' ? undefined : type, page, limit: 24 }),
+   129→   129→    { enabled: isGrid },
+   130→   130→  );
+   131→   131→
+   132→   132→  /* Virtual sidebar categories: one full-catalog fetch + client-side filter. */
+   133→   133→  const virtualRes = useApi(`cat-virtual-${type}`, () => api.all({ limit: 100 }), { enabled: isVirtual });
+   134→   134→  const virtualItems = useMemo<NormalizedItem[]>(() => {
+   135→   135→    if (!virtual || !virtualRes.data) return [];
+   136→   136→    const rows = virtualRes.data.data.filter(virtual.filter);
+   137→   137→    const sorted = virtual.sort ? [...rows].sort(virtual.sort) : rows;
+   138→   138→    return sorted.map(dbToItem);
+   139→   139→  }, [virtual, virtualRes.data]);
+   140→   140→
+   141→   141→  const stripRes = useApi(
+   142→   142→    `cat-strip-${type}`,
+   143→   143→    async (): Promise<NormalizedItem[]> => {
+   144→   144→      if (type === 'movie') return (await api.moviesTrending('day')).data.map(mediaToItem);
+   145→   145→      if (type === 'tv') return (await api.tvPopular()).data.map(mediaToItem);
+   146→   146→      return (await api.animeSeason()).data.map(animeToItem);
+   147→   147→    },
+   148→   148→    { enabled: hasStrip },
+   149→   149→  );
+   150→   150→
+   151→   151→  const newsRes = useApi(`cat-news-${newsSource}`, () => api.news(newsSource, 24), { enabled: isNews });
+   152→   152→
+   153→   153→  const standingsRes = useApi(`fb-standings-${competition}`, () => api.footballStandings(competition), {
+   154→   154→    enabled: isSports,
+   155→   155→  });
+   156→   156→  const matchesRes = useApi(`fb-matches-${competition}`, () => api.footballMatches(competition, 10), {
+   157→   157→    enabled: isSports,
+   158→   158→  });
+   159→   159→  const f1StandingsRes = useApi('f1-standings', () => api.f1Standings(), {
+   160→   160→    enabled: isSports && sportTab === 'f1',
+   161→   161→  });
+   162→   162→  const f1ScheduleRes = useApi('f1-schedule', () => api.f1Schedule(), {
+   163→   163→    enabled: isSports && sportTab === 'f1',
+   164→   164→  });
+   165→   165→
+   166→   166→  const items = useMemo(() => (listRes.data?.data ?? []).map(dbToItem), [listRes.data]);
+   167→   167→  const gridRef = useRef<HTMLDivElement>(null);
+   168→   168→
+   169→   169→  const stripMeta =
+   170→   170→    type === 'movie'
+   171→   171→      ? { title: 'Trending on TMDB', subtitle: 'Today’s most-watched films worldwide' }
+   172→   172→      : type === 'tv'
+   173→   173→        ? { title: 'Popular on TMDB', subtitle: 'Series people cannot stop watching' }
+   174→   174→        : { title: 'Airing this season', subtitle: 'Currently broadcasting in Japan' };
+   175→   175→
+   176→   176→  const goToPage = (next: number) => {
+   177→   177→    setPage(next);
+   178→   178→    gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+   179→   179→  };
+   180→   180→
+   181→   181→  return (
+   182→   182→    <Container className="space-y-8 py-8 sm:py-10">
+   183→   183→      <PageHeader title={meta.title} subtitle={meta.subtitle}>
+   184→   184→        {isGrid && !listRes.loading && listRes.data && (
+   185→   185→          <p className="text-sm font-medium text-zinc-500">
+   186→   186→            Showing {listRes.data.data.length} of {listRes.data.total}{' '}
+   187→   187→            {listRes.data.total === 1 ? 'title' : 'titles'}
+   188→   188→          </p>
+   189→   189→        )}
+   190→   190→      </PageHeader>
+   191→   191→
+   192→   192→      {isGrid && (
+   193→   193→        <>
+   194→   194→          {type === 'mined' && (
+   195→   195→            <Alert className="border-rose-500/20 bg-rose-500/5">
+   196→   196→              <Pickaxe className="h-4 w-4 text-rose-400" aria-hidden />
+   197→   197→              <AlertTitle className="text-zinc-100">Extracted by the Animaxia Miner</AlertTitle>
+   198→   198→              <AlertDescription className="text-zinc-400">
+   199→   199→                <span>
+   200→   200→                  Mined titles are extracted by the Animaxia Miner from any URL — open the Admin
+   201→   201→                  panel to mine a new stream.
+   202→   202→                </span>
+   203→   203→                <Button
+   204→   204→                  size="sm"
+   205→   205→                  onClick={() => navigate('/admin')}
+   206→   206→                  className="mt-2 bg-rose-600 font-semibold text-white hover:bg-rose-500"
+   207→   207→                >
+   208→   208→                  Open Admin panel
+   209→   209→                </Button>
+   210→   210→              </AlertDescription>
+   211→   211→            </Alert>
+   212→   212→          )}
+   213→   213→
+   214→   214→          {hasStrip &&
+   215→   215→            (stripRes.error && !stripRes.loading && !stripRes.data ? (
+   216→   216→              <ErrorState message={stripRes.error} onRetry={stripRes.refetch} compact />
+   217→   217→            ) : (
+   218→   218→              <ContentRow
+   219→   219→                title={stripMeta.title}
+   220→   220→                subtitle={stripMeta.subtitle}
+   221→   221→                items={stripRes.data ?? []}
+   222→   222→                loading={stripRes.loading}
+   223→   223→                emptyMessage="Live provider data is unavailable right now."
+   224→   224→              />
+   225→   225→            ))}
+   226→   226→
+   227→   227→          <div ref={gridRef} className="scroll-mt-24 space-y-6">
+   228→   228→            {listRes.error && !listRes.loading && !listRes.data ? (
+   229→   229→              <ErrorState message={listRes.error} onRetry={listRes.refetch} />
+   230→   230→            ) : (
+   231→   231→              <ContentGrid
+   232→   232→                items={items}
+   233→   233→                loading={listRes.loading}
+   234→   234→                skeletonCount={12}
+   235→   235→                emptyTitle={type === 'all' ? 'Your library is empty' : `No ${meta.title.toLowerCase()} yet`}
+   236→   236→                emptyMessage="Nothing has been added to this category so far — add titles from any detail page."
+   237→   237→              />
+   238→   238→            )}
+   239→   239→            <Pagination page={page} totalPages={listRes.data?.totalPages ?? 1} onPage={goToPage} />
+   240→   240→          </div>
+   241→   241→        </>
+   242→   242→      )}
+   243→   243→
+   244→   244→      {isSpecial && (
+   245→   245→        <>
+   246→   246→          {type === 'my-list' && <MyListPanel />}
+   247→   247→          {type === 'my-collections' && <CollectionsPanel />}
+   248→   248→          {type === 'manage' && <ManagePanel />}
+   249→   249→          {type === 'tvshows' && <TvShowsPanel />}
+   250→   250→        </>
+   251→   251→      )}
+   252→   252→
+   253→   253→      {isVirtual && (
+   254→   254→        <>
+   255→   255→          {virtualRes.error && !virtualRes.loading && !virtualRes.data ? (
+   256→   256→            <ErrorState message={virtualRes.error} onRetry={virtualRes.refetch} />
+   257→   257→          ) : (
+   258→   258→            <ContentGrid
+   259→   259→              items={virtualItems}
+   260→   260→              loading={virtualRes.loading}
+   261→   261→              skeletonCount={9}
+   262→   262→              emptyTitle={`Încă nimic în ${meta.title}`}
+   263→   263→              emptyMessage={
+   264→   264→                virtual?.emptyHint ??
+   265→   265→                'Această categorie se umple automat cu tot ce încarci tu — adaugă conținut din orice sursă.'
+   266→   266→              }
+   267→   267→              emptyAction={
+   268→   268→                <Button onClick={() => setAddOpen(true)} className="mt-4 bg-rose-600 font-bold hover:bg-rose-500">
+   269→   269→                  <Plus className="mr-1.5 h-4 w-4" aria-hidden />
+   270→   270→                  Adaugă conținut
+   271→   271→                </Button>
+   272→   272→              }
+   273→   273→            />
+   274→   274→          )}
+   275→   275→          {!virtualRes.loading && virtualItems.length > 0 && (
+   276→   276→            <p className="text-sm font-medium text-zinc-500">
+   277→   277→              {virtualItems.length} {virtualItems.length === 1 ? 'titlu' : 'titluri'} în {meta.title}
+   278→   278→            </p>
+   279→   279→          )}
+   280→   280→        </>
+   281→   281→      )}
+   282→   282→
+   283→   283→      <AddContentDialog open={addOpen} onOpenChange={setAddOpen} />
+   284→   284→
+   285→   285→      {isNews && <NewsPanel source={newsSource} onSource={setNewsSource} res={newsRes} />}
+   286→   286→
+   287→   287→      {isSports && (
+   288→   288→        <Tabs defaultValue="football" onValueChange={(value) => setSportTab(value as 'football' | 'f1')}>
+   289→   289→          <TabsList className="h-10 w-full justify-start gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   290→   290→            <TabsTrigger
+   291→   291→              value="football"
+   292→   292→              className="px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white data-[state=active]:shadow-rose-900/40 sm:px-5"
+   293→   293→            >
+   294→   294→              Football
+   295→   295→            </TabsTrigger>
+   296→   296→            <TabsTrigger
+   297→   297→              value="f1"
+   298→   298→              className="px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white data-[state=active]:shadow-rose-900/40 sm:px-5"
+   299→   299→            >
+   300→   300→              Formula 1
+   301→   301→            </TabsTrigger>
+   302→   302→          </TabsList>
+   303→   303→          <TabsContent value="football" className="pt-6">
+   304→   304→            <FootballPanel
+   305→   305→              competition={competition}
+   306→   306→              onCompetition={setCompetition}
+   307→   307→              standingsRes={standingsRes}
+   308→   308→              matchesRes={matchesRes}
+   309→   309→            />
+   310→   310→          </TabsContent>
+   311→   311→          <TabsContent value="f1" className="pt-6">
+   312→   312→            <F1Panel standingsRes={f1StandingsRes} scheduleRes={f1ScheduleRes} />
+   313→   313→          </TabsContent>
+   314→   314→        </Tabs>
+   315→   315→      )}
+   316→   316→    </Container>
+   317→   317→  );
+   318→   318→}
+   319→   319→
+   320→   320→/* ------------------------------ news panel ------------------------------- */
+   321→   321→
+   322→   322→function NewsPanel({
+   323→   323→  source,
+   324→   324→  onSource,
+   325→   325→  res,
+   326→   326→}: {
+   327→   327→  source: string;
+   328→   328→  onSource: (value: string) => void;
+   329→   329→  res: UseApiResult<{ data: NewsItem[] }>;
+   330→   330→}) {
+   331→   331→  const items = useMemo(() => (res.data?.data ?? []).map(newsToItem), [res.data]);
+   332→   332→  return (
+   333→   333→    <div className="space-y-6">
+   334→   334→      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="News source filter">
+   335→   335→        {NEWS_SOURCES.map((s) => (
+   336→   336→          <FilterChip key={s.value} active={source === s.value} onClick={() => onSource(s.value)}>
+   337→   337→            {s.label}
+   338→   338→          </FilterChip>
+   339→   339→        ))}
+   340→   340→      </div>
+   341→   341→      {res.error && !res.loading && !res.data ? (
+   342→   342→        <ErrorState message={res.error} onRetry={res.refetch} />
+   343→   343→      ) : (
+   344→   344→        <ContentGrid
+   345→   345→          items={items}
+   346→   346→          loading={res.loading}
+   347→   347→          skeletonCount={12}
+   348→   348→          emptyTitle="No headlines right now"
+   349→   349→          emptyMessage="This feed returned no recent articles — try another source."
+   350→   350→        />
+   351→   351→      )}
+   352→   352→    </div>
+   353→   353→  );
+   354→   354→}
+   355→   355→
+   356→   356→/* ---------------------------- football panel ----------------------------- */
+   357→   357→
+   358→   358→function FootballPanel({
+   359→   359→  competition,
+   360→   360→  onCompetition,
+   361→   361→  standingsRes,
+   362→   362→  matchesRes,
+   363→   363→}: {
+   364→   364→  competition: string;
+   365→   365→  onCompetition: (code: string) => void;
+   366→   366→  standingsRes: UseApiResult<{ data: { competition: string; table: FootballTableEntry[] } }>;
+   367→   367→  matchesRes: UseApiResult<{ data: FootballMatch[] }>;
+   368→   368→}) {
+   369→   369→  const competitionName = COMPETITIONS.find((c) => c.code === competition)?.name ?? competition;
+   370→   370→  return (
+   371→   371→    <div className="space-y-8">
+   372→   372→      <div className="space-y-3">
+   373→   373→        <h2 className="text-lg font-bold text-zinc-100">Competition</h2>
+   374→   374→        <div className="flex flex-wrap gap-2" role="group" aria-label="Competition filter">
+   375→   375→          {COMPETITIONS.map((c) => (
+   376→   376→            <FilterChip key={c.code} active={competition === c.code} onClick={() => onCompetition(c.code)}>
+   377→   377→              {c.name}
+   378→   378→            </FilterChip>
+   379→   379→          ))}
+   380→   380→        </div>
+   381→   381→      </div>
+   382→   382→
+   383→   383→      <Section title="Standings" subtitle={`Current ${competitionName} table`}>
+   384→   384→        {standingsRes.loading ? (
+   385→   385→          <Skeleton className="h-80 w-full rounded-xl" />
+   386→   386→        ) : standingsRes.error ? (
+   387→   387→          <ErrorState message={standingsRes.error} onRetry={standingsRes.refetch} compact />
+   388→   388→        ) : !standingsRes.data || standingsRes.data.data.table.length === 0 ? (
+   389→   389→          <EmptyState title="No standings available" message="This competition has no table data right now." />
+   390→   390→        ) : (
+   391→   391→          <StandingsTable entries={standingsRes.data.data.table} />
+   392→   392→        )}
+   393→   393→      </Section>
+   394→   394→
+   395→   395→      <Section title="Fixtures & results" subtitle="Upcoming matches and recent scores">
+   396→   396→        {matchesRes.loading ? (
+   397→   397→          <Skeleton className="h-72 w-full rounded-xl" />
+   398→   398→        ) : matchesRes.error ? (
+   399→   399→          <ErrorState message={matchesRes.error} onRetry={matchesRes.refetch} compact />
+   400→   400→        ) : !matchesRes.data || matchesRes.data.data.length === 0 ? (
+   401→   401→          <EmptyState title="No matches scheduled" message="There are no upcoming fixtures for this competition." />
+   402→   402→        ) : (
+   403→   403→          <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.02]">
+   404→   404→            <div className="divide-y divide-white/5">
+   405→   405→              {matchesRes.data.data.map((match) => (
+   406→   406→                <MatchRow key={match.id} match={match} />
+   407→   407→              ))}
+   408→   408→            </div>
+   409→   409→          </div>
+   410→   410→        )}
+   411→   411→      </Section>
+   412→   412→    </div>
+   413→   413→  );
+   414→   414→}
+   415→   415→
+   416→   416→function StandingsTable({ entries }: { entries: FootballTableEntry[] }) {
+   417→   417→  return (
+   418→   418→    <div className="custom-scrollbar overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02]">
+   419→   419→      <Table className="min-w-[620px]">
+   420→   420→        <TableHeader>
+   421→   421→          <TableRow className="border-white/10 hover:bg-transparent">
+   422→   422→            <TableHead className="w-12 text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">#</TableHead>
+   423→   423→            <TableHead className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Team</TableHead>
+   424→   424→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">P</TableHead>
+   425→   425→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">W</TableHead>
+   426→   426→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">D</TableHead>
+   427→   427→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">L</TableHead>
+   428→   428→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">GD</TableHead>
+   429→   429→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Pts</TableHead>
+   430→   430→          </TableRow>
+   431→   431→        </TableHeader>
+   432→   432→        <TableBody>
+   433→   433→          {entries.map((entry) => (
+   434→   434→            <TableRow key={entry.team} className="border-white/5 hover:bg-white/5">
+   435→   435→              <TableCell
+   436→   436→                className={cn(
+   437→   437→                  'text-center font-bold tabular-nums',
+   438→   438→                  entry.rank <= 4 ? 'text-emerald-400' : 'text-zinc-500',
+   439→   439→                )}
+   440→   440→              >
+   441→   441→                {entry.rank}
+   442→   442→              </TableCell>
+   443→   443→              <TableCell className="font-medium text-zinc-100">
+   444→   444→                <span className="flex items-center gap-2.5">
+   445→   445→                  {entry.teamCrest ? (
+   446→   446→                    <img
+   447→   447→                      src={entry.teamCrest}
+   448→   448→                      alt=""
+   449→   449→                      aria-hidden
+   450→   450→                      loading="lazy"
+   451→   451→                      className="h-5 w-5 shrink-0 object-contain"
+   452→   452→                    />
+   453→   453→                  ) : null}
+   454→   454→                  <span className="truncate">{entry.team}</span>
+   455→   455→                </span>
+   456→   456→              </TableCell>
+   457→   457→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.played}</TableCell>
+   458→   458→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.won}</TableCell>
+   459→   459→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.draw}</TableCell>
+   460→   460→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.lost}</TableCell>
+   461→   461→              <TableCell className="text-center tabular-nums text-zinc-400">
+   462→   462→                {entry.goalDifference > 0 ? `+${entry.goalDifference}` : entry.goalDifference}
+   463→   463→              </TableCell>
+   464→   464→              <TableCell className="text-center font-bold tabular-nums text-white">{entry.points}</TableCell>
+   465→   465→            </TableRow>
+   466→   466→          ))}
+   467→   467→        </TableBody>
+   468→   468→      </Table>
+   469→   469→    </div>
+   470→   470→  );
+   471→   471→}
+   472→   472→
+   473→   473→function MatchRow({ match }: { match: FootballMatch }) {
+   474→   474→  const finished =
+   475→   475→    match.status === 'FINISHED' && match.score.home != null && match.score.away != null;
+   476→   476→  const date = new Date(match.utcDate);
+   477→   477→  const dateLabel = date.toLocaleDateString('en-US', {
+   478→   478→    weekday: 'short',
+   479→   479→    month: 'short',
+   480→   480→    day: 'numeric',
+   481→   481→    timeZone: 'UTC',
+   482→   482→  });
+   483→   483→  const timeLabel = date.toLocaleTimeString('en-US', {
+   484→   484→    hour: '2-digit',
+   485→   485→    minute: '2-digit',
+   486→   486→    hour12: false,
+   487→   487→    timeZone: 'UTC',
+   488→   488→  });
+   489→   489→  return (
+   490→   490→    <div className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+   491→   491→      <div className="grid min-w-0 flex-1 grid-cols-[1fr_auto_1fr] items-center gap-3">
+   492→   492→        <div className="flex min-w-0 items-center justify-end gap-2">
+   493→   493→          <span className="truncate text-right text-sm font-medium text-zinc-200">{match.home}</span>
+   494→   494→          {match.homeCrest ? (
+   495→   495→            <img src={match.homeCrest} alt="" aria-hidden loading="lazy" className="h-6 w-6 shrink-0 object-contain" />
+   496→   496→          ) : null}
+   497→   497→        </div>
+   498→   498→        <div className="w-14 text-center text-sm font-bold">
+   499→   499→          {finished ? (
+   500→   500→            <span className="text-emerald-400">
+   501→   501→              {match.score.home} – {match.score.away}
+   502→   502→            </span>
+   503→   503→          ) : (
+   504→   504→            <span className="text-zinc-500">vs</span>
+   505→   505→          )}
+   506→   506→        </div>
+   507→   507→        <div className="flex min-w-0 items-center gap-2">
+   508→   508→          {match.awayCrest ? (
+   509→   509→            <img src={match.awayCrest} alt="" aria-hidden loading="lazy" className="h-6 w-6 shrink-0 object-contain" />
+   510→   510→          ) : null}
+   511→   511→          <span className="truncate text-sm font-medium text-zinc-200">{match.away}</span>
+   512→   512→        </div>
+   513→   513→      </div>
+   514→   514→      <div className="flex items-center gap-3 sm:flex-col sm:items-end sm:gap-1">
+   515→   515→        <span className="text-xs text-zinc-500">
+   516→   516→          {dateLabel} · {timeLabel} UTC
+   517→   517→        </span>
+   518→   518→        <StatusBadge status={match.status} />
+   519→   519→      </div>
+   520→   520→    </div>
+   521→   521→  );
+   522→   522→}
+   523→   523→
+   524→   524→function StatusBadge({ status }: { status: string }) {
+   525→   525→  const meta = MATCH_STATUS[status] ?? { label: status, className: 'border-white/10 bg-white/5 text-zinc-400' };
+   526→   526→  return (
+   527→   527→    <span
+   528→   528→      className={cn(
+   529→   529→        'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider',
+   530→   530→        meta.className,
+   531→   531→      )}
+   532→   532→    >
+   533→   533→      {meta.label}
+   534→   534→    </span>
+   535→   535→  );
+   536→   536→}
+   537→   537→
+   538→   538→/* ------------------------------- F1 panel -------------------------------- */
+   539→   539→
+   540→   540→function F1Panel({
+   541→   541→  standingsRes,
+   542→   542→  scheduleRes,
+   543→   543→}: {
+   544→   544→  standingsRes: UseApiResult<{ data: F1Standing[] }>;
+   545→   545→  scheduleRes: UseApiResult<{ data: F1Race[] }>;
+   546→   546→}) {
+   547→   547→  return (
+   548→   548→    <div className="space-y-8">
+   549→   549→      <Section title="Driver standings" subtitle="The current championship battle">
+   550→   550→        {standingsRes.loading ? (
+   551→   551→          <Skeleton className="h-80 w-full rounded-xl" />
+   552→   552→        ) : standingsRes.error ? (
+   553→   553→          <ErrorState message={standingsRes.error} onRetry={standingsRes.refetch} compact />
+   554→   554→        ) : !standingsRes.data || standingsRes.data.data.length === 0 ? (
+   555→   555→          <EmptyState title="No standings yet" message="Driver standings are not available right now." />
+   556→   556→        ) : (
+   557→   557→          <div className="custom-scrollbar overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02]">
+   558→   558→            <Table className="min-w-[480px]">
+   559→   559→              <TableHeader>
+   560→   560→                <TableRow className="border-white/10 hover:bg-transparent">
+   561→   561→                  <TableHead className="w-12 text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">#</TableHead>
+   562→   562→                  <TableHead className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Driver</TableHead>
+   563→   563→                  <TableHead className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Team</TableHead>
+   564→   564→                  <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Wins</TableHead>
+   565→   565→                  <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Pts</TableHead>
+   566→   566→                </TableRow>
+   567→   567→              </TableHeader>
+   568→   568→              <TableBody>
+   569→   569→                {standingsRes.data.data.map((row) => (
+   570→   570→                  <TableRow key={row.driver} className="border-white/5 hover:bg-white/5">
+   571→   571→                    <TableCell className="text-center font-bold tabular-nums text-zinc-500">{row.position}</TableCell>
+   572→   572→                    <TableCell className="font-medium text-zinc-100">{row.driver}</TableCell>
+   573→   573→                    <TableCell className="text-zinc-400">{row.team}</TableCell>
+   574→   574→                    <TableCell className="text-center tabular-nums text-zinc-300">{row.wins}</TableCell>
+   575→   575→                    <TableCell className="text-center font-bold tabular-nums text-white">{row.points}</TableCell>
+   576→   576→                  </TableRow>
+   577→   577→                ))}
+   578→   578→              </TableBody>
+   579→   579→            </Table>
+   580→   580→          </div>
+   581→   581→        )}
+   582→   582→      </Section>
+   583→   583→
+   584→   584→      <Section title="Race calendar" subtitle="Every round of the season">
+   585→   585→        {scheduleRes.loading ? (
+   586→   586→          <Skeleton className="h-72 w-full rounded-xl" />
+   587→   587→        ) : scheduleRes.error ? (
+   588→   588→          <ErrorState message={scheduleRes.error} onRetry={scheduleRes.refetch} compact />
+   589→   589→        ) : !scheduleRes.data || scheduleRes.data.data.length === 0 ? (
+   590→   590→          <EmptyState title="No races scheduled" message="The race calendar is not available yet." />
+   591→   591→        ) : (
+   592→   592→          <div className="grid gap-3 md:grid-cols-2">
+   593→   593→            {scheduleRes.data.data.map((race) => (
+   594→   594→              <RaceCard key={`${race.round}-${race.race}`} race={race} />
+   595→   595→            ))}
+   596→   596→          </div>
+   597→   597→        )}
+   598→   598→      </Section>
+   599→   599→    </div>
+   600→   600→  );
+   601→   601→}
+   602→   602→
+   603→   603→function RaceCard({ race }: { race: F1Race }) {
+   604→   604→  const date = new Date(race.date);
+   605→   605→  const dateLabel = date.toLocaleDateString('en-US', {
+   606→   606→    weekday: 'short',
+   607→   607→    month: 'short',
+   608→   608→    day: 'numeric',
+   609→   609→    timeZone: 'UTC',
+   610→   610→  });
+   611→   611→  return (
+   612→   612→    <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[0.03] p-4 transition hover:border-rose-500/30">
+   613→   613→      <span
+   614→   614→        aria-label={`Round ${race.round}`}
+   615→   615→        className="grid h-11 w-11 shrink-0 place-items-center rounded-lg border border-rose-500/30 bg-rose-500/15 text-base font-black text-rose-300"
+   616→   616→      >
+   617→   617→        {race.round}
+   618→   618→      </span>
+   619→   619→      <div className="min-w-0 flex-1">
+   620→   620→        <p className="truncate font-semibold text-zinc-100">{race.race}</p>
+   621→   621→        <p className="mt-0.5 truncate text-xs text-zinc-500">
+   622→   622→          {[race.circuit, race.locality, race.country].filter(Boolean).join(' — ')}
+   623→   623→        </p>
+   624→   624→      </div>
+   625→   625→      <div className="shrink-0 text-right">
+   626→   626→        <p className="text-sm font-medium text-zinc-300">{dateLabel}</p>
+   627→   627→        {race.time ? <p className="text-xs text-zinc-500">{race.time.slice(0, 5)} UTC</p> : null}
+   628→   628→      </div>
+   629→   629→    </div>
+   630→   630→  );
+   631→   631→}
+   632→   632→
+   633→   633→/* ------------------------------ shared bits ------------------------------ */
+   634→   634→
+   635→   635→function FilterChip({
+   636→   636→  active,
+   637→   637→  onClick,
+   638→   638→  children,
+   639→   639→}: {
+   640→   640→  active: boolean;
+   641→   641→  onClick: () => void;
+   642→   642→  children: React.ReactNode;
+   643→   643→}) {
+   644→   644→  return (
+   645→   645→    <button
+   646→   646→      type="button"
+   647→   647→      onClick={onClick}
+   648→   648→      aria-pressed={active}
+   649→   649→      className={cn(
+   650→   650→        'rounded-full border px-4 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60',
+   651→   651→        active
+   652→   652→          ? 'border-rose-500/60 bg-rose-500/15 text-rose-300'
+   653→   653→          : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:text-white',
+   654→   654→      )}
+   655→   655→    >
+   656→   656→      {children}
+   657→   657→    </button>
+   658→   658→  );
+   659→   659→}
+   660→   660→

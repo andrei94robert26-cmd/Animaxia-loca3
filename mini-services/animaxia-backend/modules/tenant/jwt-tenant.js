@@ -3,7 +3,7 @@
  *
  * Secret model (dual-path verification, zero breakage for existing tokens):
  *   • Base secret — exactly the derivation auth.js has always used
- *     (AUTHSECRET env, else sha256('animaxia-auth:' + DATABASEURL)).
+ *     (AUTHSECRET env, else sha256('animaxia-auth:sqlite-local')).
  *   • Tenant secret — sha256(baseSecret + ':tenant:' + slug). Tokens carrying
  *     a `tenant` claim other than 'global' are signed with their tenant
  *     secret; every other token (all pre-FAZA-11 tokens, anonymous traffic,
@@ -27,7 +27,7 @@ export function baseAuthSecret() {
   if (process.env.AUTHSECRET) return process.env.AUTHSECRET;
   return crypto
     .createHash('sha256')
-    .update(`animaxia-auth:${process.env.DATABASEURL || 'local'}`)
+    .update('animaxia-auth:sqlite-local')
     .digest('hex');
 }
 

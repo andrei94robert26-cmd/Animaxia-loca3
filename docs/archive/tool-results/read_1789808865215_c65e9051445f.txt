@@ -1,0 +1,772 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * admin-search-flow-tab.tsx — FAZA 15 Search Flow Control console: live queue
+     5→ * gauges, the rolling queue-length / inflight chart (recharts via the shadcn
+     6→ * chart wrapper), the three priority lanes with the anti-starvation aging
+     7→ * policy, the 30-row per-shard attribution table and the admin runtime
+     8→ * settings form (POST /api/search/flow/settings, Bearer + admin-gated).
+     9→ * The banner keeps the FAZA 15 promise visible: searches stay 100% REAL —
+    10→ * the queue only schedules the flow towards Neon; the FTS queries themselves
+    11→ * are untouched. Public read-only data (GET /api/search/flow); auto-refreshes
+    12→ * every 2 s while visible. Deep-linked via #/admin/search-flow.
+    13→ */
+    14→
+    15→import { useEffect, useMemo, useState } from 'react';
+    16→import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+    17→import {
+    18→  Ban,
+    19→  CheckCircle2,
+    20→  Gauge as GaugeIcon,
+    21→  Hourglass,
+    22→  Layers,
+    23→  LineChart,
+    24→  Lock,
+    25→  Network,
+    26→  RefreshCw,
+    27→  Save,
+    28→  Server,
+    29→  ShieldCheck,
+    30→  SlidersHorizontal,
+    31→  TimerOff,
+    32→  TrendingUp,
+    33→  Waves,
+    34→  Zap,
+    35→} from 'lucide-react';
+    36→import { toast } from 'sonner';
+    37→import { api, BACKEND_PORT } from '@/lib/animaxia/api';
+    38→import { authRequest, PlatformError } from '@/lib/animaxia/platform';
+    39→import { useApi } from '@/lib/animaxia/hooks';
+    40→import type {
+    41→  SearchFlowConfig,
+    42→  SearchFlowControlStatus,
+    43→  SearchFlowPriorityKey,
+    44→  SearchFlowShardStats,
+    45→} from '@/lib/animaxia/types';
+    46→import { Button } from '@/components/ui/button';
+    47→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+    48→import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
+    49→import { Input } from '@/components/ui/input';
+    50→import { Label } from '@/components/ui/label';
+    51→import { Skeleton } from '@/components/ui/skeleton';
+    52→import {
+    53→  Table,
+    54→  TableBody,
+    55→  TableCell,
+    56→  TableHead,
+    57→  TableHeader,
+    58→  TableRow,
+    59→} from '@/components/ui/table';
+    60→import { cn } from '@/lib/utils';
+    61→import { useAuth } from '../auth-provider';
+    62→import { EmptyState, ErrorState } from '../states';
+    63→
+    64→/* ------------------------------- helpers --------------------------------- */
+    65→
+    66→/** Live console cadence — /api/search/flow is in-memory and fast. */
+    67→const POLL_MS = 2_000;
+    68→
+    69→const RO_NUMBER = new Intl.NumberFormat('ro-RO');
+    70→const RO_RATE = new Intl.NumberFormat('ro-RO', { maximumFractionDigits: 2 });
+    71→
+    72→function fmtRoNum(v: number | null | undefined): string {
+    73→  return RO_NUMBER.format(Number(v ?? 0));
+    74→}
+    75→
+    76→function fmtMs(v: number | null | undefined): string {
+    77→  const n = Number(v ?? 0);
+    78→  return Number.isFinite(n) && n > 0 ? `${RO_NUMBER.format(Math.round(n))} ms` : '—';
+    79→}
+    80→
+    81→/** HH:MM:SS clock label for the history X axis (samples are 1 s apart). */
+    82→function fmtClock(iso: string): string {
+    83→  const d = new Date(iso);
+    84→  if (Number.isNaN(d.getTime())) return iso;
+    85→  const p = (n: number) => String(n).padStart(2, '0');
+    86→  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    87→}
+    88→
+    89→/* ------------------------------ gauges strip ------------------------------ */
+    90→
+    91→type Tone = 'zinc' | 'emerald' | 'amber' | 'red';
+    92→
+    93→const TONE_CHIP: Record<Tone, string> = {
+    94→  zinc: 'border-white/10 bg-white/[0.04] text-zinc-300',
+    95→  emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+    96→  amber: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    97→  red: 'border-red-500/30 bg-red-500/10 text-red-300',
+    98→};
+    99→
+   100→function GaugeCard({
+   101→  icon,
+   102→  label,
+   103→  value,
+   104→  sub,
+   105→  tone = 'zinc',
+   106→}: {
+   107→  icon: React.ReactNode;
+   108→  label: string;
+   109→  value: React.ReactNode;
+   110→  sub?: React.ReactNode;
+   111→  tone?: Tone;
+   112→}) {
+   113→  return (
+   114→    <Card className="border-white/10 bg-white/[0.03]">
+   115→      <CardContent className="flex items-center gap-3 p-4">
+   116→        <span
+   117→          className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl border', TONE_CHIP[tone])}
+   118→          aria-hidden
+   119→        >
+   120→          {icon}
+   121→        </span>
+   122→        <div className="min-w-0">
+   123→          <p className="truncate text-2xl font-black leading-tight text-white">{value}</p>
+   124→          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{label}</p>
+   125→          {sub ? <p className="mt-0.5 truncate text-[11px] leading-snug text-zinc-600">{sub}</p> : null}
+   126→        </div>
+   127→      </CardContent>
+   128→    </Card>
+   129→  );
+   130→}
+   131→
+   132→/** 0-target chip: emerald „0 țintă" while the counter is 0 (the QA target),
+   133→ *  red the moment anything was actually rejected. */
+   134→function TargetValue({ value }: { value: number }) {
+   135→  return value > 0 ? (
+   136→    <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-0.5 font-mono text-base font-bold text-red-300">
+   137→      {fmtRoNum(value)}
+   138→    </span>
+   139→  ) : (
+   140→    <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-base font-bold text-emerald-300">
+   141→      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+   142→      0 țintă
+   143→    </span>
+   144→  );
+   145→}
+   146→
+   147→/* -------------------------------- chart ---------------------------------- */
+   148→
+   149→const FLOW_CHART_CONFIG = {
+   150→  coada: { label: 'În coadă', color: '#f59e0b' },
+   151→  executii: { label: 'În execuție', color: '#10b981' },
+   152→} satisfies ChartConfig;
+   153→
+   154→/* ------------------------------ priorities ------------------------------- */
+   155→
+   156→const PRIORITY_META: { key: SearchFlowPriorityKey; label: string; cls: string; card: string }[] = [
+   157→  {
+   158→    key: 'high',
+   159→    label: 'HIGH',
+   160→    cls: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+   161→    card: 'border-amber-500/30',
+   162→  },
+   163→  {
+   164→    key: 'normal',
+   165→    label: 'NORMAL',
+   166→    cls: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-300',
+   167→    card: 'border-white/10',
+   168→  },
+   169→  {
+   170→    key: 'low',
+   171→    label: 'LOW',
+   172→    cls: 'border-white/10 bg-white/[0.04] text-zinc-500',
+   173→    card: 'border-white/10 bg-white/[0.02]',
+   174→  },
+   175→];
+   176→
+   177→function PriorityCard({
+   178→  meta,
+   179→  fc,
+   180→}: {
+   181→  meta: (typeof PRIORITY_META)[number];
+   182→  fc: SearchFlowControlStatus;
+   183→}) {
+   184→  const inQueue = fc.priorities?.[meta.key] ?? 0;
+   185→  const processed = fc.processedByPriority?.[meta.key] ?? 0;
+   186→  const waitP50 = fc.waitP50ByPriority?.[meta.key] ?? 0;
+   187→  const dropped = fc.droppedByPriority?.[meta.key] ?? 0;
+   188→  const policy = fc.priorityPolicy?.[meta.key];
+   189→
+   190→  return (
+   191→    <Card className={cn('bg-white/[0.03]', meta.card)}>
+   192→      <CardHeader className="pb-2">
+   193→        <CardTitle className="flex items-center gap-2 text-sm text-zinc-200">
+   194→          <span
+   195→            className={cn(
+   196→              'rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider',
+   197→              meta.cls,
+   198→            )}
+   199→          >
+   200→            {meta.label}
+   201→          </span>
+   202→          <span className="font-mono text-lg font-black text-white">{fmtRoNum(inQueue)}</span>
+   203→          <span className="text-[11px] font-normal text-zinc-500">în coadă acum</span>
+   204→        </CardTitle>
+   205→      </CardHeader>
+   206→      <CardContent className="space-y-1.5">
+   207→        <p className="font-mono text-xs text-zinc-300">
+   208→          Procesate: <span className="text-white">{fmtRoNum(processed)}</span>
+   209→        </p>
+   210→        <p className="font-mono text-xs text-zinc-300">
+   211→          Wait p50: <span className="text-white">{fmtMs(waitP50)}</span>
+   212→        </p>
+   213→        {dropped > 0 ? (
+   214→          <p className="font-mono text-xs text-red-300">Respinse: {fmtRoNum(dropped)}</p>
+   215→        ) : null}
+   216→        {policy ? (
+   217→          <p className="border-t border-white/5 pt-1.5 text-[11px] leading-snug text-zinc-500">{policy}</p>
+   218→        ) : null}
+   219→      </CardContent>
+   220→    </Card>
+   221→  );
+   222→}
+   223→
+   224→/* ---------------------------- settings form ------------------------------ */
+   225→
+   226→const SETTINGS_FIELDS = [
+   227→  { key: 'maxConcurrent', label: 'Max concurrent', hint: '1 – 2.000', min: 1, max: 2000 },
+   228→  { key: 'intervalMs', label: 'Interval fereastră', hint: '10 – 2.000 ms', min: 10, max: 2000 },
+   229→  { key: 'batchSize', label: 'Batch size', hint: '1 – 1.000', min: 1, max: 1000 },
+   230→  { key: 'queueCap', label: 'Queue cap', hint: '100 – 500.000', min: 100, max: 500000 },
+   231→] as const;
+   232→
+   233→type SettingsKey = (typeof SETTINGS_FIELDS)[number]['key'];
+   234→type SettingsForm = Record<SettingsKey, string>;
+   235→
+   236→function FlowSettingsCard({
+   237→  config,
+   238→  isAdmin,
+   239→  onSaved,
+   240→}: {
+   241→  config: SearchFlowConfig;
+   242→  isAdmin: boolean;
+   243→  onSaved: () => void;
+   244→}) {
+   245→  const [form, setForm] = useState<SettingsForm>({
+   246→    maxConcurrent: String(config.maxConcurrent),
+   247→    intervalMs: String(config.intervalMs),
+   248→    batchSize: String(config.batchSize),
+   249→    queueCap: String(config.queueCap),
+   250→  });
+   251→  const [dirty, setDirty] = useState(false);
+   252→  const [saving, setSaving] = useState(false);
+   253→
+   254→  /* Re-sync the pre-filled inputs from the polled config while the user has
+   255→     not edited anything (and right after a successful save). */
+   256→  useEffect(() => {
+   257→    if (dirty) return;
+   258→    setForm((prev) => {
+   259→      const next: SettingsForm = {
+   260→        maxConcurrent: String(config.maxConcurrent),
+   261→        intervalMs: String(config.intervalMs),
+   262→        batchSize: String(config.batchSize),
+   263→        queueCap: String(config.queueCap),
+   264→      };
+   265→      return (Object.keys(next) as SettingsKey[]).every((k) => prev[k] === next[k]) ? prev : next;
+   266→    });
+   267→  }, [config, dirty]);
+   268→
+   269→  async function handleSave() {
+   270→    if (saving) return;
+   271→    const parsed: Record<SettingsKey, number> = {
+   272→      maxConcurrent: Number(form.maxConcurrent),
+   273→      intervalMs: Number(form.intervalMs),
+   274→      batchSize: Number(form.batchSize),
+   275→      queueCap: Number(form.queueCap),
+   276→    };
+   277→    for (const f of SETTINGS_FIELDS) {
+   278→      const v = parsed[f.key];
+   279→      if (!Number.isFinite(v) || v < f.min || v > f.max) {
+   280→        toast.error(`${f.label} trebuie să fie între ${RO_NUMBER.format(f.min)} și ${RO_NUMBER.format(f.max)}`);
+   281→        return;
+   282→      }
+   283→    }
+   284→    setSaving(true);
+   285→    try {
+   286→      await authRequest<{ ok: boolean; config: SearchFlowConfig }>(
+   287→        `/api/search/flow/settings?XTransformPort=${BACKEND_PORT}`,
+   288→        { method: 'POST', body: JSON.stringify(parsed) },
+   289→      );
+   290→      toast.success('Setări salvate');
+   291→      setDirty(false);
+   292→      onSaved();
+   293→    } catch (e) {
+   294→      if (e instanceof PlatformError && (e.status === 401 || e.status === 403)) {
+   295→        toast.error('Setările fluxului necesită cont de administrator');
+   296→      } else {
+   297→        toast.error(e instanceof Error ? e.message : 'Salvarea setărilor a eșuat');
+   298→      }
+   299→    } finally {
+   300→      setSaving(false);
+   301→    }
+   302→  }
+   303→
+   304→  return (
+   305→    <Card className="border-white/10 bg-white/[0.03]">
+   306→      <CardHeader className="pb-3">
+   307→        <CardTitle className="flex items-center gap-2 text-base">
+   308→          <ShieldCheck className="h-4 w-4 text-rose-400" aria-hidden />
+   309→          Setări runtime (administrator)
+   310→        </CardTitle>
+   311→        <CardDescription>
+   312→          Reglare live a cozii și a ferestrelor de dispatch — se aplică imediat, fără restart.
+   313→        </CardDescription>
+   314→      </CardHeader>
+   315→      <CardContent className="space-y-4">
+   316→        {isAdmin ? (
+   317→          <>
+   318→            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+   319→              {SETTINGS_FIELDS.map((f) => (
+   320→                <div key={f.key} className="space-y-1.5">
+   321→                  <Label htmlFor={`flow-setting-${f.key}`} className="text-xs text-zinc-400">
+   322→                    {f.label} <span className="font-normal text-zinc-600">({f.hint})</span>
+   323→                  </Label>
+   324→                  <Input
+   325→                    id={`flow-setting-${f.key}`}
+   326→                    type="number"
+   327→                    inputMode="numeric"
+   328→                    min={f.min}
+   329→                    max={f.max}
+   330→                    step={1}
+   331→                    value={form[f.key]}
+   332→                    onChange={(e) => {
+   333→                      setDirty(true);
+   334→                      setForm((prev) => ({ ...prev, [f.key]: e.target.value }));
+   335→                    }}
+   336→                    className="border-white/10 bg-white/[0.04] font-mono text-zinc-100"
+   337→                    aria-label={`${f.label}, interval acceptat ${f.hint}`}
+   338→                  />
+   339→                </div>
+   340→              ))}
+   341→            </div>
+   342→            <div className="flex flex-wrap items-center justify-between gap-3">
+   343→              <p className="max-w-xl text-[11px] leading-snug text-zinc-600">
+   344→                Validarea și limitarea valorilor (clamping) se fac pe server — valorile finale sunt cele
+   345→                returnate după salvare și reflectate mai sus în cardurile de configurare.
+   346→              </p>
+   347→              <Button
+   348→                size="sm"
+   349→                onClick={() => void handleSave()}
+   350→                disabled={saving || !dirty}
+   351→                className="bg-rose-600 font-bold hover:bg-rose-500"
+   352→              >
+   353→                {saving ? <RefreshCw className="animate-spin" aria-hidden /> : <Save aria-hidden />}
+   354→                Salvează
+   355→              </Button>
+   356→            </div>
+   357→          </>
+   358→        ) : (
+   359→          <p className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-2.5 text-xs text-amber-200">
+   360→            <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden />
+   361→            Setările fluxului necesită cont de administrator — valorile curente sunt read-only.
+   362→          </p>
+   363→        )}
+   364→      </CardContent>
+   365→    </Card>
+   366→  );
+   367→}
+   368→
+   369→/* -------------------------------- main tab -------------------------------- */
+   370→
+   371→export function AdminSearchFlowTab() {
+   372→  const { isAdmin, initializing } = useAuth();
+   373→  const flow = useApi('admin-search-flow', () => api.searchFlow());
+   374→
+   375→  /* Auto-refresh every 2 s while mounted (pause when the tab is hidden). */
+   376→  useEffect(() => {
+   377→    const timer = setInterval(() => {
+   378→      if (typeof document !== 'undefined' && document.hidden) return;
+   379→      void flow.refetch();
+   380→    }, POLL_MS);
+   381→    return () => clearInterval(timer);
+   382→  }, [flow.refetch]);
+   383→
+   384→  const data = flow.data;
+   385→  const fc = data?.flowControl ?? null;
+   386→  const windowing = data?.windowing ?? null;
+   387→  const config = data?.config ?? null;
+   388→  const shards = useMemo<SearchFlowShardStats[]>(
+   389→    () => [...(data?.perShard ?? [])].sort((a, b) => a.shardid - b.shardid),
+   390→    [data?.perShard],
+   391→  );
+   392→  /* Chronological history (oldest → newest) for the area chart. */
+   393→  const chartData = useMemo(
+   394→    () =>
+   395→      [...(data?.history ?? [])]
+   396→        .sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime())
+   397→        .map((p) => ({ clock: fmtClock(p.t), coada: p.queueLength, executii: p.inflight })),
+   398→    [data?.history],
+   399→  );
+   400→
+   401→  const loadingFirst = flow.loading && !data;
+   402→
+   403→  return (
+   404→    <div className="space-y-5">
+   405→      {/* Banner — the FAZA 15 promise: the queue never fakes a search. */}
+   406→      <Card className="border-emerald-500/25 bg-emerald-500/[0.04]">
+   407→        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:p-5">
+   408→          <span
+   409→            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-emerald-500/30 bg-emerald-500/10"
+   410→            aria-hidden
+   411→          >
+   412→            <Waves className="h-5 w-5 text-emerald-400" />
+   413→          </span>
+   414→          <div>
+   415→            <p className="text-sm font-bold text-emerald-200">
+   416→              Controlul fluxului de căutări — căutările rămân 100% reale
+   417→            </p>
+   418→            <p className="mt-1 text-xs leading-relaxed text-zinc-400">
+   419→              Coada doar programează fluxul către Neon: interogările FTS rămân byte-identice cu FAZA 14,
+   420→              rezultatele nu se schimbă — doar admission-ul și programarea execuției sunt reglate, ca Neon
+   421→              să vadă un flux controlat pe ferestre, nu vârfuri. Priorități:{' '}
+   422→              <span className="font-semibold text-amber-300">high</span> = admin / ops / QA (header
+   423→              X-Animaxia-Priority), <span className="font-semibold text-zinc-200">normal</span> = utilizatori
+   424→              logați, <span className="text-zinc-400">low</span> = anonimi — cu îmbătrânire
+   425→              anti-înfometare: low → normal după 2 s, normal → high după 5 s.
+   426→            </p>
+   427→          </div>
+   428→        </CardContent>
+   429→      </Card>
+   430→
+   431→      {/* Toolbar: live pulse + manual refresh */}
+   432→      <div className="flex flex-wrap items-center justify-between gap-3">
+   433→        <p className="flex items-center gap-2 text-xs text-zinc-500" aria-live="off">
+   434→          <span className="relative flex h-2 w-2" aria-hidden>
+   435→            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+   436→            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+   437→          </span>
+   438→          Consolă live — auto-refresh la 2 s
+   439→        </p>
+   440→        <Button
+   441→          variant="outline"
+   442→          size="sm"
+   443→          onClick={() => flow.refetch()}
+   444→          aria-label="Reîmprospătează starea fluxului de căutare"
+   445→          className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   446→        >
+   447→          {flow.loading ? <RefreshCw className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+   448→          Refresh
+   449→        </Button>
+   450→      </div>
+   451→
+   452→      {/* Live gauges */}
+   453→      {loadingFirst ? (
+   454→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   455→          {Array.from({ length: 7 }).map((_, i) => (
+   456→            <Skeleton key={i} className="h-[92px] rounded-xl" />
+   457→          ))}
+   458→        </div>
+   459→      ) : flow.error && !data ? (
+   460→        <ErrorState message={flow.error} onRetry={flow.refetch} compact />
+   461→      ) : fc ? (
+   462→        <section aria-label="Indicatori live ai cozii de căutare" className="space-y-3">
+   463→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   464→            <GaugeCard
+   465→              icon={<Hourglass className="h-5 w-5" aria-hidden />}
+   466→              label="Coadă"
+   467→              value={fmtRoNum(fc.queueLength)}
+   468→              tone={fc.queueLength > 0 ? 'amber' : 'zinc'}
+   469→              sub={`capacitate ${fmtRoNum(fc.queueCap)}`}
+   470→            />
+   471→            <GaugeCard
+   472→              icon={<Zap className="h-5 w-5" aria-hidden />}
+   473→              label="În execuție"
+   474→              value={
+   475→                <>
+   476→                  {fmtRoNum(fc.inflight)}
+   477→                  <span className="text-sm font-bold text-zinc-500"> / {fmtRoNum(fc.maxConcurrent)}</span>
+   478→                </>
+   479→              }
+   480→              tone={fc.inflight > 0 ? 'amber' : 'zinc'}
+   481→              sub={`max observat ${fmtRoNum(fc.maxInflightSeen)} simultan`}
+   482→            />
+   483→            <GaugeCard
+   484→              icon={<Ban className="h-5 w-5" aria-hidden />}
+   485→              label="Respinate"
+   486→              value={<TargetValue value={fc.dropped} />}
+   487→              tone={fc.dropped > 0 ? 'red' : 'emerald'}
+   488→              sub="coadă plină → 503 explicit"
+   489→            />
+   490→            <GaugeCard
+   491→              icon={<TimerOff className="h-5 w-5" aria-hidden />}
+   492→              label="Expirate"
+   493→              value={<TargetValue value={fc.timedOut} />}
+   494→              tone={fc.timedOut > 0 ? 'red' : 'emerald'}
+   495→              sub={`wait > ${fmtRoNum(fc.maxWaitMs)} ms → 504`}
+   496→            />
+   497→            <GaugeCard
+   498→              icon={<CheckCircle2 className="h-5 w-5" aria-hidden />}
+   499→              label="Procesate"
+   500→              value={fmtRoNum(fc.processed)}
+   501→              tone="emerald"
+   502→              sub={`rată ${RO_RATE.format(fc.processingRate)} / s`}
+   503→            />
+   504→            <GaugeCard
+   505→              icon={<GaugeIcon className="h-5 w-5" aria-hidden />}
+   506→              label="Wait p50 / p95"
+   507→              value={
+   508→                <>
+   509→                  {fmtRoNum(Math.round(fc.waitP50Ms))}
+   510→                  <span className="text-sm font-bold text-zinc-500"> / {fmtRoNum(Math.round(fc.waitP95Ms))}</span>
+   511→                </>
+   512→              }
+   513→              sub="timp de așteptare în coadă (ms)"
+   514→            />
+   515→            <GaugeCard
+   516→              icon={<TrendingUp className="h-5 w-5" aria-hidden />}
+   517→              label="Queue high-water"
+   518→              value={fmtRoNum(fc.queueHighWater)}
+   519→              tone={fc.queueHighWater > 0 ? 'amber' : 'zinc'}
+   520→              sub="maximul istoric al cozii"
+   521→            />
+   522→          </div>
+   523→          {windowing ? (
+   524→            <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 font-mono text-[11px] text-zinc-400">
+   525→              <span className="font-sans text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+   526→                Windowing
+   527→              </span>
+   528→              <span>
+   529→                {fmtRoNum(windowing.windowsFired)} <span className="text-zinc-600">ferestre declanșate</span>
+   530→              </span>
+   531→              <span>
+   532→                {fmtRoNum(windowing.windowDispatches)} <span className="text-zinc-600">dispatch-uri</span>
+   533→              </span>
+   534→              <span>
+   535→                medie {RO_RATE.format(windowing.avgBatchSize)} <span className="text-zinc-600">intrări / fereastră</span>
+   536→              </span>
+   537→              <span>
+   538→                max {fmtRoNum(windowing.maxDispatchPerWindow)} <span className="text-zinc-600">/ fereastră</span>
+   539→              </span>
+   540→            </p>
+   541→          ) : null}
+   542→        </section>
+   543→      ) : null}
+   544→
+   545→      {/* Config cards */}
+   546→      {config ? (
+   547→        <section aria-label="Configurația fluxului de căutare" className="space-y-3">
+   548→          <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   549→            <SlidersHorizontal className="h-4 w-4 text-rose-400" aria-hidden />
+   550→            Configurație activă
+   551→          </h3>
+   552→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+   553→            {[
+   554→              { label: 'Max concurrent', value: fmtRoNum(config.maxConcurrent), sub: 'execuții simultane admise' },
+   555→              { label: 'Interval fereastră', value: `${fmtRoNum(config.intervalMs)} ms`, sub: 'cadența timerului de dispatch' },
+   556→              { label: 'Batch size', value: fmtRoNum(config.batchSize), sub: 'intrări noi per fereastră' },
+   557→              { label: 'Queue cap', value: fmtRoNum(config.queueCap), sub: 'peste → 503 explicit' },
+   558→              { label: 'Max wait', value: `${fmtRoNum(config.maxWaitMs)} ms`, sub: 'peste → 504 explicit' },
+   559→            ].map((c) => (
+   560→              <Card key={c.label} className="border-white/10 bg-white/[0.03]">
+   561→                <CardContent className="p-4">
+   562→                  <p className="text-lg font-black leading-tight text-white">{c.value}</p>
+   563→                  <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{c.label}</p>
+   564→                  <p className="mt-1 text-[11px] leading-snug text-zinc-600">{c.sub}</p>
+   565→                </CardContent>
+   566→              </Card>
+   567→            ))}
+   568→          </div>
+   569→        </section>
+   570→      ) : null}
+   571→
+   572→      {/* Chart: queue length + inflight over the rolling history */}
+   573→      <section aria-label="Istoricul cozii de căutare">
+   574→        <Card className="border-white/10 bg-white/[0.03]">
+   575→          <CardHeader className="pb-2">
+   576→            <CardTitle className="flex items-center gap-2 text-base">
+   577→              <LineChart className="h-4 w-4 text-rose-400" aria-hidden />
+   578→              Lungime coadă &amp; execuții (ultimele 3 minute)
+   579→            </CardTitle>
+   580→            <CardDescription>
+   581→              180 eșantioane de 1 s — în coadă (amber) și în execuție (emerald).
+   582→            </CardDescription>
+   583→          </CardHeader>
+   584→          <CardContent>
+   585→            {loadingFirst ? (
+   586→              <Skeleton className="h-56 w-full rounded-xl sm:h-64" />
+   587→            ) : chartData.length === 0 ? (
+   588→              <EmptyState
+   589→                title="Fără activitate încă"
+   590→                message="Istoricul se populează odată cu primele căutări trecute prin coadă."
+   591→              />
+   592→            ) : (
+   593→              <ChartContainer config={FLOW_CHART_CONFIG} className="h-56 w-full sm:h-64">
+   594→                <AreaChart data={chartData} margin={{ left: 4, right: 8, top: 8, bottom: 0 }}>
+   595→                  <defs>
+   596→                    <linearGradient id="fillFlowQueue" x1="0" y1="0" x2="0" y2="1">
+   597→                      <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.45} />
+   598→                      <stop offset="95%" stopColor="#f59e0b" stopOpacity={0.02} />
+   599→                    </linearGradient>
+   600→                    <linearGradient id="fillFlowInflight" x1="0" y1="0" x2="0" y2="1">
+   601→                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.45} />
+   602→                      <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+   603→                    </linearGradient>
+   604→                  </defs>
+   605→                  <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.08)" />
+   606→                  <XAxis
+   607→                    dataKey="clock"
+   608→                    tickLine={false}
+   609→                    axisLine={false}
+   610→                    minTickGap={32}
+   611→                    tick={{ fill: '#71717a', fontSize: 11 }}
+   612→                  />
+   613→                  <YAxis
+   614→                    allowDecimals={false}
+   615→                    tickLine={false}
+   616→                    axisLine={false}
+   617→                    width={30}
+   618→                    tick={{ fill: '#71717a', fontSize: 11 }}
+   619→                  />
+   620→                  <ChartTooltip
+   621→                    cursor={{ stroke: 'rgba(245,158,11,0.35)' }}
+   622→                    content={
+   623→                      <ChartTooltipContent
+   624→                        className="border-white/10 bg-[#1a1a24] text-zinc-200"
+   625→                        indicator="line"
+   626→                      />
+   627→                    }
+   628→                  />
+   629→                  <Area
+   630→                    dataKey="coada"
+   631→                    type="monotone"
+   632→                    stroke="#f59e0b"
+   633→                    strokeWidth={2}
+   634→                    fill="url(#fillFlowQueue)"
+   635→                    dot={false}
+   636→                    activeDot={{ r: 4, fill: '#f59e0b' }}
+   637→                  />
+   638→                  <Area
+   639→                    dataKey="executii"
+   640→                    type="monotone"
+   641→                    stroke="#10b981"
+   642→                    strokeWidth={2}
+   643→                    fill="url(#fillFlowInflight)"
+   644→                    dot={false}
+   645→                    activeDot={{ r: 4, fill: '#10b981' }}
+   646→                  />
+   647→                </AreaChart>
+   648→              </ChartContainer>
+   649→            )}
+   650→          </CardContent>
+   651→        </Card>
+   652→      </section>
+   653→
+   654→      {/* Priorities */}
+   655→      {fc ? (
+   656→        <section aria-label="Prioritățile cozii de căutare" className="space-y-3">
+   657→          <div className="flex flex-wrap items-center justify-between gap-3">
+   658→            <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   659→              <Layers className="h-4 w-4 text-rose-400" aria-hidden />
+   660→              Priorități
+   661→            </h3>
+   662→            {fc.priorityPolicy?.aging ? (
+   663→              <span
+   664→                title="Anti-starvation: intrările vechi sunt promovate automat"
+   665→                className="rounded-full border border-white/10 bg-white/5 px-2.5 py-0.5 font-mono text-[10px] text-zinc-400"
+   666→              >
+   667→                aging: {fc.priorityPolicy.aging}
+   668→              </span>
+   669→            ) : null}
+   670→          </div>
+   671→          <div className="grid gap-3 md:grid-cols-3">
+   672→            {PRIORITY_META.map((meta) => (
+   673→              <PriorityCard key={meta.key} meta={meta} fc={fc} />
+   674→            ))}
+   675→          </div>
+   676→        </section>
+   677→      ) : null}
+   678→
+   679→      {/* Per-shard attribution */}
+   680→      {loadingFirst ? (
+   681→        <div className="space-y-2">
+   682→          {Array.from({ length: 4 }).map((_, i) => (
+   683→            <Skeleton key={i} className="h-12 w-full rounded-xl" />
+   684→          ))}
+   685→        </div>
+   686→      ) : flow.error && !data ? (
+   687→        <ErrorState message={flow.error} onRetry={flow.refetch} compact />
+   688→      ) : shards.length === 0 ? (
+   689→        <EmptyState
+   690→          title="Fără sharduri"
+   691→          message="Backend-ul nu a raportat încă atribuiri per-shard pentru fluxul de căutare."
+   692→        />
+   693→      ) : (
+   694→        <section aria-label="Atribuirea fluxului de căutare pe sharduri" className="space-y-3">
+   695→          <div className="flex flex-wrap items-center justify-between gap-3">
+   696→            <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   697→              <Network className="h-4 w-4 text-rose-400" aria-hidden />
+   698→              Atribuire pe sharduri ({shards.length})
+   699→            </h3>
+   700→            <span className="font-mono text-[11px] text-zinc-600">
+   701→              rândurile cu activitate sunt evidențiate în amber · respingerile în roșu
+   702→            </span>
+   703→          </div>
+   704→          <div className="custom-scrollbar max-h-[32rem] overflow-y-auto rounded-xl border border-white/10">
+   705→            <Table aria-label="Atribuirea cozii de căutare pe sharduri — un rând per shard logic">
+   706→              <TableHeader>
+   707→                <TableRow className="hover:bg-transparent">
+   708→                  <TableHead scope="col">Shard</TableHead>
+   709→                  <TableHead scope="col">În coadă</TableHead>
+   710→                  <TableHead scope="col">În execuție</TableHead>
+   711→                  <TableHead scope="col">Procesate</TableHead>
+   712→                  <TableHead scope="col">Respinate</TableHead>
+   713→                </TableRow>
+   714→              </TableHeader>
+   715→              <TableBody>
+   716→                {shards.map((row) => {
+   717→                  const active = row.queueLength > 0 || row.inflight > 0;
+   718→                  const failed = row.dropped > 0;
+   719→                  return (
+   720→                    <TableRow
+   721→                      key={row.shardid}
+   722→                      className={cn(
+   723→                        'hover:bg-white/[0.03]',
+   724→                        active && !failed && 'bg-amber-500/[0.06]',
+   725→                        failed && 'bg-red-500/[0.07]',
+   726→                      )}
+   727→                    >
+   728→                      <TableCell>
+   729→                        <div className="flex items-center gap-2">
+   730→                          <Server className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+   731→                          <p className="font-mono text-sm font-medium text-zinc-100">#{row.shardid}</p>
+   732→                        </div>
+   733→                      </TableCell>
+   734→                      <TableCell
+   735→                        className={cn('font-mono text-xs', row.queueLength > 0 ? 'text-amber-300' : 'text-zinc-500')}
+   736→                      >
+   737→                        {fmtRoNum(row.queueLength)}
+   738→                      </TableCell>
+   739→                      <TableCell
+   740→                        className={cn('font-mono text-xs', row.inflight > 0 ? 'text-amber-300' : 'text-zinc-500')}
+   741→                      >
+   742→                        {fmtRoNum(row.inflight)}
+   743→                      </TableCell>
+   744→                      <TableCell className="font-mono text-xs text-zinc-300">{fmtRoNum(row.processed)}</TableCell>
+   745→                      <TableCell
+   746→                        className={cn('font-mono text-xs', row.dropped > 0 ? 'text-red-300' : 'text-zinc-600')}
+   747→                      >
+   748→                        {fmtRoNum(row.dropped)}
+   749→                      </TableCell>
+   750→                    </TableRow>
+   751→                  );
+   752→                })}
+   753→              </TableBody>
+   754→            </Table>
+   755→          </div>
+   756→        </section>
+   757→      )}
+   758→
+   759→      {/* Settings (admin only) */}
+   760→      {config ? (
+   761→        <FlowSettingsCard
+   762→          config={config}
+   763→          isAdmin={!initializing && isAdmin}
+   764→          onSaved={() => void flow.refetch()}
+   765→        />
+   766→      ) : loadingFirst ? (
+   767→        <Skeleton className="h-56 w-full rounded-xl" />
+   768→      ) : null}
+   769→    </div>
+   770→  );
+   771→}
+   772→

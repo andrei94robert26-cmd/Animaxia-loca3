@@ -1,0 +1,126 @@
+{{/* =============================================================================
+One Deployment per entry in .Values.services (skipping enabled: false).
+
+Service/Deployment names are FIXED ("<key>-service") to match the in-cluster
+DNS names used by env.config *SERVICEURL entries.
+============================================================================= */}}
+{{- range $key, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $svcName := include "animaxia.serviceName" (dict "root" $ "key" $key "service" $svc) }}
+{{- $mountData := and $.Values.persistence.enabled $svc.dataMountPath }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $svcName }}
+  namespace: {{ include "animaxia.namespace" $ }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" $ "serviceName" $svcName "component" $key) | nindent 4 }}
+    {{- with $svc.role }}
+    role: {{ . }}
+    {{- end }}
+spec:
+  {{- if not $.Values.autoscaling.enabled }}
+  # autoscaling disabled — replicas is authoritative
+  replicas: {{ $svc.replicas | default 2 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "animaxia.selectorLabels" (dict "root" $ "serviceName" $svcName) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "animaxia.selectorLabels" (dict "root" $ "serviceName" $svcName) | nindent 8 }}
+        app.kubernetes.io/part-of: animaxia-cloud
+        app.kubernetes.io/component: {{ $key }}
+        {{- with $svc.role }}
+        role: {{ . }}
+        {{- end }}
+      annotations:
+        {{- include "animaxia.podAnnotations" (dict "root" $ "service" $svc) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "animaxia.serviceAccountName" $ }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $.Values.securityContext | nindent 8 }}
+      {{- if $mountData }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "animaxia.pvcName" $ }}
+      {{- end }}
+      containers:
+        - name: {{ $svcName }}
+          image: {{ include "animaxia.image" (dict "root" $ "key" $key "service" $svc) }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $svc.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ $svc.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "animaxia.configMapName" $ }}
+            - secretRef:
+                name: {{ include "animaxia.secretName" $ }}
+          env:
+            - name: PORT
+              value: {{ $svc.port | quote }}
+            - name: SERVICENAME
+              value: {{ $svcName | quote }}
+            {{- if $mountData }}
+            - name: LOCALDATADIR
+              value: {{ $svc.dataMountPath | quote }}
+            {{- end }}
+            {{- with $.Values.observability.otelEndpoint }}
+            - name: OTELSENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml ($svc.resources | default dict) | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          {{- if $mountData }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ $svc.dataMountPath }}
+          {{- end }}
+      {{- with $svc.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $svc.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $svc.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,11 @@
+{
+  "name": "animaxia-global-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia global gateway (FAZA 22) — multi-region routing + distributed perimeter layers (anti-spam, rate-limit, cooldown, cache) backed by Redis. Local runnable equivalent of the production Cloudflare edge geo-routing. The protected backend (FAZA 18/20/21) is never modified.",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  }
+}

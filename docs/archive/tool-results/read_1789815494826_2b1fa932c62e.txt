@@ -1,0 +1,824 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * admin-search-opt-tab.tsx — FAZA 17 Search Optimization Layer console: live
+     5→ * gauges (active batches, batch hits, cache hits/misses, dedup total, REAL
+     6→ * Neon FTS queries, the ×N reduction factor), the money chart „Cereri vs
+     7→ * Interogări Neon" (recharts via the shadcn chart wrapper — the visual proof
+     8→ * of the 100×–1000× reduction), the 10-stage pipeline visualization, the
+     9→ * active configuration cards (cache TTL 1–5 s, capacity bounds), the live
+    10→ * in-flight batch list, the 30-row per-shard attribution table (served /
+    11→ * cache / batch / Neon per shard) and the admin runtime settings form
+    12→ * (POST /api/search/opt/settings, Bearer + admin-gated). The banner keeps
+    13→ * the FAZA 17 promise visible: identical requests share ONE real Neon query
+    14→ * and every served result is the EXACT output of a real execution — nothing
+    15→ * fabricated, nothing stale beyond the pinned TTL. Public read-only data
+    16→ * (GET /api/search/opt); auto-refreshes every 2 s while visible.
+    17→ * Deep-linked via #/admin/search-opt.
+    18→ */
+    19→
+    20→import { useEffect, useMemo, useState } from 'react';
+    21→import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+    22→import {
+    23→  ArrowRight,
+    24→  Boxes,
+    25→  CheckCircle2,
+    26→  Database,
+    27→  Gauge,
+    28→  Layers,
+    29→  LineChart,
+    30→  Lock,
+    31→  RefreshCw,
+    32→  Save,
+    33→  Server,
+    34→  ShieldCheck,
+    35→  SlidersHorizontal,
+    36→  TrendingDown,
+    37→  Zap,
+    38→} from 'lucide-react';
+    39→import { toast } from 'sonner';
+    40→import { api, BACKEND_PORT } from '@/lib/animaxia/api';
+    41→import { authRequest, PlatformError } from '@/lib/animaxia/platform';
+    42→import { useApi } from '@/lib/animaxia/hooks';
+    43→import type { SearchOptConfig, SearchOptShardStats } from '@/lib/animaxia/types';
+    44→import { Button } from '@/components/ui/button';
+    45→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+    46→import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
+    47→import { Input } from '@/components/ui/input';
+    48→import { Label } from '@/components/ui/label';
+    49→import { Skeleton } from '@/components/ui/skeleton';
+    50→import { Switch } from '@/components/ui/switch';
+    51→import {
+    52→  Table,
+    53→  TableBody,
+    54→  TableCell,
+    55→  TableHead,
+    56→  TableHeader,
+    57→  TableRow,
+    58→} from '@/components/ui/table';
+    59→import { cn } from '@/lib/utils';
+    60→import { useAuth } from '../auth-provider';
+    61→import { EmptyState, ErrorState } from '../states';
+    62→
+    63→/* ------------------------------- helpers --------------------------------- */
+    64→
+    65→/** Live console cadence — /api/search/opt is in-memory and fast. */
+    66→const POLL_MS = 2_000;
+    67→
+    68→const RO_NUMBER = new Intl.NumberFormat('ro-RO');
+    69→const RO_RATE = new Intl.NumberFormat('ro-RO', { maximumFractionDigits: 2 });
+    70→
+    71→function fmtRoNum(v: number | null | undefined): string {
+    72→  return RO_NUMBER.format(Number(v ?? 0));
+    73→}
+    74→
+    75→function fmtMs(v: number | null | undefined): string {
+    76→  const n = Number(v ?? 0);
+    77→  return Number.isFinite(n) && n > 0 ? `${RO_NUMBER.format(Math.round(n))} ms` : '—';
+    78→}
+    79→
+    80→function fmtFactor(v: number | null | undefined): string {
+    81→  const n = Number(v ?? 0);
+    82→  return Number.isFinite(n) && n >= 1 ? `${RO_RATE.format(n)}×` : '—';
+    83→}
+    84→
+    85→/** HH:MM:SS clock label for the history X axis (samples are 1 s apart). */
+    86→function fmtClock(iso: string): string {
+    87→  const d = new Date(iso);
+    88→  if (Number.isNaN(d.getTime())) return iso;
+    89→  const p = (n: number) => String(n).padStart(2, '0');
+    90→  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    91→}
+    92→
+    93→/* ------------------------------ gauges strip ------------------------------ */
+    94→
+    95→type Tone = 'zinc' | 'emerald' | 'amber' | 'red';
+    96→
+    97→const TONE_CHIP: Record<Tone, string> = {
+    98→  zinc: 'border-white/10 bg-white/[0.04] text-zinc-300',
+    99→  emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+   100→  amber: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+   101→  red: 'border-red-500/30 bg-red-500/10 text-red-300',
+   102→};
+   103→
+   104→function GaugeCard({
+   105→  icon,
+   106→  label,
+   107→  value,
+   108→  sub,
+   109→  tone = 'zinc',
+   110→}: {
+   111→  icon: React.ReactNode;
+   112→  label: string;
+   113→  value: React.ReactNode;
+   114→  sub?: React.ReactNode;
+   115→  tone?: Tone;
+   116→}) {
+   117→  return (
+   118→    <Card className="border-white/10 bg-white/[0.03]">
+   119→      <CardContent className="flex items-center gap-3 p-4">
+   120→        <span
+   121→          className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl border', TONE_CHIP[tone])}
+   122→          aria-hidden
+   123→        >
+   124→          {icon}
+   125→        </span>
+   126→        <div className="min-w-0">
+   127→          <p className="truncate text-2xl font-black leading-tight text-white">{value}</p>
+   128→          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{label}</p>
+   129→          {sub ? <p className="mt-0.5 truncate text-[11px] leading-snug text-zinc-600">{sub}</p> : null}
+   130→        </div>
+   131→      </CardContent>
+   132→    </Card>
+   133→  );
+   134→}
+   135→
+   136→/* -------------------------------- pipeline -------------------------------- */
+   137→
+   138→/** The 10-stage pinned pipeline — labels + owning phase + short descriptions.
+   139→ *  The stage list itself is data-driven from the console `pipeline` array. */
+   140→const PIPELINE_META: Record<string, { label: string; phase: string; hint: string }> = {
+   141→  antiSpam: { label: 'Anti-Spam', phase: 'FAZA 16', hint: 'flood ≥3 / 200ms → auto-block' },
+   142→  rateLimit: { label: 'Rate-Limit', phase: 'FAZA 16', hint: '1 căutare / 500ms / utilizator' },
+   143→  cooldown: { label: 'Cooldown', phase: 'FAZA 16', hint: '1200ms după rezultat' },
+   144→  queue: { label: 'Queue', phase: 'FAZA 15', hint: 'admission — 503/504 explicite' },
+   145→  priority: { label: 'Priority', phase: 'FAZA 15', hint: 'high → normal → low' },
+   146→  windowing: { label: 'Windowing', phase: 'FAZA 15', hint: '80ms × batch 80' },
+   147→  dedup: { label: 'Dedup', phase: 'FAZA 17', hint: 'cereri identice = 1 logică' },
+   148→  batching: { label: 'Batching', phase: 'FAZA 17', hint: 'atașare la execuția în curs' },
+   149→  cache: { label: 'Cache', phase: 'FAZA 17', hint: 'rezultate reale, TTL 1–5s' },
+   150→  fts: { label: 'Neon FTS', phase: 'REAL', hint: 'căutarea 100% reală' },
+   151→};
+   152→
+   153→function PipelineStrip({ stages }: { stages: string[] }) {
+   154→  return (
+   155→    <Card className="border-white/10 bg-white/[0.03]">
+   156→      <CardHeader className="pb-2">
+   157→        <CardTitle className="flex items-center gap-2 text-base">
+   158→          <Layers className="h-4 w-4 text-emerald-400" aria-hidden />
+   159→          Pipeline-ul căutării ({stages.length} etape)
+   160→        </CardTitle>
+   161→        <CardDescription>
+   162→          Ordinea deterministă pe care o parcurge fiecare căutare — expusă identic în{' '}
+   163→          <span className="font-mono text-[11px]">/api/search/status → pipeline</span>.
+   164→        </CardDescription>
+   165→      </CardHeader>
+   166→      <CardContent>
+   167→        <ol className="flex list-none flex-wrap items-stretch gap-2">
+   168→          {stages.map((stage, i) => {
+   169→            const meta = PIPELINE_META[stage] ?? { label: stage, phase: '—', hint: '' };
+   170→            const isReal = stage === 'fts';
+   171→            const is17 = meta.phase === 'FAZA 17';
+   172→            return (
+   173→              <li key={stage} className="flex items-center gap-2">
+   174→                <div
+   175→                  className={cn(
+   176→                    'min-w-[7.5rem] rounded-xl border px-3 py-2',
+   177→                    isReal && 'border-emerald-500/40 bg-emerald-500/[0.08]',
+   178→                    is17 && !isReal && 'border-teal-500/30 bg-teal-500/[0.06]',
+   179→                    !isReal && !is17 && 'border-white/10 bg-white/[0.03]',
+   180→                  )}
+   181→                  title={meta.hint}
+   182→                >
+   183→                  <p className="flex items-baseline gap-1.5">
+   184→                    <span className="font-mono text-[10px] text-zinc-600">{i + 1}.</span>
+   185→                    <span className={cn('text-xs font-bold', isReal ? 'text-emerald-300' : 'text-zinc-100')}>
+   186→                      {meta.label}
+   187→                    </span>
+   188→                  </p>
+   189→                  <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+   190→                    {meta.phase}
+   191→                  </p>
+   192→                  <p className="mt-0.5 hidden text-[10px] leading-snug text-zinc-500 sm:block">{meta.hint}</p>
+   193→                </div>
+   194→                {i < stages.length - 1 ? (
+   195→                  <ArrowRight className="h-3.5 w-3.5 shrink-0 text-zinc-700" aria-hidden />
+   196→                ) : null}
+   197→              </li>
+   198→            );
+   199→          })}
+   200→        </ol>
+   201→      </CardContent>
+   202→    </Card>
+   203→  );
+   204→}
+   205→
+   206→/* -------------------------------- chart ---------------------------------- */
+   207→
+   208→const OPT_CHART_CONFIG = {
+   209→  cereri: { label: 'Cereri servite', color: '#10b981' },
+   210→  neon: { label: 'Interogări Neon reale', color: '#f43f5e' },
+   211→} satisfies ChartConfig;
+   212→
+   213→/* ---------------------------- settings form ------------------------------ */
+   214→
+   215→const SETTINGS_FIELDS = [
+   216→  { key: 'cacheTtlMs', label: 'Cache TTL', hint: '1.000 – 5.000 ms', min: 1000, max: 5000 },
+   217→  { key: 'cacheMax', label: 'Intrări cache max', hint: '100 – 100.000', min: 100, max: 100000 },
+   218→  { key: 'batchMax', label: 'Batch-uri max', hint: '100 – 50.000', min: 100, max: 50000 },
+   219→] as const;
+   220→
+   221→type SettingsKey = (typeof SETTINGS_FIELDS)[number]['key'];
+   222→type SettingsForm = Record<SettingsKey, string>;
+   223→
+   224→function OptSettingsCard({
+   225→  config,
+   226→  isAdmin,
+   227→  onSaved,
+   228→}: {
+   229→  config: SearchOptConfig;
+   230→  isAdmin: boolean;
+   231→  onSaved: () => void;
+   232→}) {
+   233→  const [form, setForm] = useState<SettingsForm>({
+   234→    cacheTtlMs: String(config.cacheTtlMs),
+   235→    cacheMax: String(config.cacheMax),
+   236→    batchMax: String(config.batchMax),
+   237→  });
+   238→  const [enabled, setEnabled] = useState<boolean>(config.enabled);
+   239→  const [dirty, setDirty] = useState(false);
+   240→  const [saving, setSaving] = useState(false);
+   241→
+   242→  /* Re-sync the pre-filled inputs from the polled config while the user has
+   243→     not edited anything (and right after a successful save). */
+   244→  useEffect(() => {
+   245→    if (dirty) return;
+   246→    setForm((prev) => {
+   247→      const next: SettingsForm = {
+   248→        cacheTtlMs: String(config.cacheTtlMs),
+   249→        cacheMax: String(config.cacheMax),
+   250→        batchMax: String(config.batchMax),
+   251→      };
+   252→      return (Object.keys(next) as SettingsKey[]).every((k) => prev[k] === next[k]) ? prev : next;
+   253→    });
+   254→    setEnabled((prev) => (prev === config.enabled ? prev : config.enabled));
+   255→  }, [config, dirty]);
+   256→
+   257→  async function handleSave() {
+   258→    if (saving) return;
+   259→    const parsed: Record<SettingsKey, number> = {
+   260→      cacheTtlMs: Number(form.cacheTtlMs),
+   261→      cacheMax: Number(form.cacheMax),
+   262→      batchMax: Number(form.batchMax),
+   263→    };
+   264→    for (const f of SETTINGS_FIELDS) {
+   265→      const v = parsed[f.key];
+   266→      if (!Number.isFinite(v) || v < f.min || v > f.max) {
+   267→        toast.error(`${f.label} trebuie să fie între ${RO_NUMBER.format(f.min)} și ${RO_NUMBER.format(f.max)}`);
+   268→        return;
+   269→      }
+   270→    }
+   271→    setSaving(true);
+   272→    try {
+   273→      await authRequest<{ ok: boolean; config: SearchOptConfig }>(
+   274→        `/api/search/opt/settings?XTransformPort=${BACKEND_PORT}`,
+   275→        { method: 'POST', body: JSON.stringify({ ...parsed, enabled }) },
+   276→      );
+   277→      toast.success('Setări salvate');
+   278→      setDirty(false);
+   279→      onSaved();
+   280→    } catch (e) {
+   281→      if (e instanceof PlatformError && (e.status === 401 || e.status === 403)) {
+   282→        toast.error('Setările de optimizare necesită cont de administrator');
+   283→      } else {
+   284→        toast.error(e instanceof Error ? e.message : 'Salvarea setărilor a eșuat');
+   285→      }
+   286→    } finally {
+   287→      setSaving(false);
+   288→    }
+   289→  }
+   290→
+   291→  return (
+   292→    <Card className="border-white/10 bg-white/[0.03]">
+   293→      <CardHeader className="pb-3">
+   294→        <CardTitle className="flex items-center gap-2 text-base">
+   295→          <ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden />
+   296→          Setări runtime (administrator)
+   297→        </CardTitle>
+   298→        <CardDescription>
+   299→          Reglare live a stratului de optimizare — se aplică imediat, fără restart.
+   300→        </CardDescription>
+   301→      </CardHeader>
+   302→      <CardContent className="space-y-4">
+   303→        {isAdmin ? (
+   304→          <>
+   305→            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3">
+   306→              <div>
+   307→                <p className="text-xs font-semibold text-zinc-200">Stratul de optimizare</p>
+   308→                <p className="mt-0.5 text-[11px] leading-snug text-zinc-600">
+   309→                  {enabled
+   310→                    ? 'Dedup + batching + cache ACTIVE — cererile identice partajează interogări reale.'
+   311→                    : 'DEZACTIVAT — fiecare cerere execută propriul FTS (comportament FAZA 16).'}
+   312→                </p>
+   313→              </div>
+   314→              <div className="flex items-center gap-2">
+   315→                <Switch
+   316→                  id="opt-enabled"
+   317→                  checked={enabled}
+   318→                  onCheckedChange={(v) => {
+   319→                    setDirty(true);
+   320→                    setEnabled(v);
+   321→                  }}
+   322→                  aria-label="Activează stratul de optimizare a căutării"
+   323→                />
+   324→                <Label htmlFor="opt-enabled" className="text-xs text-zinc-400">
+   325→                  {enabled ? 'Activ' : 'Dezactivat'}
+   326→                </Label>
+   327→              </div>
+   328→            </div>
+   329→            <div className="grid gap-3 sm:grid-cols-3">
+   330→              {SETTINGS_FIELDS.map((f) => (
+   331→                <div key={f.key} className="space-y-1.5">
+   332→                  <Label htmlFor={`opt-setting-${f.key}`} className="text-xs text-zinc-400">
+   333→                    {f.label} <span className="font-normal text-zinc-600">({f.hint})</span>
+   334→                  </Label>
+   335→                  <Input
+   336→                    id={`opt-setting-${f.key}`}
+   337→                    type="number"
+   338→                    inputMode="numeric"
+   339→                    min={f.min}
+   340→                    max={f.max}
+   341→                    step={1}
+   342→                    value={form[f.key]}
+   343→                    onChange={(e) => {
+   344→                      setDirty(true);
+   345→                      setForm((prev) => ({ ...prev, [f.key]: e.target.value }));
+   346→                    }}
+   347→                    className="border-white/10 bg-white/[0.04] font-mono text-zinc-100"
+   348→                    aria-label={`${f.label}, interval acceptat ${f.hint}`}
+   349→                  />
+   350→                </div>
+   351→              ))}
+   352→            </div>
+   353→            <div className="flex flex-wrap items-center justify-between gap-3">
+   354→              <p className="max-w-xl text-[11px] leading-snug text-zinc-600">
+   355→                Validarea și limitarea valorilor (clamping) se fac pe server — TTL-ul rămâne în plaja
+   356→                pinned 1.000–5.000 ms din specificația FAZA 17.
+   357→              </p>
+   358→              <Button
+   359→                size="sm"
+   360→                onClick={() => void handleSave()}
+   361→                disabled={saving || !dirty}
+   362→                className="bg-emerald-600 font-bold hover:bg-emerald-500"
+   363→              >
+   364→                {saving ? <RefreshCw className="animate-spin" aria-hidden /> : <Save aria-hidden />}
+   365→                Salvează
+   366→              </Button>
+   367→            </div>
+   368→          </>
+   369→        ) : (
+   370→          <p className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-2.5 text-xs text-amber-200">
+   371→            <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden />
+   372→            Setările de optimizare necesită cont de administrator — valorile curente sunt read-only.
+   373→          </p>
+   374→        )}
+   375→      </CardContent>
+   376→    </Card>
+   377→  );
+   378→}
+   379→
+   380→/* -------------------------------- main tab -------------------------------- */
+   381→
+   382→export function AdminSearchOptTab() {
+   383→  const { isAdmin, initializing } = useAuth();
+   384→  const opt = useApi('admin-search-opt', () => api.searchOpt());
+   385→
+   386→  /* Auto-refresh every 2 s while mounted (pause when the tab is hidden). */
+   387→  useEffect(() => {
+   388→    const timer = setInterval(() => {
+   389→      if (typeof document !== 'undefined' && document.hidden) return;
+   390→      void opt.refetch();
+   391→    }, POLL_MS);
+   392→    return () => clearInterval(timer);
+   393→  }, [opt.refetch]);
+   394→
+   395→  const data = opt.data;
+   396→  const batching = data?.batching ?? null;
+   397→  const cache = data?.cache ?? null;
+   398→  const dedup = data?.dedup ?? null;
+   399→  const config = data?.config ?? null;
+   400→  const counters = data?.counters ?? null;
+   401→  const pipeline = data?.pipeline ?? [];
+   402→  const activeBatches = useMemo(() => data?.activeBatches ?? [], [data?.activeBatches]);
+   403→  const shards = useMemo<SearchOptShardStats[]>(
+   404→    () => [...(data?.perShard ?? [])].sort((a, b) => a.shardid - b.shardid),
+   405→    [data?.perShard],
+   406→  );
+   407→  /* Chronological history (oldest → newest) for the money chart. */
+   408→  const chartData = useMemo(
+   409→    () =>
+   410→      [...(data?.history ?? [])]
+   411→        .sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime())
+   412→        .map((p) => ({ clock: fmtClock(p.t), cereri: p.requests, neon: p.fts })),
+   413→    [data?.history],
+   414→  );
+   415→
+   416→  const loadingFirst = opt.loading && !data;
+   417→
+   418→  return (
+   419→    <div className="space-y-5">
+   420→      {/* Banner — the FAZA 17 promise: 1000 users → 1 real Neon query. */}
+   421→      <Card className="border-emerald-500/25 bg-emerald-500/[0.04]">
+   422→        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:p-5">
+   423→          <span
+   424→            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-emerald-500/30 bg-emerald-500/10"
+   425→            aria-hidden
+   426→          >
+   427→            <TrendingDown className="h-5 w-5 text-emerald-400" />
+   428→          </span>
+   429→          <div>
+   430→            <p className="text-sm font-bold text-emerald-200">
+   431→              Optimizarea căutării — 1.000 utilizatori, 1 interogare Neon, rezultate 100% reale
+   432→            </p>
+   433→            <p className="mt-1 text-xs leading-relaxed text-zinc-400">
+   434→              Cererile identice sosite în fereastra TTL partajează{' '}
+   435→              <span className="font-semibold text-zinc-200">o singură interogare reală FTS</span> (batch),
+   436→              iar repetările în {fmtMs(cache?.ttlMs ?? config?.cacheTtlMs)} sunt servite din micro-cache —
+   437→              rezultatul stocat este <span className="font-semibold text-zinc-200">exact obiectul produs de
+   438→              Neon</span> (nimic fabricat, nimic mai vechi de TTL). Reducerea interogărilor Neon:{' '}
+   439→              <span className="font-mono font-bold text-emerald-300">{fmtFactor(dedup?.reductionFactor)}</span>{' '}
+   440→              — 10 milioane de utilizatori pot căuta real fără să supraîncarce baza.
+   441→            </p>
+   442→          </div>
+   443→        </CardContent>
+   444→      </Card>
+   445→
+   446→      {/* Toolbar: live pulse + manual refresh */}
+   447→      <div className="flex flex-wrap items-center justify-between gap-3">
+   448→        <p className="flex items-center gap-2 text-xs text-zinc-500" aria-live="off">
+   449→          <span className="relative flex h-2 w-2" aria-hidden>
+   450→            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+   451→            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+   452→          </span>
+   453→          Consolă live — auto-refresh la 2 s
+   454→        </p>
+   455→        <Button
+   456→          variant="outline"
+   457→          size="sm"
+   458→          onClick={() => opt.refetch()}
+   459→          aria-label="Reîmprospătează starea optimizării căutării"
+   460→          className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   461→        >
+   462→          {opt.loading ? <RefreshCw className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+   463→          Refresh
+   464→        </Button>
+   465→      </div>
+   466→
+   467→      {/* Live gauges */}
+   468→      {loadingFirst ? (
+   469→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   470→          {Array.from({ length: 8 }).map((_, i) => (
+   471→            <Skeleton key={i} className="h-[92px] rounded-xl" />
+   472→          ))}
+   473→        </div>
+   474→      ) : opt.error && !data ? (
+   475→        <ErrorState message={opt.error} onRetry={opt.refetch} compact />
+   476→      ) : batching && cache && dedup && counters ? (
+   477→        <section aria-label="Indicatorii live ai optimizării căutării" className="space-y-3">
+   478→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   479→            <GaugeCard
+   480→              icon={<Boxes className="h-5 w-5" aria-hidden />}
+   481→              label="Batch-uri active"
+   482→              value={fmtRoNum(batching.activeBatches)}
+   483→              tone={batching.activeBatches > 0 ? 'amber' : 'zinc'}
+   484→              sub={`max fan-out văzut ${fmtRoNum(batching.maxFanout)}`}
+   485→            />
+   486→            <GaugeCard
+   487→              icon={<Layers className="h-5 w-5" aria-hidden />}
+   488→              label="Batch hits"
+   489→              value={fmtRoNum(counters.batchHits)}
+   490→              tone="emerald"
+   491→              sub="cereri atașate la execuții în curs"
+   492→            />
+   493→            <GaugeCard
+   494→              icon={<Zap className="h-5 w-5" aria-hidden />}
+   495→              label="Cache hits"
+   496→              value={fmtRoNum(counters.cacheHits)}
+   497→              tone="emerald"
+   498→              sub={`rată hit ${RO_RATE.format((cache.hitRatio ?? 0) * 100)}%`}
+   499→            />
+   500→            <GaugeCard
+   501→              icon={<CheckCircle2 className="h-5 w-5" aria-hidden />}
+   502→              label="Cache misses"
+   503→              value={fmtRoNum(counters.cacheMisses)}
+   504→              sub={`= interogări reale pornite · ${fmtRoNum(cache.evictions)} evictări`}
+   505→            />
+   506→            <GaugeCard
+   507→              icon={<Database className="h-5 w-5" aria-hidden />}
+   508→              label="Interogări Neon"
+   509→              value={fmtRoNum(counters.ftsQueries)}
+   510→              tone="red"
+   511→              sub={`din ${fmtRoNum(counters.served)} cereri servite`}
+   512→            />
+   513→            <GaugeCard
+   514→              icon={<TrendingDown className="h-5 w-5" aria-hidden />}
+   515→              label="Reducere"
+   516→              value={fmtFactor(dedup.reductionFactor)}
+   517→              tone="emerald"
+   518→              sub="cereri / interogare Neon reală"
+   519→            />
+   520→            <GaugeCard
+   521→              icon={<Gauge className="h-5 w-5" aria-hidden />}
+   522→              label="Dedup total"
+   523→              value={fmtRoNum(counters.deduplicatedRequests)}
+   524→              tone="emerald"
+   525→              sub={`${fmtRoNum(dedup.batchServed)} batch + ${fmtRoNum(dedup.cacheServed)} cache`}
+   526→            />
+   527→            <GaugeCard
+   528→              icon={<Server className="h-5 w-5" aria-hidden />}
+   529→              label="Intrări cache"
+   530→              value={fmtRoNum(cache.entries)}
+   531→              sub={`plafon ${fmtRoNum(cache.maxEntries)} · TTL ${fmtMs(cache.ttlMs)}`}
+   532→            />
+   533→          </div>
+   534→          <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 font-mono text-[11px] text-zinc-400">
+   535→            <span className="font-sans text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+   536→              Status
+   537→            </span>
+   538→            <span>
+   539→              {dedup.active ? 'STRAT ACTIV' : 'DEZACTIVAT'}{' '}
+   540→              <span className="text-zinc-600">
+   541→                — {fmtRoNum(dedup.served)} cereri servite · {fmtRoNum(dedup.ftsQueries)} interogări Neon ·{' '}
+   542→                {fmtRoNum(counters.batchesCreated)} batch-uri create
+   543→              </span>
+   544→            </span>
+   545→            <span>
+   546→              ultimul batch: {batching.lastBatchAt ? new Date(batching.lastBatchAt).toLocaleTimeString('ro-RO') : '—'}
+   547→            </span>
+   548→          </p>
+   549→        </section>
+   550→      ) : null}
+   551→
+   552→      {/* Pipeline visualization */}
+   553→      {pipeline.length > 0 ? <PipelineStrip stages={pipeline} /> : null}
+   554→
+   555→      {/* Config cards */}
+   556→      {config ? (
+   557→        <section aria-label="Configurația optimizării căutării" className="space-y-3">
+   558→          <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   559→            <SlidersHorizontal className="h-4 w-4 text-emerald-400" aria-hidden />
+   560→            Configurație activă
+   561→          </h3>
+   562→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+   563→            {[
+   564→              {
+   565→                label: 'Cache TTL',
+   566→                value: fmtMs(config.cacheTtlMs),
+   567→                sub: 'rezultate reale servite ≤ TTL (pinned 1–5 s)',
+   568→              },
+   569→              {
+   570→                label: 'Intrări cache',
+   571→                value: fmtRoNum(config.cacheMax),
+   572→                sub: 'plafon cu evictare LRU-ish',
+   573→              },
+   574→              {
+   575→                label: 'Batch-uri max',
+   576→                value: fmtRoNum(config.batchMax),
+   577→                sub: 'distincte simultane (protectie memorie)',
+   578→              },
+   579→              {
+   580→                label: 'Fan-out max',
+   581→                value: fmtRoNum(batching?.maxFanout ?? 0),
+   582→                sub: 'cereri partajate într-un singur batch',
+   583→              },
+   584→              {
+   585→                label: 'Strat FAZA 17',
+   586→                value: config.enabled ? 'ACTIV' : 'DEZACTIVAT',
+   587→                sub: config.enabled
+   588→                  ? 'dedup + batching + cache peste coada FAZA 15'
+   589→                  : 'fiecare cerere execută propriul FTS',
+   590→              },
+   591→            ].map((c) => (
+   592→              <Card key={c.label} className="border-white/10 bg-white/[0.03]">
+   593→                <CardContent className="p-4">
+   594→                  <p className="text-lg font-black leading-tight text-white">{c.value}</p>
+   595→                  <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{c.label}</p>
+   596→                  <p className="mt-1 text-[11px] leading-snug text-zinc-600">{c.sub}</p>
+   597→                </CardContent>
+   598→              </Card>
+   599→            ))}
+   600→          </div>
+   601→        </section>
+   602→      ) : null}
+   603→
+   604→      {/* The money chart: requests served vs REAL Neon queries */}
+   605→      <section aria-label="Istoricul optimizării căutării">
+   606→        <Card className="border-white/10 bg-white/[0.03]">
+   607→          <CardHeader className="pb-2">
+   608→            <CardTitle className="flex items-center gap-2 text-base">
+   609→              <LineChart className="h-4 w-4 text-emerald-400" aria-hidden />
+   610→              Cereri vs Interogări Neon (ultimele 3 minute)
+   611→            </CardTitle>
+   612→            <CardDescription>
+   613→              180 eșantioane de 1 s — cereri servite de strat (emerald) vs interogări FTS reale pornite
+   614→              către Neon (rose). Diferența dintre cele două arii = căutările servite din batch/cache.
+   615→            </CardDescription>
+   616→          </CardHeader>
+   617→          <CardContent>
+   618→            {loadingFirst ? (
+   619→              <Skeleton className="h-56 w-full rounded-xl sm:h-64" />
+   620→            ) : chartData.length === 0 ? (
+   621→              <EmptyState
+   622→                title="Fără activitate încă"
+   623→                message="Istoricul se populează odată cu primele căutări trecute prin stratul de optimizare."
+   624→              />
+   625→            ) : (
+   626→              <ChartContainer config={OPT_CHART_CONFIG} className="h-56 w-full sm:h-64">
+   627→                <AreaChart data={chartData} margin={{ left: 4, right: 8, top: 8, bottom: 0 }}>
+   628→                  <defs>
+   629→                    <linearGradient id="fillOptRequests" x1="0" y1="0" x2="0" y2="1">
+   630→                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.45} />
+   631→                      <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+   632→                    </linearGradient>
+   633→                    <linearGradient id="fillOptFts" x1="0" y1="0" x2="0" y2="1">
+   634→                      <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.55} />
+   635→                      <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.03} />
+   636→                    </linearGradient>
+   637→                  </defs>
+   638→                  <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.08)" />
+   639→                  <XAxis
+   640→                    dataKey="clock"
+   641→                    tickLine={false}
+   642→                    axisLine={false}
+   643→                    minTickGap={32}
+   644→                    tick={{ fill: '#71717a', fontSize: 11 }}
+   645→                  />
+   646→                  <YAxis
+   647→                    allowDecimals={false}
+   648→                    tickLine={false}
+   649→                    axisLine={false}
+   650→                    width={30}
+   651→                    tick={{ fill: '#71717a', fontSize: 11 }}
+   652→                  />
+   653→                  <ChartTooltip
+   654→                    cursor={{ stroke: 'rgba(16,185,129,0.35)' }}
+   655→                    content={
+   656→                      <ChartTooltipContent
+   657→                        className="border-white/10 bg-[#1a1a24] text-zinc-200"
+   658→                        indicator="line"
+   659→                      />
+   660→                    }
+   661→                  />
+   662→                  <Area
+   663→                    dataKey="cereri"
+   664→                    type="monotone"
+   665→                    stroke="#10b981"
+   666→                    strokeWidth={2}
+   667→                    fill="url(#fillOptRequests)"
+   668→                    dot={false}
+   669→                    activeDot={{ r: 4, fill: '#10b981' }}
+   670→                  />
+   671→                  <Area
+   672→                    dataKey="neon"
+   673→                    type="monotone"
+   674→                    stroke="#f43f5e"
+   675→                    strokeWidth={2}
+   676→                    fill="url(#fillOptFts)"
+   677→                    dot={false}
+   678→                    activeDot={{ r: 4, fill: '#f43f5e' }}
+   679→                  />
+   680→                </AreaChart>
+   681→              </ChartContainer>
+   682→            )}
+   683→          </CardContent>
+   684→        </Card>
+   685→      </section>
+   686→
+   687→      {/* Active batches (live in-flight fan-outs) */}
+   688→      {loadingFirst ? (
+   689→        <Skeleton className="h-40 w-full rounded-xl" />
+   690→      ) : activeBatches.length === 0 ? (
+   691→        <EmptyState
+   692→          title="Niciun batch în curs"
+   693→          message="Batch-urile apar când cereri identice sosesc concomitent — probează 100 de utilizatori căutând același lucru."
+   694→        />
+   695→      ) : (
+   696→        <section aria-label="Batch-uri active în curs" className="space-y-3">
+   697→          <div className="flex flex-wrap items-center justify-between gap-3">
+   698→            <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   699→              <Boxes className="h-4 w-4 text-amber-400" aria-hidden />
+   700→              Batch-uri în curs ({activeBatches.length})
+   701→            </h3>
+   702→            <span className="font-mono text-[11px] text-zinc-600">
+   703→              top 50 după fan-out · o interogare reală per batch
+   704→            </span>
+   705→          </div>
+   706→          <div className="custom-scrollbar max-h-96 overflow-y-auto rounded-xl border border-white/10">
+   707→            <Table aria-label="Batch-uri active — cereri identice care partajează o execuție reală">
+   708→              <TableHeader>
+   709→                <TableRow className="hover:bg-transparent">
+   710→                  <TableHead scope="col">Query hash</TableHead>
+   711→                  <TableHead scope="col">Tip</TableHead>
+   712→                  <TableHead scope="col">Descriere</TableHead>
+   713→                  <TableHead scope="col">Fan-out</TableHead>
+   714→                  <TableHead scope="col">Vârstă</TableHead>
+   715→                  <TableHead scope="col">Sharduri</TableHead>
+   716→                </TableRow>
+   717→              </TableHeader>
+   718→              <TableBody>
+   719→                {activeBatches.map((b) => (
+   720→                  <TableRow key={b.queryHash} className="hover:bg-white/[0.03]">
+   721→                    <TableCell className="font-mono text-xs text-zinc-300">{b.queryHash}</TableCell>
+   722→                    <TableCell className="font-mono text-xs text-zinc-400">{b.kind}</TableCell>
+   723→                    <TableCell className="max-w-[16rem] truncate font-mono text-xs text-zinc-400">
+   724→                      {b.describe}
+   725→                    </TableCell>
+   726→                    <TableCell className="font-mono text-xs font-bold text-emerald-300">
+   727→                      {fmtRoNum(b.fanout)}
+   728→                    </TableCell>
+   729→                    <TableCell className="font-mono text-xs text-zinc-400">{fmtMs(b.ageMs)}</TableCell>
+   730→                    <TableCell className="font-mono text-xs text-zinc-400">{fmtRoNum(b.shards)}</TableCell>
+   731→                  </TableRow>
+   732→                ))}
+   733→              </TableBody>
+   734→            </Table>
+   735→          </div>
+   736→        </section>
+   737→      )}
+   738→
+   739→      {/* Per-shard attribution */}
+   740→      {loadingFirst ? (
+   741→        <div className="space-y-2">
+   742→          {Array.from({ length: 4 }).map((_, i) => (
+   743→            <Skeleton key={i} className="h-12 w-full rounded-xl" />
+   744→          ))}
+   745→        </div>
+   746→      ) : opt.error && !data ? (
+   747→        <ErrorState message={opt.error} onRetry={opt.refetch} compact />
+   748→      ) : shards.length === 0 ? (
+   749→        <EmptyState
+   750→          title="Fără sharduri"
+   751→          message="Backend-ul nu a raportat încă atribuiri per-shard pentru optimizarea căutării."
+   752→        />
+   753→      ) : (
+   754→        <section aria-label="Atribuirea optimizării pe sharduri" className="space-y-3">
+   755→          <div className="flex flex-wrap items-center justify-between gap-3">
+   756→            <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   757→              <Server className="h-4 w-4 text-emerald-400" aria-hidden />
+   758→              Atribuire pe sharduri ({shards.length})
+   759→            </h3>
+   760→            <span className="font-mono text-[11px] text-zinc-600">
+   761→              cereri servite vs interogări Neon pe shard · rândurile cu activitate evidențiate
+   762→            </span>
+   763→          </div>
+   764→          <div className="custom-scrollbar max-h-[32rem] overflow-y-auto rounded-xl border border-white/10">
+   765→            <Table aria-label="Atribuirea optimizării căutării pe sharduri — un rând per shard logic">
+   766→              <TableHeader>
+   767→                <TableRow className="hover:bg-transparent">
+   768→                  <TableHead scope="col">Shard</TableHead>
+   769→                  <TableHead scope="col">Servite</TableHead>
+   770→                  <TableHead scope="col">Cache hits</TableHead>
+   771→                  <TableHead scope="col">Batch hits</TableHead>
+   772→                  <TableHead scope="col">Interogări Neon</TableHead>
+   773→                  <TableHead scope="col">Reducere</TableHead>
+   774→                </TableRow>
+   775→              </TableHeader>
+   776→              <TableBody>
+   777→                {shards.map((row) => {
+   778→                  const active = row.served > 0;
+   779→                  const reduction = row.ftsQueries > 0 ? row.served / row.ftsQueries : 0;
+   780→                  return (
+   781→                    <TableRow
+   782→                      key={row.shardid}
+   783→                      className={cn('hover:bg-white/[0.03]', active && 'bg-emerald-500/[0.05]')}
+   784→                    >
+   785→                      <TableCell>
+   786→                        <div className="flex items-center gap-2">
+   787→                          <Server className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+   788→                          <p className="font-mono text-sm font-medium text-zinc-100">#{row.shardid}</p>
+   789→                        </div>
+   790→                      </TableCell>
+   791→                      <TableCell className="font-mono text-xs text-zinc-300">{fmtRoNum(row.served)}</TableCell>
+   792→                      <TableCell className="font-mono text-xs text-zinc-400">{fmtRoNum(row.cacheHits)}</TableCell>
+   793→                      <TableCell className="font-mono text-xs text-zinc-400">{fmtRoNum(row.batchHits)}</TableCell>
+   794→                      <TableCell
+   795→                        className={cn('font-mono text-xs', row.ftsQueries > 0 ? 'text-rose-300' : 'text-zinc-600')}
+   796→                      >
+   797→                        {fmtRoNum(row.ftsQueries)}
+   798→                      </TableCell>
+   799→                      <TableCell className="font-mono text-xs font-bold text-emerald-300">
+   800→                        {reduction >= 1 ? fmtFactor(reduction) : '—'}
+   801→                      </TableCell>
+   802→                    </TableRow>
+   803→                  );
+   804→                })}
+   805→              </TableBody>
+   806→            </Table>
+   807→          </div>
+   808→        </section>
+   809→      )}
+   810→
+   811→      {/* Settings (admin only) */}
+   812→      {config ? (
+   813→        <OptSettingsCard
+   814→          config={config}
+   815→          isAdmin={!initializing && isAdmin}
+   816→          onSaved={() => void opt.refetch()}
+   817→        />
+   818→      ) : loadingFirst ? (
+   819→        <Skeleton className="h-56 w-full rounded-xl" />
+   820→      ) : null}
+   821→    </div>
+   822→  );
+   823→}
+   824→

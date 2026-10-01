@@ -60,8 +60,8 @@ function parseVoteValue(raw) {
  */
 async function commentVoteStats(commentId, userId) {
   const agg = await one(
-    `SELECT COUNT(*) FILTER (WHERE value = 1)::int AS likes,
-            COUNT(*) FILTER (WHERE value = -1)::int AS dislikes
+    `SELECT COUNT(*) FILTER (WHERE value = 1) AS likes,
+            COUNT(*) FILTER (WHERE value = -1) AS dislikes
      FROM commentvotes WHERE commentid = $1`,
     [commentId],
   );
@@ -82,8 +82,8 @@ async function commentVoteStats(commentId, userId) {
  */
 async function contentLikeStats(contentId, userId) {
   const agg = await one(
-    `SELECT COUNT(*) FILTER (WHERE value = 1)::int AS likes,
-            COUNT(*) FILTER (WHERE value = -1)::int AS dislikes
+    `SELECT COUNT(*) FILTER (WHERE value = 1) AS likes,
+            COUNT(*) FILTER (WHERE value = -1) AS dislikes
      FROM contentlikes WHERE contentid = $1`,
     [contentId],
   );
@@ -152,8 +152,8 @@ commentsRouter.get('/content/:id/comments', wrap(async (req, res) => {
     ),
     rows(
       `SELECT v.commentid,
-              COUNT(*) FILTER (WHERE v.value = 1)::int AS likes,
-              COUNT(*) FILTER (WHERE v.value = -1)::int AS dislikes
+              COUNT(*) FILTER (WHERE v.value = 1) AS likes,
+              COUNT(*) FILTER (WHERE v.value = -1) AS dislikes
        FROM commentvotes v
        JOIN comments c ON c.id = v.commentid
        WHERE c.contentid = $1

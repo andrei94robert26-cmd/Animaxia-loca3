@@ -140,9 +140,9 @@ async function getTrending(args) {
   const limit = clampInt(args.limit, 1, 20, 8);
   try {
     const trending = await rows(
-      `SELECT ve.contentid, COUNT(*)::int AS views, MAX(ve.createdat) AS lastview
+      `SELECT ve.contentid, COUNT(*) AS views, MAX(ve.createdat) AS lastview
        FROM viewevents ve
-       WHERE ve.createdat > NOW() - $1::interval AND ve.event IN ('view','play')
+       WHERE ve.createdat > datetime('now', '-' || $1) AND ve.event IN ('view','play')
        GROUP BY ve.contentid
        ORDER BY views DESC
        LIMIT $2`,

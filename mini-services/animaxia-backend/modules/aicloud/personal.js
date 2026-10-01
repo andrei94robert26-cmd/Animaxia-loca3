@@ -50,9 +50,9 @@ async function upsertAiProfile(user, profileText) {
     ].slice(0, 10);
     await rows(
       `INSERT INTO aiprofiles (userid, summary, tastetags, updatedat)
-       VALUES ($1,$2,$3::jsonb, NOW())
+       VALUES ($1,$2,$3, CURRENT_TIMESTAMP)
        ON CONFLICT (userid) DO UPDATE SET summary = EXCLUDED.summary,
-         tastetags = EXCLUDED.tastetags, updatedat = NOW()`,
+         tastetags = EXCLUDED.tastetags, updatedat = CURRENT_TIMESTAMP`,
       [user.id, String(profileText || '').slice(0, 1000), jsonb({ tags: tasteTags })],
     );
   } catch {

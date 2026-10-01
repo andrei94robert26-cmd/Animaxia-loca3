@@ -1,0 +1,12 @@
+{
+  "name": "animaxia-ops",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Ops & Observability (FAZA 9) — synthetics, dashboards, alerts, SLOs, runbooks, CI. Zero dependencies.",
+  "scripts": {
+    "ops:synthetics": "bun synthetics/run.mjs",
+    "ops:synthetics:json": "bun synthetics/run.mjs --json",
+    "ops:validate": "bun -e \"for (const f of ['dashboards/ai-cloud.json','dashboards/edge-gateway.json','dashboards/user-experience.json','dashboards/db-shards.json']) { JSON.parse(require('node:fs').readFileSync(f,'utf8')); console.log('ok', f); }\""
+  }
+}

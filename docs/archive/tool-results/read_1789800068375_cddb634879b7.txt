@@ -1,0 +1,841 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * stability-lab-view.tsx — Laborator Stres & Stabilitate (#/stability, FAZA 17).
+     5→     5→ *
+     6→     6→ * Trei secțiuni, toate pe date REALE de pe nodul live (backend FAZA 17-a):
+     7→     7→ *  1. Stabilitate live — snapshot de reziliență poll-uit la 5s (lag event-loop,
+     8→     8→ *     RSS + bară raport, heap, cereri în curs, pool DB, shed, timeout-uri,
+     9→     9→ *     căutare, uptime) cu pragurile de protecție afișate onest.
+    10→    10→ *  2. Rulează un test de stres real — 4 suite-uri (Căutare Neon FTS, Ingest &
+    11→    11→ *     Dedup, Catalog virtual 30B, Mixt) executate IN-PROCES pe backend; cifre
+    12→    12→ *     mari, latențe p50/p95/p99/max, delta memorie, verdict onest (load
+    13→    13→ *     shedding afișat ca protecție funcțională, nu ca eșec).
+    14→    14→ *  3. Browser virtual 30B — catalog sintetic determinist; sărituri O(1) la
+    15→    15→ *     ORICE pagină din 1,5 miliarde prin cursori construiți client-side
+    16→    16→ *     (base64url {"i","s"} — identic cu formatul backend).
+    17→    17→ */
+    18→    18→
+    19→    19→import { useEffect, useState } from 'react';
+    20→    20→import {
+    21→    21→  Activity,
+    22→    22→  ArrowRight,
+    23→    23→  Database,
+    24→    24→  Dices,
+    25→    25→  Hourglass,
+    26→    26→  Layers,
+    27→    27→  Loader2,
+    28→    28→  MemoryStick,
+    29→    29→  Play,
+    30→    30→  RefreshCw,
+    31→    31→  Search,
+    32→    32→  ShieldAlert,
+    33→    33→  Timer,
+    34→    34→} from 'lucide-react';
+    35→    35→import { toast } from 'sonner';
+    36→    36→import { Badge } from '@/components/ui/badge';
+    37→    37→import { Button } from '@/components/ui/button';
+    38→    38→import { Input } from '@/components/ui/input';
+    39→    39→import { Label } from '@/components/ui/label';
+    40→    40→import { Progress } from '@/components/ui/progress';
+    41→    41→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    42→    42→import { ApiError, api, buildVirtualCursor } from '@/lib/animaxia/api';
+    43→    43→import { useApi } from '@/lib/animaxia/hooks';
+    44→    44→import { navigate } from '@/lib/animaxia/router';
+    45→    45→import type {
+    46→    46→  StabilitySnapshot,
+    47→    47→  StressRunExtra,
+    48→    48→  StressRunResponse,
+    49→    49→  VirtualCatalogItem,
+    50→    50→} from '@/lib/animaxia/types';
+    51→    51→import { Container, PageHeader, Section } from '../section';
+    52→    52→import { BrandPlaceholder, ErrorState, RatingBadge, TypeBadge } from '../states';
+    53→    53→import { cn } from '@/lib/utils';
+    54→    54→
+    55→    55→/* ------------------------------- formatting ------------------------------- */
+    56→    56→
+    57→    57→function formatBytes(bytes: number): string {
+    58→    58→  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    59→    59→  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    60→    60→  let value = bytes;
+    61→    61→  let unit = 0;
+    62→    62→  while (value >= 1024 && unit < units.length - 1) {
+    63→    63→    value /= 1024;
+    64→    64→    unit += 1;
+    65→    65→  }
+    66→    66→  return `${value.toLocaleString('ro-RO', { maximumFractionDigits: 1 })} ${units[unit]}`;
+    67→    67→}
+    68→    68→
+    69→    69→function formatSignedBytes(bytes: number): string {
+    70→    70→  if (!Number.isFinite(bytes) || bytes === 0) return '±0 KB';
+    71→    71→  const sign = bytes > 0 ? '+' : '-';
+    72→    72→  return `${sign}${formatBytes(Math.abs(bytes))}`;
+    73→    73→}
+    74→    74→
+    75→    75→function formatMs(ms: number): string {
+    76→    76→  if (!Number.isFinite(ms)) return '—';
+    77→    77→  return `${ms.toLocaleString('ro-RO', { maximumFractionDigits: 2 })}ms`;
+    78→    78→}
+    79→    79→
+    80→    80→function formatUptime(sec: number): string {
+    81→    81→  if (!Number.isFinite(sec) || sec < 0) return '—';
+    82→    82→  const h = Math.floor(sec / 3600);
+    83→    83→  const m = Math.floor((sec % 3600) / 60);
+    84→    84→  const s = Math.floor(sec % 60);
+    85→    85→  if (h > 0) return `${h}h ${m}m ${s}s`;
+    86→    86→  if (m > 0) return `${m}m ${s}s`;
+    87→    87→  return `${s}s`;
+    88→    88→}
+    89→    89→
+    90→    90→function formatCount(n: number): string {
+    91→    91→  return n.toLocaleString('ro-RO');
+    92→    92→}
+    93→    93→
+    94→    94→/* ------------------------------ shared tile bits ---------------------------- */
+    95→    95→
+    96→    96→type Tone = 'emerald' | 'amber' | 'red' | 'neutral';
+    97→    97→
+    98→    98→const TONE_TEXT: Record<Tone, string> = {
+    99→    99→  emerald: 'text-emerald-300',
+   100→   100→  amber: 'text-amber-300',
+   101→   101→  red: 'text-red-300',
+   102→   102→  neutral: 'text-white',
+   103→   103→};
+   104→   104→
+   105→   105→const TONE_BAR: Record<Tone, string> = {
+   106→   106→  emerald: '[&_[data-slot=progress-indicator]]:bg-emerald-500',
+   107→   107→  amber: '[&_[data-slot=progress-indicator]]:bg-amber-500',
+   108→   108→  red: '[&_[data-slot=progress-indicator]]:bg-red-500',
+   109→   109→  neutral: '[&_[data-slot=progress-indicator]]:bg-zinc-400',
+   110→   110→};
+   111→   111→
+   112→   112→function StatTile({
+   113→   113→  label,
+   114→   114→  icon: Icon,
+   115→   115→  value,
+   116→   116→  hint,
+   117→   117→  tone = 'neutral',
+   118→   118→  children,
+   119→   119→}: {
+   120→   120→  label: string;
+   121→   121→  icon: typeof Timer;
+   122→   122→  value: string;
+   123→   123→  hint?: string;
+   124→   124→  tone?: Tone;
+   125→   125→  children?: React.ReactNode;
+   126→   126→}) {
+   127→   127→  return (
+   128→   128→    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+   129→   129→      <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+   130→   130→        <Icon className="h-3.5 w-3.5" aria-hidden />
+   131→   131→        {label}
+   132→   132→      </p>
+   133→   133→      <p className={cn('mt-1.5 truncate text-lg font-black', TONE_TEXT[tone])} title={value}>
+   134→   134→        {value}
+   135→   135→      </p>
+   136→   136→      {hint ? <p className="mt-0.5 text-[11px] leading-snug text-zinc-500">{hint}</p> : null}
+   137→   137→      {children}
+   138→   138→    </div>
+   139→   139→  );
+   140→   140→}
+   141→   141→
+   142→   142→/* --------------------------- section 1: live stability ---------------------- */
+   143→   143→
+   144→   144→const STABILITY_POLL_MS = 5_000;
+   145→   145→
+   146→   146→function LiveStabilitySection() {
+   147→   147→  const [tick, setTick] = useState(0);
+   148→   148→
+   149→   149→  /* Poll la 5s — cheia useApi se schimbă la interval, ca în scale-report-view. */
+   150→   150→  useEffect(() => {
+   151→   151→    const id = setInterval(() => setTick((t) => t + 1), STABILITY_POLL_MS);
+   152→   152→    return () => clearInterval(id);
+   153→   153→  }, []);
+   154→   154→
+   155→   155→  const snap = useApi(`platform-stability-${tick}`, () => api.platform.stability());
+   156→   156→
+   157→   157→  if (snap.error && !snap.loading && !snap.data) {
+   158→   158→    return (
+   159→   159→      <Section title="Stabilitate live" subtitle="Snapshot de reziliență al nodului — refresh automat la 5 secunde.">
+   160→   160→        <ErrorState message={snap.error} onRetry={() => void snap.refetch()} />
+   161→   161→      </Section>
+   162→   162→    );
+   163→   163→  }
+   164→   164→
+   165→   165→  const s: StabilitySnapshot | null = snap.data;
+   166→   166→
+   167→   167→  const lagTone: Tone = !s ? 'neutral' : s.eventLoopLag.p95Ms < 50 ? 'emerald' : s.eventLoopLag.p95Ms < 200 ? 'amber' : 'red';
+   168→   168→  const rssRatio = s && s.memory.rssLimitBytes > 0 ? s.memory.rssBytes / s.memory.rssLimitBytes : 0;
+   169→   169→  const rssTone: Tone = rssRatio >= 0.85 ? 'red' : rssRatio >= 0.6 ? 'amber' : 'emerald';
+   170→   170→  const inFlightTone: Tone = !s ? 'neutral' : s.inFlight < 50 ? 'emerald' : s.inFlight < 100 ? 'amber' : 'red';
+   171→   171→  const poolTone: Tone = s && s.pool.waiting > 0 ? 'red' : 'neutral';
+   172→   172→  const shedTone: Tone = s && s.shed.count > 0 ? 'red' : 'emerald';
+   173→   173→  const timeoutTone: Tone = s && s.timeouts > 0 ? 'amber' : 'emerald';
+   174→   174→  const searchTone: Tone = s && s.search.errors > 0 ? 'red' : 'neutral';
+   175→   175→
+   176→   176→  return (
+   177→   177→    <Section
+   178→   178→      title="Stabilitate live"
+   179→   179→      subtitle="Snapshot de reziliență al nodului — refresh automat la 5 secunde."
+   180→   180→      action={
+   181→   181→        <Button
+   182→   182→          variant="outline"
+   183→   183→          size="sm"
+   184→   184→          onClick={() => void snap.refetch()}
+   185→   185→          disabled={snap.loading}
+   186→   186→          className="h-8 border-white/15 bg-white/5 text-zinc-200 hover:bg-white/10 hover:text-white"
+   187→   187→        >
+   188→   188→          <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', snap.loading && 'animate-spin')} aria-hidden />
+   189→   189→          Reîmprospătează
+   190→   190→        </Button>
+   191→   191→      }
+   192→   192→    >
+   193→   193→      {!s ? (
+   194→   194→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   195→   195→          {Array.from({ length: 9 }).map((_, i) => (
+   196→   196→            <div key={i} className="h-[76px] animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" />
+   197→   197→          ))}
+   198→   198→        </div>
+   199→   199→      ) : (
+   200→   200→        <>
+   201→   201→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   202→   202→            <StatTile
+   203→   203→              label="Latență event-loop"
+   204→   204→              icon={Timer}
+   205→   205→              value={formatMs(s.eventLoopLag.currentMs)}
+   206→   206→              hint={`p50 ${formatMs(s.eventLoopLag.p50Ms)} · p95 ${formatMs(s.eventLoopLag.p95Ms)}`}
+   207→   207→              tone={lagTone}
+   208→   208→            />
+   209→   209→            <StatTile
+   210→   210→              label="Memorie RSS"
+   211→   211→              icon={MemoryStick}
+   212→   212→              value={formatBytes(s.memory.rssBytes)}
+   213→   213→              hint={`din ${formatBytes(s.memory.rssLimitBytes)} · ${(rssRatio * 100).toLocaleString('ro-RO', { maximumFractionDigits: 1 })}%`}
+   214→   214→              tone={rssTone}
+   215→   215→            >
+   216→   216→              <Progress value={Math.min(100, rssRatio * 100)} className={cn('mt-2 h-1.5 bg-white/10', TONE_BAR[rssTone])} />
+   217→   217→            </StatTile>
+   218→   218→            <StatTile
+   219→   219→              label="Heap"
+   220→   220→              icon={Layers}
+   221→   221→              value={formatBytes(s.memory.heapUsedBytes)}
+   222→   222→              hint={`total ${formatBytes(s.memory.heapTotalBytes)} · extern ${formatBytes(s.memory.externalBytes)}`}
+   223→   223→            />
+   224→   224→            <StatTile
+   225→   225→              label="Cereri în curs"
+   226→   226→              icon={Activity}
+   227→   227→              value={formatCount(s.inFlight)}
+   228→   228→              hint={`max ${formatCount(s.inFlightMax)}`}
+   229→   229→              tone={inFlightTone}
+   230→   230→            />
+   231→   231→            <StatTile
+   232→   232→              label="Pool DB"
+   233→   233→              icon={Database}
+   234→   234→              value={`${formatCount(s.pool.total)} conexiuni`}
+   235→   235→              hint={`idle ${formatCount(s.pool.idle)} · în așteptare ${formatCount(s.pool.waiting)}`}
+   236→   236→              tone={poolTone}
+   237→   237→            />
+   238→   238→            <StatTile
+   239→   239→              label="Shed (respinseri)"
+   240→   240→              icon={ShieldAlert}
+   241→   241→              value={formatCount(s.shed.count)}
+   242→   242→              hint={
+   243→   243→                s.shed.lastShedAt
+   244→   244→                  ? `ultima ${new Date(s.shed.lastShedAt).toLocaleTimeString('ro-RO')}${s.shed.reason ? ` · ${s.shed.reason}` : ''}`
+   245→   245→                  : 'nicio respingere'
+   246→   246→              }
+   247→   247→              tone={shedTone}
+   248→   248→            />
+   249→   249→            <StatTile
+   250→   250→              label="Timeout-uri"
+   251→   251→              icon={Hourglass}
+   252→   252→              value={formatCount(s.timeouts)}
+   253→   253→              hint={`purgeri memorie ${formatCount(s.memoryPurges)}`}
+   254→   254→              tone={timeoutTone}
+   255→   255→            />
+   256→   256→            <StatTile
+   257→   257→              label="Căutare"
+   258→   258→              icon={Search}
+   259→   259→              value={`${formatCount(s.search.coalesced)} grupate`}
+   260→   260→              hint={`erori ${formatCount(s.search.errors)} · offset blocat ${formatCount(s.search.offsetCapped)}`}
+   261→   261→              tone={searchTone}
+   262→   262→            />
+   263→   263→            <StatTile label="Uptime" icon={Activity} value={formatUptime(s.uptimeSec)} hint="proces backend" />
+   264→   264→          </div>
+   265→   265→          <p className="text-[11px] leading-relaxed text-zinc-500">
+   266→   266→            Praguri: shed la lag p95 &gt; {s.config.shedThresholds.lagP95Ms}ms sau RSS &gt;{' '}
+   267→   267→            {(s.config.shedThresholds.rssRatio * 100).toLocaleString('ro-RO')}% · timeout cerere{' '}
+   268→   268→            {s.config.requestTimeoutMs / 1000}s · timeout interogare 8s
+   269→   269→          </p>
+   270→   270→        </>
+   271→   271→      )}
+   272→   272→    </Section>
+   273→   273→  );
+   274→   274→}
+   275→   275→
+   276→   276→/* ---------------------------- section 2: stress runner ---------------------- */
+   277→   277→
+   278→   278→type SuiteKey = StressRunResponse['suite'];
+   279→   279→
+   280→   280→const SUITES: { key: SuiteKey; emoji: string; title: string; desc: string }[] = [
+   281→   281→  {
+   282→   282→    key: 'search',
+   283→   283→    emoji: '🔍',
+   284→   284→    title: 'Căutare Neon FTS',
+   285→   285→    desc: 'Interogări reale concurente pe motorul Neon FTS.',
+   286→   286→  },
+   287→   287→  {
+   288→   288→    key: 'ingest',
+   289→   289→    emoji: '📥',
+   290→   290→    title: 'Ingest & Dedup',
+   291→   291→    desc: 'Încarcă repetat ACELAȘI link — probează registrul anti-duplicat.',
+   292→   292→  },
+   293→   293→  {
+   294→   294→    key: 'virtual30b',
+   295→   295→    emoji: '🌌',
+   296→   296→    title: 'Catalog virtual 30B',
+   297→   297→    desc: 'Sărituri adânci O(1) prin spațiul de adresare 30 miliarde.',
+   298→   298→  },
+   299→   299→  {
+   300→   300→    key: 'mixed',
+   301→   301→    emoji: '🔀',
+   302→   302→    title: 'Mixt',
+   303→   303→    desc: 'Toate suitele deodată — căutare, ingest și catalog virtual.',
+   304→   304→  },
+   305→   305→];
+   306→   306→
+   307→   307→function stressExtraLines(suite: SuiteKey, extra: StressRunExtra): string[] {
+   308→   308→  if (suite === 'mixed') {
+   309→   309→    const se = extra.search ?? { queries: 0, hitQueries: 0, errors: 0 };
+   310→   310→    const ing = extra.ingest ?? { unique: 0, duplicates: 0 };
+   311→   311→    const vir = extra.virtual30b ?? { deepestPage: 0, maxPageMs: 0 };
+   312→   312→    return [
+   313→   313→      `🔍 ${formatCount(se.queries)} interogări, ${formatCount(se.hitQueries)} cu rezultate`,
+   314→   314→      `📥 ${formatCount(ing.unique)} unice + ${formatCount(ing.duplicates)} duplicate blocate — registru Neon integru`,
+   315→   315→      `🌌 cea mai adâncă pagină ${formatCount(vir.deepestPage)} · max ${formatMs(vir.maxPageMs)}`,
+   316→   316→    ];
+   317→   317→  }
+   318→   318→  if (suite === 'search') {
+   319→   319→    return [`${formatCount(extra.queries ?? 0)} interogări, ${formatCount(extra.hitQueries ?? 0)} cu rezultate`];
+   320→   320→  }
+   321→   321→  if (suite === 'ingest') {
+   322→   322→    return [
+   323→   323→      `${formatCount(extra.unique ?? 0)} unice + ${formatCount(extra.duplicates ?? 0)} duplicate blocate — registru Neon integru`,
+   324→   324→    ];
+   325→   325→  }
+   326→   326→  return [`cea mai adâncă pagină ${formatCount(extra.deepestPage ?? 0)} · max ${formatMs(extra.maxPageMs ?? 0)}`];
+   327→   327→}
+   328→   328→
+   329→   329→function ResultStat({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: Tone }) {
+   330→   330→  return (
+   331→   331→    <div className="rounded-lg bg-black/30 px-3 py-2">
+   332→   332→      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">{label}</p>
+   333→   333→      <p className={cn('mt-0.5 text-base font-black', TONE_TEXT[tone])}>{value}</p>
+   334→   334→    </div>
+   335→   335→  );
+   336→   336→}
+   337→   337→
+   338→   338→function StressSection() {
+   339→   339→  const [suite, setSuite] = useState<SuiteKey>('virtual30b');
+   340→   340→  const [durationSec, setDurationSec] = useState(5);
+   341→   341→  const [concurrency, setConcurrency] = useState(8);
+   342→   342→  const [q, setQ] = useState('dune');
+   343→   343→  const [running, setRunning] = useState(false);
+   344→   344→  const [result, setResult] = useState<StressRunResponse | null>(null);
+   345→   345→
+   346→   346→  const suiteMeta = SUITES.find((x) => x.key === suite) ?? SUITES[0];
+   347→   347→
+   348→   348→  const run = async () => {
+   349→   349→    setRunning(true);
+   350→   350→    setResult(null);
+   351→   351→    try {
+   352→   352→      const res = await api.platform.stressRun({
+   353→   353→        suite,
+   354→   354→        durationSec,
+   355→   355→        concurrency,
+   356→   356→        q: q.trim() || 'dune',
+   357→   357→      });
+   358→   358→      setResult(res);
+   359→   359→      toast.success(`Test finalizat — ${formatCount(res.requests)} cereri, ${res.errorCount} erori`);
+   360→   360→    } catch (e) {
+   361→   361→      if (e instanceof ApiError) {
+   362→   362→        if (e.status === 409) {
+   363→   363→          toast.error('Un test rulează deja', {
+   364→   364→            description: 'Nodul acceptă un singur test de stres simultan — așteaptă finalizarea lui.',
+   365→   365→          });
+   366→   366→        } else if (e.status === 429) {
+   367→   367→          toast.error('Prea multe teste — așteaptă un minut', {
+   368→   368→            description: 'Limita backend este de 2 teste de stres pe minut.',
+   369→   369→          });
+   370→   370→        } else {
+   371→   371→          toast.error(e.message);
+   372→   372→        }
+   373→   373→      } else {
+   374→   374→        toast.error(e instanceof Error ? e.message : 'Testul de stres a eșuat');
+   375→   375→      }
+   376→   376→    } finally {
+   377→   377→      setRunning(false);
+   378→   378→    }
+   379→   379→  };
+   380→   380→
+   381→   381→  const verdict = result
+   382→   382→    ? result.errorCount > 0
+   383→   383→      ? {
+   384→   384→          label: `${formatCount(result.errorCount)} erori`,
+   385→   385→          cls: 'border-red-500/40 bg-red-500/15 text-red-300',
+   386→   386→        }
+   387→   387→      : result.shed > 0
+   388→   388→        ? {
+   389→   389→            label: `${formatCount(result.shed)} cereri respinse de protecție (load shedding) — serverul a rămas în picioare`,
+   390→   390→            cls: 'border-amber-500/40 bg-amber-500/15 text-amber-300',
+   391→   391→          }
+   392→   392→        : {
+   393→   393→            label: 'Nod stabil — zero erori',
+   394→   394→            cls: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300',
+   395→   395→          }
+   396→   396→    : null;
+   397→   397→
+   398→   398→  return (
+   399→   399→    <Section
+   400→   400→      title="Rulează un test de stres real"
+   401→   401→      subtitle="Sarcină generată în-proces pe nodul live — nu un demo: fiecare cerere lovește motorul real."
+   402→   402→    >
+   403→   403→      {/* suite selector */}
+   404→   404→      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+   405→   405→        {SUITES.map((s) => {
+   406→   406→          const selected = s.key === suite;
+   407→   407→          return (
+   408→   408→            <button
+   409→   409→              key={s.key}
+   410→   410→              type="button"
+   411→   411→              onClick={() => setSuite(s.key)}
+   412→   412→              aria-pressed={selected}
+   413→   413→              className={cn(
+   414→   414→                'rounded-2xl border p-4 text-left transition-all',
+   415→   415→                selected
+   416→   416→                  ? 'border-rose-500 bg-rose-500/10 ring-2 ring-rose-500'
+   417→   417→                  : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.05]',
+   418→   418→              )}
+   419→   419→            >
+   420→   420→              <span className="text-2xl" aria-hidden>
+   421→   421→                {s.emoji}
+   422→   422→              </span>
+   423→   423→              <p className="mt-2 text-sm font-bold text-white">{s.title}</p>
+   424→   424→              <p className="mt-1 text-xs leading-relaxed text-zinc-400">{s.desc}</p>
+   425→   425→            </button>
+   426→   426→          );
+   427→   427→        })}
+   428→   428→      </div>
+   429→   429→
+   430→   430→      {/* params + run */}
+   431→   431→      <div className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+   432→   432→        <div className="flex flex-wrap items-end gap-3">
+   433→   433→          <div className="w-32">
+   434→   434→            <Label htmlFor="stress-duration" className="text-[11px] font-semibold text-zinc-400">
+   435→   435→              Durată
+   436→   436→            </Label>
+   437→   437→            <Select value={String(durationSec)} onValueChange={(v) => setDurationSec(Number(v))} disabled={running}>
+   438→   438→              <SelectTrigger id="stress-duration" className="mt-1 w-full border-white/15 bg-black/30">
+   439→   439→                <SelectValue />
+   440→   440→              </SelectTrigger>
+   441→   441→              <SelectContent>
+   442→   442→                {[5, 10, 15, 30].map((d) => (
+   443→   443→                  <SelectItem key={d} value={String(d)}>
+   444→   444→                    {d}s
+   445→   445→                  </SelectItem>
+   446→   446→                ))}
+   447→   447→              </SelectContent>
+   448→   448→            </Select>
+   449→   449→          </div>
+   450→   450→          <div className="w-36">
+   451→   451→            <Label htmlFor="stress-concurrency" className="text-[11px] font-semibold text-zinc-400">
+   452→   452→              Concurență
+   453→   453→            </Label>
+   454→   454→            <Select value={String(concurrency)} onValueChange={(v) => setConcurrency(Number(v))} disabled={running}>
+   455→   455→              <SelectTrigger id="stress-concurrency" className="mt-1 w-full border-white/15 bg-black/30">
+   456→   456→                <SelectValue />
+   457→   457→              </SelectTrigger>
+   458→   458→              <SelectContent>
+   459→   459→                {[4, 8, 16, 32].map((c) => (
+   460→   460→                  <SelectItem key={c} value={String(c)}>
+   461→   461→                    {c} workere
+   462→   462→                  </SelectItem>
+   463→   463→                ))}
+   464→   464→              </SelectContent>
+   465→   465→            </Select>
+   466→   466→          </div>
+   467→   467→          <div className="min-w-[180px] flex-1 sm:max-w-xs">
+   468→   468→            <Label htmlFor="stress-q" className="text-[11px] font-semibold text-zinc-400">
+   469→   469→              Interogare
+   470→   470→            </Label>
+   471→   471→            <Input
+   472→   472→              id="stress-q"
+   473→   473→              value={q}
+   474→   474→              onChange={(e) => setQ(e.target.value)}
+   475→   475→              placeholder="termen de căutat"
+   476→   476→              disabled={running}
+   477→   477→              className="mt-1 border-white/15 bg-black/30 text-zinc-100 placeholder:text-zinc-600"
+   478→   478→            />
+   479→   479→          </div>
+   480→   480→          <Button
+   481→   481→            onClick={() => void run()}
+   482→   482→            disabled={running}
+   483→   483→            className="h-11 w-full bg-rose-600 px-8 text-base font-black hover:bg-rose-500 sm:w-auto"
+   484→   484→          >
+   485→   485→            {running ? (
+   486→   486→              <Loader2 className="mr-2 h-5 w-5 animate-spin" aria-hidden />
+   487→   487→            ) : (
+   488→   488→              <Play className="mr-2 h-5 w-5 fill-white" aria-hidden />
+   489→   489→            )}
+   490→   490→            {running ? `Rulează ${suiteMeta.title}… ${durationSec}s` : 'Rulează testul'}
+   491→   491→          </Button>
+   492→   492→        </div>
+   493→   493→        <p className="text-[11px] text-zinc-500">
+   494→   494→          Un singur test simultan pe nod · maxim 2 teste / minut · durată 1–30s · concurență 1–32 workere.
+   495→   495→        </p>
+   496→   496→      </div>
+   497→   497→
+   498→   498→      {/* result */}
+   499→   499→      {running ? (
+   500→   500→        <div className="flex items-center justify-center gap-3 rounded-2xl border border-rose-500/25 bg-rose-500/[0.06] p-6">
+   501→   501→          <Loader2 className="h-5 w-5 animate-spin text-rose-400" aria-hidden />
+   502→   502→          <p className="text-sm font-bold text-rose-200">
+   503→   503→            Rulează {suiteMeta.title} · {durationSec}s × {concurrency} workere — generează sarcină reală pe nod…
+   504→   504→          </p>
+   505→   505→        </div>
+   506→   506→      ) : null}
+   507→   507→      {result && !running ? (
+   508→   508→        <div className="space-y-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 sm:p-5">
+   509→   509→          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+   510→   510→            <p className="text-2xl font-black text-white sm:text-3xl">{formatCount(result.requests)} cereri</p>
+   511→   511→            <span className="text-lg font-bold text-zinc-300">{formatCount(Math.round(result.rps))} req/s</span>
+   512→   512→            <span
+   513→   513→              className={cn(
+   514→   514→                'text-sm font-bold',
+   515→   515→                result.errorCount === 0 ? 'text-emerald-300' : 'text-red-300',
+   516→   516→              )}
+   517→   517→            >
+   518→   518→              {formatCount(result.errorCount)} erori
+   519→   519→            </span>
+   520→   520→            <span
+   521→   521→              className={cn(
+   522→   522→                'ml-auto inline-flex items-center rounded-full border px-3 py-1 text-xs font-black',
+   523→   523→                verdict?.cls,
+   524→   524→              )}
+   525→   525→            >
+   526→   526→              {verdict?.label}
+   527→   527→            </span>
+   528→   528→          </div>
+   529→   529→
+   530→   530→          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+   531→   531→            <ResultStat label="Latență p50" value={formatMs(result.latency.p50Ms)} />
+   532→   532→            <ResultStat label="Latență p95" value={formatMs(result.latency.p95Ms)} />
+   533→   533→            <ResultStat label="Latență p99" value={formatMs(result.latency.p99Ms)} />
+   534→   534→            <ResultStat label="Latență max" value={formatMs(result.latency.maxMs)} />
+   535→   535→          </div>
+   536→   536→
+   537→   537→          <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-zinc-400">
+   538→   538→            <span>
+   539→   539→              Lag max event-loop{' '}
+   540→   540→              <strong className="text-zinc-200">{formatMs(result.maxEventLoopLagMs)}</strong>
+   541→   541→            </span>
+   542→   542→            <span>
+   543→   543→              Memorie{' '}
+   544→   544→              <strong className={result.memory.deltaBytes < 0 ? 'text-emerald-300' : 'text-zinc-200'}>
+   545→   545→                {formatSignedBytes(result.memory.deltaBytes)}
+   546→   546→              </strong>
+   547→   547→              {result.memory.deltaBytes < 0 ? ' (recuperată)' : ''}
+   548→   548→            </span>
+   549→   549→            <span>
+   550→   550→              Shed <strong className="text-zinc-200">{formatCount(result.shed)}</strong>
+   551→   551→            </span>
+   552→   552→            <span>
+   553→   553→              Durată reală <strong className="text-zinc-200">{(result.durationMs / 1000).toLocaleString('ro-RO', { maximumFractionDigits: 1 })}s</strong>
+   554→   554→            </span>
+   555→   555→          </div>
+   556→   556→
+   557→   557→          <ul className="space-y-1.5 border-t border-white/10 pt-3">
+   558→   558→            {stressExtraLines(result.suite, result.extra).map((line) => (
+   559→   559→              <li key={line} className="flex items-start gap-2 text-xs text-zinc-300">
+   560→   560→                <ArrowRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" aria-hidden />
+   561→   561→                {line}
+   562→   562→              </li>
+   563→   563→            ))}
+   564→   564→          </ul>
+   565→   565→
+   566→   566→          {result.errors.length > 0 ? (
+   567→   567→            <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+   568→   568→              <p className="text-[10px] font-bold uppercase tracking-wider text-red-300">Primele erori</p>
+   569→   569→              <ul className="mt-1 space-y-0.5">
+   570→   570→                {result.errors.map((err, i) => (
+   571→   571→                  <li key={i} className="font-mono text-[11px] text-red-200">
+   572→   572→                    {err}
+   573→   573→                  </li>
+   574→   574→                ))}
+   575→   575→              </ul>
+   576→   576→            </div>
+   577→   577→          ) : null}
+   578→   578→        </div>
+   579→   579→      ) : null}
+   580→   580→    </Section>
+   581→   581→  );
+   582→   582→}
+   583→   583→
+   584→   584→/* --------------------------- section 3: virtual 30B browser ------------------ */
+   585→   585→
+   586→   586→const VIRTUAL_LIMIT = 20;
+   587→   587→const VIRTUAL_MAX_PAGE = 1_500_000_000; /* 30.000.000.000 / 20 itemi */
+   588→   588→const VIRTUAL_SEEDS = ['animaxia', 'deep-space', 'retro'] as const;
+   589→   589→
+   590→   590→function VirtualCard({ item }: { item: VirtualCatalogItem }) {
+   591→   591→  return (
+   592→   592→    <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.03]">
+   593→   593→      <div className="relative aspect-[2/3] w-full overflow-hidden bg-black/40">
+   594→   594→        {item.thumbnail ? (
+   595→   595→          <img src={item.thumbnail} alt={item.title} loading="lazy" decoding="async" className="h-full w-full object-cover" />
+   596→   596→        ) : (
+   597→   597→          <BrandPlaceholder title={item.title} />
+   598→   598→        )}
+   599→   599→        <span className="absolute left-1.5 top-1.5">
+   600→   600→          <TypeBadge type={item.type} />
+   601→   601→        </span>
+   602→   602→        <span className="absolute right-1.5 top-1.5">
+   603→   603→          <RatingBadge value={item.rating} />
+   604→   604→        </span>
+   605→   605→      </div>
+   606→   606→      <div className="space-y-1.5 p-2.5">
+   607→   607→        <p className="line-clamp-2 text-xs font-bold leading-snug text-zinc-100" title={item.title}>
+   608→   608→          {item.title}
+   609→   609→        </p>
+   610→   610→        <p className="text-[10px] text-zinc-500">
+   611→   611→          {item.year} · #{formatCount(item.index)}
+   612→   612→        </p>
+   613→   613→        <div className="flex flex-wrap gap-1">
+   614→   614→          {item.genres.slice(0, 3).map((g) => (
+   615→   615→            <span
+   616→   616→              key={g}
+   617→   617→              className="rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[9px] font-medium text-zinc-400"
+   618→   618→            >
+   619→   619→              {g}
+   620→   620→            </span>
+   621→   621→          ))}
+   622→   622→        </div>
+   623→   623→      </div>
+   624→   624→    </div>
+   625→   625→  );
+   626→   626→}
+   627→   627→
+   628→   628→function VirtualBrowserSection() {
+   629→   629→  const [seed, setSeed] = useState<string>('animaxia');
+   630→   630→  const [cursor, setCursor] = useState('');
+   631→   631→  const [pageInput, setPageInput] = useState('1');
+   632→   632→
+   633→   633→  const res = useApi(`virtual-30b-${seed}-${cursor || 'start'}`, () =>
+   634→   634→    api.platform.virtualCatalog({ cursor: cursor || undefined, seed, limit: VIRTUAL_LIMIT }),
+   635→   635→  );
+   636→   636→
+   637→   637→  const goToPage = (page: number) => {
+   638→   638→    if (!Number.isFinite(page)) return;
+   639→   639→    const p = Math.min(Math.max(1, Math.floor(page)), VIRTUAL_MAX_PAGE);
+   640→   640→    setCursor(buildVirtualCursor((p - 1) * VIRTUAL_LIMIT, seed));
+   641→   641→    setPageInput(String(p));
+   642→   642→  };
+   643→   643→
+   644→   644→  const jump = () => {
+   645→   645→    const p = Number.parseInt(pageInput, 10);
+   646→   646→    if (!Number.isFinite(p) || p < 1 || p > VIRTUAL_MAX_PAGE) {
+   647→   647→      toast.error(`Pagina trebuie să fie între 1 și ${formatCount(VIRTUAL_MAX_PAGE)}`);
+   648→   648→      return;
+   649→   649→    }
+   650→   650→    goToPage(p);
+   651→   651→  };
+   652→   652→
+   653→   653→  const randomDeep = () => goToPage(Math.floor(Math.random() * (VIRTUAL_MAX_PAGE - 1)) + 1);
+   654→   654→
+   655→   655→  const data = res.data;
+   656→   656→  const totalPages = data ? Math.floor(data.addressSpace / VIRTUAL_LIMIT) : VIRTUAL_MAX_PAGE;
+   657→   657→
+   658→   658→  return (
+   659→   659→    <Section
+   660→   660→      title="Browser virtual 30B"
+   661→   661→      subtitle="Catalog sintetic determinist — simulează cele 30 de miliarde de conținuturi ca adresă; fiecare pagină se generează O(1), nimic nu se scanează."
+   662→   662→    >
+   663→   663→      {/* controls */}
+   664→   664→      <div className="flex flex-wrap items-end gap-2.5 rounded-2xl border border-white/10 bg-white/[0.03] p-3.5">
+   665→   665→        <div className="w-40">
+   666→   666→          <Label htmlFor="virtual-page" className="text-[11px] font-semibold text-zinc-400">
+   667→   667→            Pagina (1 – {formatCount(VIRTUAL_MAX_PAGE)})
+   668→   668→          </Label>
+   669→   669→          <Input
+   670→   670→            id="virtual-page"
+   671→   671→            type="number"
+   672→   672→            min={1}
+   673→   673→            max={VIRTUAL_MAX_PAGE}
+   674→   674→            value={pageInput}
+   675→   675→            onChange={(e) => setPageInput(e.target.value)}
+   676→   676→            onKeyDown={(e) => {
+   677→   677→              if (e.key === 'Enter') jump();
+   678→   678→            }}
+   679→   679→            className="mt-1 border-white/15 bg-black/30 text-zinc-100"
+   680→   680→          />
+   681→   681→        </div>
+   682→   682→        <Button
+   683→   683→          onClick={jump}
+   684→   684→          className="h-9 bg-rose-600 font-bold hover:bg-rose-500"
+   685→   685→          disabled={res.loading && !data}
+   686→   686→        >
+   687→   687→          Sari
+   688→   688→        </Button>
+   689→   689→        <Button
+   690→   690→          onClick={randomDeep}
+   691→   691→          variant="outline"
+   692→   692→          className="h-9 border-white/15 bg-white/5 font-semibold text-zinc-200 hover:bg-white/10 hover:text-white"
+   693→   693→        >
+   694→   694→          <Dices className="mr-1.5 h-4 w-4" aria-hidden />
+   695→   695→          Pagină aleatoare adâncă
+   696→   696→        </Button>
+   697→   697→        <Button
+   698→   698→          onClick={() => {
+   699→   699→            if (!data?.nextCursor) return;
+   700→   700→            /* nextCursor = indexul următor → pagina curentă + 1 (determinist). */
+   701→   701→            setPageInput(String(data.page + 1));
+   702→   702→            setCursor(data.nextCursor);
+   703→   703→          }}
+   704→   704→          disabled={!data?.nextCursor}
+   705→   705→          variant="outline"
+   706→   706→          className="h-9 border-white/15 bg-white/5 font-semibold text-zinc-200 hover:bg-white/10 hover:text-white"
+   707→   707→        >
+   708→   708→          Pagina următoare
+   709→   709→        </Button>
+   710→   710→        <Button
+   711→   711→          onClick={() => {
+   712→   712→            setCursor('');
+   713→   713→            setPageInput('1');
+   714→   714→          }}
+   715→   715→          variant="outline"
+   716→   716→          className="h-9 border-white/15 bg-white/5 font-semibold text-zinc-200 hover:bg-white/10 hover:text-white"
+   717→   717→        >
+   718→   718→          De la început
+   719→   719→        </Button>
+   720→   720→        <div className="ml-auto flex items-end gap-2">
+   721→   721→          <div className="w-40">
+   722→   722→            <Label htmlFor="virtual-seed" className="text-[11px] font-semibold text-zinc-400">
+   723→   723→              Seed determinist
+   724→   724→            </Label>
+   725→   725→            <Select
+   726→   726→              value={seed}
+   727→   727→              onValueChange={(v) => {
+   728→   728→                setSeed(v);
+   729→   729→                setCursor('');
+   730→   730→                setPageInput('1');
+   731→   731→              }}
+   732→   732→            >
+   733→   733→              <SelectTrigger id="virtual-seed" className="mt-1 w-full border-white/15 bg-black/30">
+   734→   734→                <SelectValue />
+   735→   735→              </SelectTrigger>
+   736→   736→              <SelectContent>
+   737→   737→                {VIRTUAL_SEEDS.map((s) => (
+   738→   738→                  <SelectItem key={s} value={s}>
+   739→   739→                    «{s}»
+   740→   740→                  </SelectItem>
+   741→   741→                ))}
+   742→   742→              </SelectContent>
+   743→   743→            </Select>
+   744→   744→          </div>
+   745→   745→        </div>
+   746→   746→      </div>
+   747→   747→
+   748→   748→      {/* grid */}
+   749→   749→      {res.error && !res.loading && !data ? (
+   750→   750→        <ErrorState message={res.error} onRetry={() => void res.refetch()} />
+   751→   751→      ) : !data ? (
+   752→   752→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+   753→   753→          {Array.from({ length: VIRTUAL_LIMIT }).map((_, i) => (
+   754→   754→            <div key={i} className="space-y-2">
+   755→   755→              <div className="aspect-[2/3] animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" />
+   756→   756→              <div className="h-4 w-4/5 animate-pulse rounded bg-white/[0.05]" />
+   757→   757→            </div>
+   758→   758→          ))}
+   759→   759→        </div>
+   760→   760→      ) : (
+   761→   761→        <>
+   762→   762→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+   763→   763→            {data.items.map((item) => (
+   764→   764→              <VirtualCard key={item.index} item={item} />
+   765→   765→            ))}
+   766→   766→          </div>
+   767→   767→          <p className="text-[11px] leading-relaxed text-zinc-500">
+   768→   768→            Pagina {formatCount(data.page)} din {formatCount(totalPages)} · spațiu de adresare 30.000.000.000
+   769→   769→            conținuturi · generată în {formatCount(data.tookMs)}ms · cheie deterministă seed «{seed}» · O(1)
+   770→   770→            {res.loading ? (
+   771→   771→              <span className="ml-2 inline-flex items-center gap-1 text-rose-300">
+   772→   772→                <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> se încarcă…
+   773→   773→              </span>
+   774→   774→            ) : null}
+   775→   775→          </p>
+   776→   776→        </>
+   777→   777→      )}
+   778→   778→    </Section>
+   779→   779→  );
+   780→   780→}
+   781→   781→
+   782→   782→/* ---------------------------------- the view -------------------------------- */
+   783→   783→
+   784→   784→export function StabilityLabView() {
+   785→   785→  return (
+   786→   786→    <Container className="space-y-8 py-8 sm:py-10">
+   787→   787→      <PageHeader
+   788→   788→        title="🛡️ Laborator Stres & Stabilitate"
+   789→   789→        subtitle="Platforma nu trebuie să pice la 30 de miliarde de conținuturi — testează rezistența reală, live"
+   790→   790→      >
+   791→   791→        <div className="flex flex-wrap items-center gap-2 pt-1">
+   792→   792→          <Badge className="border-rose-500/30 bg-rose-500/15 text-rose-300 hover:bg-rose-500/15">
+   793→   793→            <span className="relative mr-1.5 flex h-2 w-2">
+   794→   794→              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
+   795→   795→              <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
+   796→   796→            </span>
+   797→   797→            LIVE · refresh 5s
+   798→   798→          </Badge>
+   799→   799→          <span className="text-[11px] text-zinc-500">măsurători direct de pe nodul backend</span>
+   800→   800→        </div>
+   801→   801→      </PageHeader>
+   802→   802→
+   803→   803→      <LiveStabilitySection />
+   804→   804→      <StressSection />
+   805→   805→      <VirtualBrowserSection />
+   806→   806→
+   807→   807→      {/* quick links */}
+   808→   808→      <div className="grid gap-3 sm:grid-cols-2">
+   809→   809→        <button
+   810→   810→          type="button"
+   811→   811→          onClick={() => navigate('/scale')}
+   812→   812→          className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-left transition-colors hover:border-white/25 hover:bg-white/[0.05]"
+   813→   813→        >
+   814→   814→          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-black/40 text-xl" aria-hidden>
+   815→   815→            📊
+   816→   816→          </span>
+   817→   817→          <span className="min-w-0 flex-1">
+   818→   818→            <span className="block text-sm font-bold text-white">Raport Scală</span>
+   819→   819→            <span className="block text-xs text-zinc-500">Verdictele oneste 10M utilizatori · 30B conținuturi</span>
+   820→   820→          </span>
+   821→   821→          <ArrowRight className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
+   822→   822→        </button>
+   823→   823→        <button
+   824→   824→          type="button"
+   825→   825→          onClick={() => navigate('/aihub')}
+   826→   826→          className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-left transition-colors hover:border-white/25 hover:bg-white/[0.05]"
+   827→   827→        >
+   828→   828→          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-black/40 text-xl" aria-hidden>
+   829→   829→            🤖
+   830→   830→          </span>
+   831→   831→          <span className="min-w-0 flex-1">
+   832→   832→            <span className="block text-sm font-bold text-white">AI Hub</span>
+   833→   833→            <span className="block text-xs text-zinc-500">Cele 6 AI-uri ale platformei, comutabile live</span>
+   834→   834→          </span>
+   835→   835→          <ArrowRight className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
+   836→   836→        </button>
+   837→   837→      </div>
+   838→   838→    </Container>
+   839→   839→  );
+   840→   840→}
+   841→   841→

@@ -149,8 +149,8 @@ plansRouter.get('/me', requireAuth, wrap(async (req, res) => {
   );
   const usage = await one(
     `SELECT
-       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
-       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history`,
+       (SELECT COUNT(*) FROM watchlist WHERE userid = $1) AS watchlist,
+       (SELECT COUNT(*) FROM watchhistory WHERE userid = $1) AS history`,
     [req.user.id],
   );
   res.json({

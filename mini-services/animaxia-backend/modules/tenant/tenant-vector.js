@@ -134,14 +134,14 @@ export async function indexTenantContent(tenant, { limit = TENANT_INDEX_CAP } = 
     for (const item of items) {
       await rows(
         `INSERT INTO vectorembeddings (refkey, kind, refid, userid, dims, embedding, metadata, contenttext, tenantid)
-         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+         VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9)
          ON CONFLICT (refkey) DO UPDATE SET
            embedding = EXCLUDED.embedding,
            dims = EXCLUDED.dims,
            metadata = EXCLUDED.metadata,
            contenttext = EXCLUDED.contenttext,
            tenantid = EXCLUDED.tenantid,
-           updatedat = NOW()`,
+           updatedat = CURRENT_TIMESTAMP`,
         [
           tenantRefKey(slug, item.kind, item.refid),
           item.kind,
@@ -247,7 +247,7 @@ export async function tenantVectorStatus(tenant) {
   const slug = tenant.slug;
   try {
     const found = await rows(
-      `SELECT kind, COUNT(*)::int AS count FROM vectorembeddings WHERE tenantid = $1 GROUP BY kind`,
+      `SELECT kind, COUNT(*) AS count FROM vectorembeddings WHERE tenantid = $1 GROUP BY kind`,
       [slug],
     );
     const counts = {};

@@ -1,0 +1,23 @@
+      `WITH top_genres AS (
+         SELECT g.value AS genre, COUNT(DISTINCT content.id)::int AS count
+         FROM content, json_each(${GENRES_ARRAY}) AS g
+         GROUP BY g.value
+         ORDER BY count DESC, g.value ASC
+         LIMIT $1
+       ),
+       ranked AS (
+         SELECT g.value AS genre, content.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY g.value
+                  ORDER BY ${RATING_NUM} DESC NULLS LAST, content.id ASC
+                ) AS rn
+         FROM content, json_each(${GENRES_ARRAY}) AS g
+       ),
+       best_per_genre AS (
+         SELECT * FROM ranked WHERE rn = 1
+       )
+       SELECT best_per_genre.*, top_genres.count AS genre_count
+       FROM best_per_genre
+       JOIN top_genres ON top_genres.genre = best_per_genre.genre
+       ORDER BY top_genres.count DESC, best_per_genre.genre ASC
+       LIMIT $1`,

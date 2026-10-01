@@ -90,11 +90,11 @@ tenantBillingRouter.use(requireAuth, requireAdmin);
 tenantBillingRouter.get('/billing/summary', wrap(async (req, res) => {
   const tenants = await rows(`SELECT id, slug, name, plan, status FROM tenants ORDER BY id ASC`);
   const openInv = await one(
-    `SELECT COUNT(*)::int AS count, COALESCE(SUM(totalusd), 0)::real AS total
+    `SELECT COUNT(*) AS count, COALESCE(SUM(totalusd), 0)::real AS total
      FROM tenantinvoices WHERE status IN ('open', 'draft')`,
   );
   const paidInv = await one(
-    `SELECT COUNT(*)::int AS count, COALESCE(SUM(totalusd), 0)::real AS total
+    `SELECT COUNT(*) AS count, COALESCE(SUM(totalusd), 0)::real AS total
      FROM tenantinvoices WHERE status = 'paid'`,
   );
   // MRR estimate: base price of every active tenant + last-30d usage run-rate.
@@ -106,7 +106,7 @@ tenantBillingRouter.get('/billing/summary', wrap(async (req, res) => {
     try {
       const ev = await rows(
         `SELECT metric, SUM(quantity)::real AS total FROM tenantusageevents
-         WHERE tenantid = $1 AND createdat > NOW() - '30 days'::interval GROUP BY metric`,
+         WHERE tenantid = $1 AND createdat > datetime('now','-30 days') GROUP BY metric`,
         [t.id],
       );
       for (const e of ev) {
@@ -189,7 +189,7 @@ tenantBillingRouter.post('/billing/invoices/:tenant/generate', wrap(async (req, 
 
   const prices = TENANT_METERED_PRICES[tenant.plan] || TENANT_METERED_PRICES.free;
   const events = await rows(
-    `SELECT metric, SUM(quantity)::real AS total, COUNT(*)::int AS events
+    `SELECT metric, SUM(quantity)::real AS total, COUNT(*) AS events
      FROM tenantusageevents
      WHERE tenantid = $1 AND createdat >= $2 AND createdat < $3
      GROUP BY metric`,
@@ -243,7 +243,7 @@ tenantBillingRouter.post('/billing/invoices/:tenant/generate', wrap(async (req, 
 
   const inserted = await one(
     `INSERT INTO tenantinvoices (tenantid, periodstart, periodend, status, baseusd, usageusd, totalusd, lines, stripeinvoiceid)
-     VALUES ($1, $2, $3, 'open', $4, $5, $6, $7::jsonb, $8) RETURNING id`,
+     VALUES ($1, $2, $3, 'open', $4, $5, $6, $7, $8) RETURNING id`,
     [tenant.id, start.toISOString(), end.toISOString(), prices.baseusd, Number(usageUsd.toFixed(4)), totalUsd,
       jsonb({ lines, stripe: stripeinvoiceid ? 'pushed' : stripeError ? `error: ${stripeError}` : 'local-only' }), stripeinvoiceid],
   );
@@ -290,7 +290,7 @@ tenantBillingRouter.post('/billing/usage', wrap(async (req, res) => {
   }
   await rows(
     `INSERT INTO tenantusageevents (tenantid, userid, metric, quantity, unit, meta)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+     VALUES ($1, $2, $3, $4, $5, $6)`,
     [tenant.id, req.user?.id ?? null, metric, Number(quantity) || 0, String(unit), jsonb(meta || {})],
   );
   res.status(201).json({ ok: true, tenant: tenant.slug, metric, quantity: Number(quantity) || 0 });
@@ -311,9 +311,9 @@ tenantBillingRouter.post('/billing/plan', wrap(async (req, res) => {
   const direction = (TENANT_METERED_PRICES[plan] || TENANT_METERED_PRICES.free).baseusd >
     (TENANT_METERED_PRICES[tenant.plan] || TENANT_METERED_PRICES.free).baseusd ? 'upgrade' : 'change';
   const limits = TENANT_PLAN_LIMITS[plan];
-  await rows(`UPDATE tenants SET plan = $2, updatedat = NOW() WHERE id = $1`, [tenant.id, plan]);
+  await rows(`UPDATE tenants SET plan = $2, updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [tenant.id, plan]);
   await rows(
-    `UPDATE tenantlimits SET maxusers=$2, aiperday=$3, ratelimitpermin=$4, vectorcollections=$5, storagegb=$6, updatedat=NOW()
+    `UPDATE tenantlimits SET maxusers=$2, aiperday=$3, ratelimitpermin=$4, vectorcollections=$5, storagegb=$6, updatedat=CURRENT_TIMESTAMP
      WHERE tenantid=$1`,
     [tenant.id, limits.maxusers, limits.aiperday, limits.ratelimitpermin, limits.vectorcollections, limits.storagegb],
   );
@@ -333,7 +333,7 @@ tenantBillingRouter.post('/billing/customer', wrap(async (req, res) => {
   if (!stripecustomerid || !String(stripecustomerid).startsWith('cus_')) {
     return res.status(400).json({ error: 'stripecustomerid must look like cus_…' });
   }
-  await rows(`UPDATE tenants SET stripecustomerid = $2, updatedat = NOW() WHERE id = $1`, [tenant.id, String(stripecustomerid)]);
+  await rows(`UPDATE tenants SET stripecustomerid = $2, updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [tenant.id, String(stripecustomerid)]);
   invalidateTenantCache(tenant.slug);
   await auditLog({ userid: req.user.id, action: 'tenant.billing.customer.link', ip: clientIpOf(req), meta: { tenant: tenant.slug, stripecustomerid } });
   const fresh = await getTenantBySlug(tenant.slug);

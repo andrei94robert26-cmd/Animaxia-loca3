@@ -1,0 +1,818 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * admin-tenants-tab.tsx — FAZA 11 Tenant Admin Console: tenant registry with
+     5→ * usage rollups, create-tenant dialog, per-tenant limits editor, member
+     6→ * management, metered billing (summary + invoice generation + plan upgrades)
+     7→ * and the global tenant AI/vector status. Deep-linked via #/admin/tenants.
+     8→ */
+     9→
+    10→import { Fragment, useCallback, useMemo, useState } from 'react';
+    11→import {
+    12→  Building2,
+    13→  Check,
+    14→  ChevronDown,
+    15→  ChevronRight,
+    16→  CreditCard,
+    17→  Loader2,
+    18→  Lock,
+    19→  Plus,
+    20→  RefreshCw,
+    21→  Server,
+    22→  Trash2,
+    23→  Users,
+    24→  X,
+    25→} from 'lucide-react';
+    26→import { toast } from 'sonner';
+    27→import { tenantApi, TENANT_PLANS, type Tenant, type TenantMember, type TenantLimits } from '@/lib/animaxia/tenant';
+    28→import { useApi } from '@/lib/animaxia/hooks';
+    29→import { navigate } from '@/lib/animaxia/router';
+    30→import { useAuth } from '../auth-provider';
+    31→import { Button } from '@/components/ui/button';
+    32→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+    33→import { Input } from '@/components/ui/input';
+    34→import { Label } from '@/components/ui/label';
+    35→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    36→import { Skeleton } from '@/components/ui/skeleton';
+    37→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    38→import {
+    39→  Table,
+    40→  TableBody,
+    41→  TableCell,
+    42→  TableHead,
+    43→  TableHeader,
+    44→  TableRow,
+    45→} from '@/components/ui/table';
+    46→import { cn } from '@/lib/utils';
+    47→import { EmptyState, ErrorState } from '../states';
+    48→
+    49→/* ------------------------------- helpers --------------------------------- */
+    50→
+    51→const PLAN_TONE: Record<string, string> = {
+    52→  free: 'border-zinc-500/30 bg-zinc-500/15 text-zinc-300',
+    53→  starter: 'border-sky-500/30 bg-sky-500/15 text-sky-300',
+    54→  business: 'border-violet-500/30 bg-violet-500/15 text-violet-300',
+    55→  enterprise: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
+    56→};
+    57→
+    58→function PlanBadge({ plan }: { plan: string }) {
+    59→  return (
+    60→    <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide', PLAN_TONE[plan] ?? PLAN_TONE.free)}>
+    61→      {plan}
+    62→    </span>
+    63→  );
+    64→}
+    65→
+    66→function fmtUsd(v: number | null | undefined): string {
+    67→  const n = Number(v ?? 0);
+    68→  return `$${n.toLocaleString('en-US', { minimumFractionDigits: n < 100 && n % 1 !== 0 ? 2 : 0, maximumFractionDigits: 2 })}`;
+    69→}
+    70→
+    71→function fmtNum(v: number | null | undefined): string {
+    72→  return Number(v ?? 0).toLocaleString('en-US');
+    73→}
+    74→
+    75→const METRIC_LABELS: Record<string, string> = {
+    76→  ai_call: 'AI calls',
+    77→  vector_index: 'Vector docs',
+    78→  storage_gb: 'Storage GB',
+    79→  api_request: 'API requests',
+    80→};
+    81→
+    82→/* ------------------------------ forbidden -------------------------------- */
+    83→
+    84→function ForbiddenCard() {
+    85→  return (
+    86→    <Card className="border-rose-500/20 bg-white/[0.03]">
+    87→      <CardContent className="flex flex-col items-center gap-4 p-10 text-center">
+    88→        <div className="grid h-14 w-14 place-items-center rounded-2xl bg-rose-500/10">
+    89→          <Lock className="h-6 w-6 text-rose-400" aria-hidden />
+    90→        </div>
+    91→        <div>
+    92→          <p className="font-semibold text-zinc-100">Admin access required</p>
+    93→          <p className="mt-1 max-w-md text-sm text-zinc-400">
+    94→            The tenant console manages platform-wide tenants, limits and billing.
+    95→          </p>
+    96→        </div>
+    97→        <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/auth')}>
+    98→          Sign in as admin
+    99→        </Button>
+   100→      </CardContent>
+   101→    </Card>
+   102→  );
+   103→}
+   104→
+   105→/* ------------------------------- summary ---------------------------------- */
+   106→
+   107→function SummaryChips() {
+   108→  const summary = useApi('tenant-billing-summary', () => tenantApi.billingSummary());
+   109→  if (summary.loading) {
+   110→    return (
+   111→      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   112→        {Array.from({ length: 4 }).map((_, i) => (
+   113→          <Skeleton key={i} className="h-[74px] rounded-xl" />
+   114→        ))}
+   115→      </div>
+   116→    );
+   117→  }
+   118→  if (summary.error && !summary.data) {
+   119→    return (
+   120→      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   121→        <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 text-zinc-400">
+   122→          <p className="text-lg font-black">—</p>
+   123→          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-70">MRR (est.)</p>
+   124→        </div>
+   125→        <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 text-zinc-400">
+   126→          <p className="text-lg font-black">—</p>
+   127→          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-70">Billing mode</p>
+   128→        </div>
+   129→        <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 text-zinc-400">
+   130→          <p className="text-lg font-black">—</p>
+   131→          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-70">Open invoices</p>
+   132→        </div>
+   133→        <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 text-zinc-400">
+   134→          <p className="text-lg font-black">—</p>
+   135→          <p className="text-[10px] font-semibold uppercase tracking-widest opacity-70">Paid invoices</p>
+   136→        </div>
+   137→      </div>
+   138→    );
+   139→  }
+   140→  const d = summary.data;
+   141→  const chips: { label: string; value: string; tone?: string }[] = [
+   142→    { label: 'MRR (est.)', value: fmtUsd(d?.mrrEstimateUsd) },
+   143→    { label: 'Billing mode', value: d?.mode === 'stripe-live' ? 'Stripe live' : 'Sandbox' },
+   144→    { label: 'Open invoices', value: fmtUsd(d?.invoices?.open?.totalUsd), tone: 'amber' },
+   145→    { label: 'Paid invoices', value: fmtUsd(d?.invoices?.paid?.totalUsd), tone: 'emerald' },
+   146→  ];
+   147→  return (
+   148→    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   149→      {chips.map((c) => (
+   150→        <div
+   151→          key={c.label}
+   152→          className={cn(
+   153→            'rounded-xl border px-4 py-3',
+   154→            c.tone === 'amber'
+   155→              ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+   156→              : c.tone === 'emerald'
+   157→                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+   158→                : 'border-white/10 bg-white/[0.04] text-zinc-300',
+   159→          )}
+   160→        >
+   161→          <p className="text-lg font-black leading-tight">{c.value}</p>
+   162→          <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-widest opacity-70">{c.label}</p>
+   163→        </div>
+   164→      ))}
+   165→    </div>
+   166→  );
+   167→}
+   168→
+   169→/* ----------------------------- usage bars --------------------------------- */
+   170→
+   171→function UsageBar({ metric, total, cap }: { metric: string; total: number; cap?: number }) {
+   172→  const label = METRIC_LABELS[metric] ?? metric;
+   173→  const pct = cap && cap > 0 ? Math.min(100, Math.round((total / cap) * 100)) : null;
+   174→  return (
+   175→    <div className="min-w-[150px] flex-1">
+   176→      <div className="flex items-baseline justify-between gap-2">
+   177→        <span className="text-[11px] font-medium text-zinc-400">{label}</span>
+   178→        <span className="font-mono text-[11px] text-zinc-300">
+   179→          {fmtNum(total)}
+   180→          {pct != null && <span className="text-zinc-500"> / {fmtNum(cap)} ({pct}%)</span>}
+   181→        </span>
+   182→      </div>
+   183→      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/10">
+   184→        <div
+   185→          className={cn('h-full rounded-full', (pct ?? 0) > 85 ? 'bg-rose-500' : (pct ?? 10) > 60 ? 'bg-amber-400' : 'bg-emerald-500')}
+   186→          style={{ width: `${pct != null ? Math.max(3, pct) : Math.min(100, Math.max(4, Math.log10(total + 1) * 18))}%` }}
+   187→        />
+   188→      </div>
+   189→    </div>
+   190→  );
+   191→}
+   192→
+   193→/* ------------------------------ create form ------------------------------- */
+   194→
+   195→function CreateTenantForm({ onCreated }: { onCreated: () => void }) {
+   196→  const [open, setOpen] = useState(false);
+   197→  const [slug, setSlug] = useState('');
+   198→  const [name, setName] = useState('');
+   199→  const [plan, setPlan] = useState<(typeof TENANT_PLANS)[number]>('starter');
+   200→  const [busy, setBusy] = useState(false);
+   201→
+   202→  const submit = useCallback(async () => {
+   203→    if (!/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(slug)) {
+   204→      toast.error('Slug must be 3-40 chars: lowercase letters, digits, hyphens');
+   205→      return;
+   206→    }
+   207→    if (!name.trim()) {
+   208→      toast.error('Name is required');
+   209→      return;
+   210→    }
+   211→    setBusy(true);
+   212→    try {
+   213→      const res = await tenantApi.create({ slug, name: name.trim(), plan });
+   214→      toast.success(`Tenant '${res.tenant.slug}' created (${plan})`);
+   215→      setSlug('');
+   216→      setName('');
+   217→      setOpen(false);
+   218→      onCreated();
+   219→    } catch (err) {
+   220→      toast.error(err instanceof Error ? err.message : 'Failed to create tenant');
+   221→    } finally {
+   222→      setBusy(false);
+   223→    }
+   224→  }, [slug, name, plan, onCreated]);
+   225→
+   226→  return (
+   227→    <>
+   228→      <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => setOpen((v) => !v)}>
+   229→        {open ? <X aria-hidden /> : <Plus aria-hidden />}
+   230→        {open ? 'Cancel' : 'New tenant'}
+   231→      </Button>
+   232→      {open && (
+   233→        <Card className="border-rose-500/20 bg-white/[0.03]">
+   234→          <CardContent className="grid gap-4 p-5 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-end">
+   235→            <div className="grid gap-1.5">
+   236→              <Label htmlFor="tenant-slug" className="text-xs text-zinc-400">Slug</Label>
+   237→              <Input
+   238→                id="tenant-slug"
+   239→                placeholder="acme"
+   240→                value={slug}
+   241→                onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+   242→                className="border-white/15 bg-white/5 font-mono"
+   243→              />
+   244→            </div>
+   245→            <div className="grid gap-1.5">
+   246→              <Label htmlFor="tenant-name" className="text-xs text-zinc-400">Display name</Label>
+   247→              <Input
+   248→                id="tenant-name"
+   249→                placeholder="ACME Streaming"
+   250→                value={name}
+   251→                onChange={(e) => setName(e.target.value)}
+   252→                className="border-white/15 bg-white/5"
+   253→              />
+   254→            </div>
+   255→            <div className="grid gap-1.5">
+   256→              <Label className="text-xs text-zinc-400">Plan</Label>
+   257→              <Select value={plan} onValueChange={(v) => setPlan(v as (typeof TENANT_PLANS)[number])}>
+   258→                <SelectTrigger className="w-[140px] border-white/15 bg-white/5">
+   259→                  <SelectValue />
+   260→                </SelectTrigger>
+   261→                <SelectContent>
+   262→                  {TENANT_PLANS.map((p) => (
+   263→                    <SelectItem key={p} value={p}>{p}</SelectItem>
+   264→                  ))}
+   265→                </SelectContent>
+   266→              </Select>
+   267→            </div>
+   268→            <Button onClick={submit} disabled={busy} className="font-bold">
+   269→              {busy ? <Loader2 className="animate-spin" aria-hidden /> : <Check aria-hidden />}
+   270→              Create
+   271→            </Button>
+   272→          </CardContent>
+   273→        </Card>
+   274→      )}
+   275→    </>
+   276→  );
+   277→}
+   278→
+   279→/* ------------------------------ limits editor ----------------------------- */
+   280→
+   281→const LIMIT_FIELDS: { key: keyof TenantLimits; label: string }[] = [
+   282→  { key: 'maxusers', label: 'Max users' },
+   283→  { key: 'aiperday', label: 'AI / day' },
+   284→  { key: 'ratelimitpermin', label: 'Rate / min' },
+   285→  { key: 'vectorcollections', label: 'Vector collections' },
+   286→  { key: 'storagegb', label: 'Storage GB' },
+   287→];
+   288→
+   289→function LimitsEditor({ tenant, onSaved }: { tenant: Tenant; onSaved: () => void }) {
+   290→  const [draft, setDraft] = useState<Record<string, string>>(
+   291→    Object.fromEntries(LIMIT_FIELDS.map((f) => [f.key, String(tenant.limits[f.key] ?? 0)])),
+   292→  );
+   293→  const [busy, setBusy] = useState(false);
+   294→
+   295→  const save = useCallback(async () => {
+   296→    setBusy(true);
+   297→    try {
+   298→      const body: Record<string, number> = {};
+   299→      for (const f of LIMIT_FIELDS) {
+   300→        const v = Number(draft[f.key]);
+   301→        if (!Number.isFinite(v) || v < 0) throw new Error(`${f.label} must be a non-negative number`);
+   302→        body[f.key] = Math.floor(v);
+   303→      }
+   304→      await tenantApi.updateLimits(tenant.slug, body as Partial<TenantLimits>);
+   305→      toast.success(`Limits updated for '${tenant.slug}'`);
+   306→      onSaved();
+   307→    } catch (err) {
+   308→      toast.error(err instanceof Error ? err.message : 'Failed to update limits');
+   309→    } finally {
+   310→      setBusy(false);
+   311→    }
+   312→  }, [draft, tenant.slug, onSaved]);
+   313→
+   314→  return (
+   315→    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+   316→      {LIMIT_FIELDS.map((f) => (
+   317→        <div key={f.key} className="grid gap-1.5">
+   318→          <Label htmlFor={`limit-${f.key}`} className="text-[11px] text-zinc-400">{f.label}</Label>
+   319→          <Input
+   320→            id={`limit-${f.key}`}
+   321→            inputMode="numeric"
+   322→            value={draft[f.key] ?? '0'}
+   323→            onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value.replace(/[^0-9]/g, '') }))}
+   324→            className="border-white/15 bg-white/5 font-mono text-sm"
+   325→          />
+   326→        </div>
+   327→      ))}
+   328→      <div className="flex items-end">
+   329→        <Button size="sm" variant="outline" onClick={save} disabled={busy} className="border-white/15 bg-white/5 font-semibold hover:bg-white/10">
+   330→          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Check className="h-4 w-4" aria-hidden />}
+   331→          Save limits
+   332→        </Button>
+   333→      </div>
+   334→    </div>
+   335→  );
+   336→}
+   337→
+   338→/* ------------------------------ member list -------------------------------- */
+   339→
+   340→function MemberList({ slug, members, onChanged }: { slug: string; members: TenantMember[]; onChanged: () => void }) {
+   341→  const [email, setEmail] = useState('');
+   342→  const [role, setRole] = useState('member');
+   343→  const [busy, setBusy] = useState(false);
+   344→
+   345→  const add = useCallback(async () => {
+   346→    if (!email.includes('@')) {
+   347→      toast.error('Enter a valid account email');
+   348→      return;
+   349→    }
+   350→    setBusy(true);
+   351→    try {
+   352→      await tenantApi.addMember(slug, email.trim().toLowerCase(), role);
+   353→      toast.success(`${email} added to '${slug}' as ${role}`);
+   354→      setEmail('');
+   355→      onChanged();
+   356→    } catch (err) {
+   357→      toast.error(err instanceof Error ? err.message : 'Failed to add member');
+   358→    } finally {
+   359→      setBusy(false);
+   360→    }
+   361→  }, [slug, email, role, onChanged]);
+   362→
+   363→  const remove = useCallback(async (userid: number, memberEmail: string) => {
+   364→    setBusy(true);
+   365→    try {
+   366→      await tenantApi.removeMember(slug, userid);
+   367→      toast.success(`${memberEmail} removed from '${slug}'`);
+   368→      onChanged();
+   369→    } catch (err) {
+   370→      toast.error(err instanceof Error ? err.message : 'Failed to remove member');
+   371→    } finally {
+   372→      setBusy(false);
+   373→    }
+   374→  }, [slug, onChanged]);
+   375→
+   376→  return (
+   377→    <div className="space-y-3">
+   378→      <div className="flex flex-wrap gap-2">
+   379→        <Input
+   380→          placeholder="account email…"
+   381→          value={email}
+   382→          onChange={(e) => setEmail(e.target.value)}
+   383→          className="w-56 border-white/15 bg-white/5"
+   384→          aria-label={`Add member to ${slug}`}
+   385→        />
+   386→        <Select value={role} onValueChange={setRole}>
+   387→          <SelectTrigger className="w-[120px] border-white/15 bg-white/5" aria-label="Role">
+   388→            <SelectValue />
+   389→          </SelectTrigger>
+   390→          <SelectContent>
+   391→            <SelectItem value="owner">owner</SelectItem>
+   392→            <SelectItem value="admin">admin</SelectItem>
+   393→            <SelectItem value="member">member</SelectItem>
+   394→          </SelectContent>
+   395→        </Select>
+   396→        <Button size="sm" onClick={add} disabled={busy} className="font-semibold">
+   397→          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
+   398→          Add
+   399→        </Button>
+   400→      </div>
+   401→      {members.length === 0 ? (
+   402→        <p className="py-3 text-sm text-zinc-500">No members yet — the tenant is accessible only via the X-Animaxia-Tenant header.</p>
+   403→      ) : (
+   404→        <ul className="max-h-48 divide-y divide-white/5 overflow-y-auto rounded-xl border border-white/10">
+   405→          {members.map((m) => (
+   406→            <li key={m.userid} className="flex items-center justify-between gap-3 px-4 py-2.5">
+   407→              <div className="min-w-0">
+   408→                <p className="truncate text-sm text-zinc-200">{m.email}</p>
+   409→                <p className="text-[11px] text-zinc-500">@{m.username}</p>
+   410→              </div>
+   411→              <div className="flex shrink-0 items-center gap-2">
+   412→                <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 font-mono text-[10px] text-zinc-400">{m.role}</span>
+   413→                <Button
+   414→                  size="icon"
+   415→                  variant="ghost"
+   416→                  className="h-7 w-7 text-zinc-500 hover:bg-rose-500/10 hover:text-rose-400"
+   417→                  onClick={() => remove(m.userid, m.email)}
+   418→                  aria-label={`Remove ${m.email}`}
+   419→                >
+   420→                  <Trash2 className="h-3.5 w-3.5" aria-hidden />
+   421→                </Button>
+   422→              </div>
+   423→            </li>
+   424→          ))}
+   425→        </ul>
+   426→      )}
+   427→    </div>
+   428→  );
+   429→}
+   430→
+   431→/* ------------------------------ tenant detail ------------------------------ */
+   432→
+   433→function TenantDetailCard({ slug, onChanged }: { slug: string; onChanged: () => void }) {
+   434→  const detail = useApi(`tenant-detail-${slug}`, () => tenantApi.detail(slug));
+   435→  const [genBusy, setGenBusy] = useState(false);
+   436→  const [planBusy, setPlanBusy] = useState(false);
+   437→
+   438→  const generateInvoice = useCallback(async () => {
+   439→    setGenBusy(true);
+   440→    try {
+   441→      const res = await tenantApi.generateInvoice(slug);
+   442→      toast.success(`Invoice #${res.invoice.id} generated — ${fmtUsd(res.invoice.totalusd)} (${res.invoice.status})`);
+   443→      onChanged();
+   444→    } catch (err) {
+   445→      toast.error(err instanceof Error ? err.message : 'Invoice generation failed');
+   446→    } finally {
+   447→      setGenBusy(false);
+   448→    }
+   449→  }, [slug, onChanged]);
+   450→
+   451→  const changePlan = useCallback(async (plan: string) => {
+   452→    setPlanBusy(true);
+   453→    try {
+   454→      const res = await tenantApi.setPlan(slug, plan as (typeof TENANT_PLANS)[number]);
+   455→      toast.success(`'${slug}' ${res.direction}: ${res.from} → ${res.to}`);
+   456→      onChanged();
+   457→    } catch (err) {
+   458→      toast.error(err instanceof Error ? err.message : 'Plan change failed');
+   459→    } finally {
+   460→      setPlanBusy(false);
+   461→    }
+   462→  }, [slug, onChanged]);
+   463→
+   464→  if (detail.loading) {
+   465→    return (
+   466→      <Card className="border-white/10 bg-white/[0.02]">
+   467→        <CardContent className="space-y-3 p-5">
+   468→          <Skeleton className="h-5 w-40" />
+   469→          <Skeleton className="h-16 w-full" />
+   470→          <Skeleton className="h-24 w-full" />
+   471→        </CardContent>
+   472→      </Card>
+   473→    );
+   474→  }
+   475→  if (detail.error && !detail.data) {
+   476→    return (
+   477→      <Card className="border-rose-500/20 bg-white/[0.02]">
+   478→        <CardContent className="p-5">
+   479→          <ErrorState compact message={detail.error} onRetry={detail.refetch} />
+   480→        </CardContent>
+   481→      </Card>
+   482→    );
+   483→  }
+   484→
+   485→  const t = detail.data?.tenant;
+   486→  const members = detail.data?.members ?? [];
+   487→  if (!t) return null;
+   488→  const usage = t.usage;
+   489→
+   490→  return (
+   491→    <Card className="border-white/10 bg-white/[0.02]">
+   492→      <CardHeader className="pb-3">
+   493→        <div className="flex flex-wrap items-center justify-between gap-3">
+   494→          <div>
+   495→            <CardTitle className="flex items-center gap-2 text-lg">
+   496→              <Building2 className="h-4 w-4 text-rose-400" aria-hidden />
+   497→              {t.name}
+   498→              <span className="font-mono text-xs text-zinc-500">#{t.id} · {t.slug}</span>
+   499→            </CardTitle>
+   500→            <CardDescription>
+   501→              Created {t.createdat ? new Date(t.createdat).toLocaleDateString('en-US') : '—'} · {members.length} member{members.length === 1 ? '' : 's'}
+   502→            </CardDescription>
+   503→          </div>
+   504→          <div className="flex flex-wrap items-center gap-2">
+   505→            <Select value={t.plan} onValueChange={changePlan} disabled={planBusy || t.slug === 'global'}>
+   506→              <SelectTrigger className="w-[150px] border-white/15 bg-white/5" aria-label="Tenant plan">
+   507→                <SelectValue />
+   508→              </SelectTrigger>
+   509→              <SelectContent>
+   510→                {TENANT_PLANS.map((p) => (
+   511→                  <SelectItem key={p} value={p}>{p}</SelectItem>
+   512→                ))}
+   513→              </SelectContent>
+   514→            </Select>
+   515→            <Button size="sm" variant="outline" onClick={generateInvoice} disabled={genBusy} className="border-white/15 bg-white/5 font-semibold hover:bg-white/10">
+   516→              {genBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <CreditCard className="h-4 w-4" aria-hidden />}
+   517→              Generate invoice
+   518→            </Button>
+   519→          </div>
+   520→        </div>
+   521→      </CardHeader>
+   522→      <CardContent className="space-y-5">
+   523→        {/* usage */}
+   524→        <section aria-label="Tenant usage">
+   525→          <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-zinc-500">Usage (last {usage?.windowdays ?? 30} days)</h4>
+   526→          {usage && Object.keys(usage.bymetric).length > 0 ? (
+   527→            <div className="flex flex-wrap gap-4">
+   528→              {Object.entries(usage.bymetric).map(([metric, v]) => (
+   529→                <UsageBar
+   530→                  key={metric}
+   531→                  metric={metric}
+   532→                  total={v.total}
+   533→                  cap={metric === 'ai_call' ? (t.limits.aiperday * (usage.windowdays || 30)) : undefined}
+   534→                />
+   535→              ))}
+   536→            </div>
+   537→          ) : (
+   538→            <p className="text-sm text-zinc-500">No metered usage recorded yet.</p>
+   539→          )}
+   540→        </section>
+   541→
+   542→        {/* limits */}
+   543→        <section aria-label="Tenant limits">
+   544→          <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-zinc-500">Enforceable limits</h4>
+   545→          <LimitsEditor tenant={t} onSaved={() => { detail.refetch(); onChanged(); }} />
+   546→        </section>
+   547→
+   548→        {/* members */}
+   549→        <section aria-label="Tenant members">
+   550→          <h4 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-zinc-500">
+   551→            <Users className="h-3.5 w-3.5" aria-hidden /> Members
+   552→          </h4>
+   553→          <MemberList slug={t.slug} members={members} onChanged={() => { detail.refetch(); onChanged(); }} />
+   554→        </section>
+   555→      </CardContent>
+   556→    </Card>
+   557→  );
+   558→}
+   559→
+   560→/* ------------------------------ tenants list ------------------------------- */
+   561→
+   562→function TenantsTable({ tenants, loading, error, onRetry, onChanged }: {
+   563→  tenants: Tenant[];
+   564→  loading: boolean;
+   565→  error: string | null;
+   566→  onRetry: () => void;
+   567→  onChanged: () => void;
+   568→}) {
+   569→  const [expanded, setExpanded] = useState<string | null>(null);
+   570→
+   571→  const rows = useMemo(() => tenants, [tenants]);
+   572→
+   573→  if (loading) {
+   574→    return (
+   575→      <div className="space-y-2">
+   576→        {Array.from({ length: 3 }).map((_, i) => (
+   577→          <Skeleton key={i} className="h-12 w-full rounded-xl" />
+   578→        ))}
+   579→      </div>
+   580→    );
+   581→  }
+   582→  if (error && !tenants.length) {
+   583→    return <ErrorState message={error} onRetry={onRetry} />;
+   584→  }
+   585→  if (!rows.length) {
+   586→    return <EmptyState title="No tenants" message="Create the first tenant to start scoping AI, vectors and edge caches." />;
+   587→  }
+   588→
+   589→  return (
+   590→    <div className="space-y-3">
+   591→      <div className="overflow-hidden rounded-xl border border-white/10">
+   592→        <Table>
+   593→          <TableHeader>
+   594→            <TableRow className="hover:bg-transparent">
+   595→              <TableHead className="w-8" />
+   596→              <TableHead>Tenant</TableHead>
+   597→              <TableHead>Plan</TableHead>
+   598→              <TableHead className="text-right">Users</TableHead>
+   599→              <TableHead className="text-right">AI (30d)</TableHead>
+   600→              <TableHead className="hidden text-right sm:table-cell">Status</TableHead>
+   601→            </TableRow>
+   602→          </TableHeader>
+   603→          <TableBody>
+   604→            {rows.map((t) => {
+   605→              const isOpen = expanded === t.slug;
+   606→              const aiUsage = t.usage?.bymetric?.ai_call?.total ?? 0;
+   607→              return (
+   608→                <Fragment key={t.slug}>
+   609→                  <TableRow
+   610→                    className={cn('cursor-pointer', isOpen ? 'bg-white/[0.04]' : 'hover:bg-white/[0.03]')}
+   611→                    onClick={() => setExpanded(isOpen ? null : t.slug)}
+   612→                  >
+   613→                    <TableCell className="w-8 text-zinc-500">
+   614→                      {isOpen ? <ChevronDown className="h-4 w-4" aria-hidden /> : <ChevronRight className="h-4 w-4" aria-hidden />}
+   615→                    </TableCell>
+   616→                    <TableCell>
+   617→                      <div className="flex items-center gap-2">
+   618→                        <Server className="h-3.5 w-3.5 text-zinc-500" aria-hidden />
+   619→                        <div>
+   620→                          <p className="font-medium text-zinc-100">{t.name}</p>
+   621→                          <p className="font-mono text-[11px] text-zinc-500">{t.slug}</p>
+   622→                        </div>
+   623→                      </div>
+   624→                    </TableCell>
+   625→                    <TableCell><PlanBadge plan={t.plan} /></TableCell>
+   626→                    <TableCell className="text-right font-mono text-sm text-zinc-300">
+   627→                      {fmtNum(t.usercount)}
+   628→                      <span className="text-zinc-600"> / {fmtNum(t.limits.maxusers)}</span>
+   629→                    </TableCell>
+   630→                    <TableCell className="text-right font-mono text-sm text-zinc-300">
+   631→                      {fmtNum(aiUsage)}
+   632→                      <span className="text-zinc-600"> / {fmtNum(t.limits.aiperday * 30)}</span>
+   633→                    </TableCell>
+   634→                    <TableCell className="hidden sm:table-cell">
+   635→                      <span className={cn('rounded-full border px-2 py-0.5 font-mono text-[10px]',
+   636→                        t.status === 'active' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-zinc-500/30 bg-zinc-500/10 text-zinc-400')}>
+   637→                        {t.status}
+   638→                      </span>
+   639→                    </TableCell>
+   640→                  </TableRow>
+   641→                  {isOpen && (
+   642→                    <TableRow className="hover:bg-transparent">
+   643→                      <TableCell colSpan={6} className="bg-black/20 p-4">
+   644→                        <TenantDetailCard slug={t.slug} onChanged={onChanged} />
+   645→                      </TableCell>
+   646→                    </TableRow>
+   647→                  )}
+   648→                </Fragment>
+   649→              );
+   650→            })}
+   651→          </TableBody>
+   652→        </Table>
+   653→      </div>
+   654→    </div>
+   655→  );
+   656→}
+   657→
+   658→/* ------------------------------ invoices ---------------------------------- */
+   659→
+   660→function InvoicesPanel() {
+   661→  const invoices = useApi('tenant-billing-invoices', () => tenantApi.billingInvoices());
+   662→  if (invoices.loading) {
+   663→    return <Skeleton className="h-40 w-full rounded-xl" />;
+   664→  }
+   665→  if (invoices.error && !invoices.data) {
+   666→    return <ErrorState compact message={invoices.error} onRetry={invoices.refetch} />;
+   667→  }
+   668→  const list = invoices.data?.invoices ?? [];
+   669→  if (!list.length) {
+   670→    return <p className="py-3 text-sm text-zinc-500">No invoices yet — generate one from a tenant row.</p>;
+   671→  }
+   672→  return (
+   673→    <div className="max-h-72 overflow-y-auto rounded-xl border border-white/10">
+   674→      <Table>
+   675→        <TableHeader>
+   676→          <TableRow className="hover:bg-transparent">
+   677→            <TableHead>#</TableHead>
+   678→            <TableHead>Tenant</TableHead>
+   679→            <TableHead>Period</TableHead>
+   680→            <TableHead>Status</TableHead>
+   681→            <TableHead className="text-right">Base</TableHead>
+   682→            <TableHead className="text-right">Usage</TableHead>
+   683→            <TableHead className="text-right">Total</TableHead>
+   684→          </TableRow>
+   685→        </TableHeader>
+   686→        <TableBody>
+   687→          {list.map((inv) => (
+   688→            <TableRow key={inv.id} className="hover:bg-white/[0.03]">
+   689→              <TableCell className="font-mono text-xs text-zinc-500">{inv.id}</TableCell>
+   690→              <TableCell className="font-mono text-xs text-zinc-300">{inv.tenant}</TableCell>
+   691→              <TableCell className="text-xs text-zinc-400">
+   692→                {new Date(inv.periodstart).toLocaleDateString('en-US')} → {new Date(inv.periodend).toLocaleDateString('en-US')}
+   693→              </TableCell>
+   694→              <TableCell>
+   695→                <span className={cn('rounded-full border px-2 py-0.5 font-mono text-[10px]',
+   696→                  inv.status === 'paid' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' :
+   697→                  inv.status === 'void' ? 'border-zinc-500/30 bg-zinc-500/10 text-zinc-500' :
+   698→                  'border-amber-500/30 bg-amber-500/10 text-amber-300')}>
+   699→                  {inv.status}
+   700→                </span>
+   701→              </TableCell>
+   702→              <TableCell className="text-right font-mono text-sm text-zinc-400">{fmtUsd(inv.baseusd)}</TableCell>
+   703→              <TableCell className="text-right font-mono text-sm text-zinc-400">{fmtUsd(inv.usageusd)}</TableCell>
+   704→              <TableCell className="text-right font-mono text-sm font-bold text-zinc-100">{fmtUsd(inv.totalusd)}</TableCell>
+   705→            </TableRow>
+   706→          ))}
+   707→        </TableBody>
+   708→      </Table>
+   709→    </div>
+   710→  );
+   711→}
+   712→
+   713→/* ------------------------------ AI status --------------------------------- */
+   714→
+   715→function TenantAiPanel() {
+   716→  const status = useApi('tenant-ai-status', () => tenantApi.aiStatus());
+   717→  if (status.loading) return <Skeleton className="h-24 w-full rounded-xl" />;
+   718→  if (status.error && !status.data) {
+   719→    return <ErrorState compact message={status.error} onRetry={status.refetch} />;
+   720→  }
+   721→  const d = status.data;
+   722→  const q = d?.quota;
+   723→  const v = d?.vector;
+   724→  return (
+   725→    <div className="grid gap-3 sm:grid-cols-3">
+   726→      <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
+   727→        <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Your tenant</p>
+   728→        <p className="mt-1 font-mono text-sm font-bold text-zinc-100">{q?.tenant ?? '—'}</p>
+   729→        <p className="text-[11px] text-zinc-500">{q?.scoped ? `scoped quota: ${fmtNum(q.used)} / ${fmtNum(q.limit)} daily` : 'platform-wide (global)'}</p>
+   730→      </div>
+   731→      <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
+   732→        <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Vector namespace</p>
+   733→        <p className="mt-1 font-mono text-sm font-bold text-zinc-100">{v?.tenant ?? '—'}</p>
+   734→        <p className="text-[11px] text-zinc-500">
+   735→          {v?.scoped ? Object.entries(v.counts).map(([k, c]) => `${k}: ${c}`).join(' · ') || 'empty — run index' : 'shared platform index'}
+   736→        </p>
+   737→      </div>
+   738→      <div className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
+   739→        <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">LLM provider</p>
+   740→        <p className="mt-1 font-mono text-sm font-bold text-zinc-100">{d?.provider?.provider ?? '—'}</p>
+   741→        <p className="text-[11px] text-zinc-500">{d?.provider?.available ? `available (fallback ${d.provider.fallback})` : 'degraded'}</p>
+   742→      </div>
+   743→    </div>
+   744→  );
+   745→}
+   746→
+   747→/* -------------------------------- main tab -------------------------------- */
+   748→
+   749→export function AdminTenantsTab() {
+   750→  const { user } = useAuth();
+   751→  const isAdmin = user?.role === 'admin';
+   752→  const list = useApi('tenants-list', () => tenantApi.list(), { enabled: isAdmin });
+   753→
+   754→  if (!isAdmin) return <ForbiddenCard />;
+   755→
+   756→  return (
+   757→    <div className="space-y-6">
+   758→      <SummaryChips />
+   759→
+   760→      <div className="flex flex-wrap items-center justify-between gap-3">
+   761→        <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   762→          <Building2 className="h-4 w-4 text-rose-400" aria-hidden />
+   763→          Tenant registry ({list.data?.total ?? '…'})
+   764→        </h3>
+   765→        <div className="flex items-center gap-2">
+   766→          <Button variant="outline" size="sm" onClick={() => list.refetch()} className="border-white/15 bg-white/5 font-semibold hover:bg-white/10">
+   767→            <RefreshCw aria-hidden /> Refresh
+   768→          </Button>
+   769→          <CreateTenantForm onCreated={() => list.refetch()} />
+   770→        </div>
+   771→      </div>
+   772→
+   773→      <TenantsTable
+   774→        tenants={list.data?.tenants ?? []}
+   775→        loading={list.loading}
+   776→        error={list.error}
+   777→        onRetry={list.refetch}
+   778→        onChanged={() => list.refetch()}
+   779→      />
+   780→
+   781→      <Tabs defaultValue="invoices" className="gap-4">
+   782→        <TabsList className="w-full flex-wrap justify-start border border-white/10 bg-white/[0.03] sm:w-fit">
+   783→          <TabsTrigger value="invoices">
+   784→            <CreditCard className="h-3.5 w-3.5" aria-hidden /> Invoices
+   785→          </TabsTrigger>
+   786→          <TabsTrigger value="ai">
+   787→            <Server className="h-3.5 w-3.5" aria-hidden /> Tenant AI context
+   788→          </TabsTrigger>
+   789→        </TabsList>
+   790→        <TabsContent value="invoices">
+   791→          <Card className="border-white/10 bg-white/[0.02]">
+   792→            <CardHeader className="pb-3">
+   793→              <CardTitle className="text-base">Metered invoices</CardTitle>
+   794→              <CardDescription>
+   795→                Generated from tenantusageevents (ai_call / vector_index / storage_gb) with plan allowances deducted; overage billed at plan unit prices.
+   796→              </CardDescription>
+   797→            </CardHeader>
+   798→            <CardContent>
+   799→              <InvoicesPanel />
+   800→            </CardContent>
+   801→          </Card>
+   802→        </TabsContent>
+   803→        <TabsContent value="ai">
+   804→          <Card className="border-white/10 bg-white/[0.02]">
+   805→            <CardHeader className="pb-3">
+   806→              <CardTitle className="text-base">Your tenant AI context</CardTitle>
+   807→              <CardDescription>What /api/ai/tenant/* resolves for YOUR session right now (quota pool + vector namespace + provider).</CardDescription>
+   808→            </CardHeader>
+   809→            <CardContent>
+   810→              <TenantAiPanel />
+   811→            </CardContent>
+   812→          </Card>
+   813→        </TabsContent>
+   814→      </Tabs>
+   815→    </div>
+   816→  );
+   817→}
+   818→

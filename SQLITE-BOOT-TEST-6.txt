@@ -1,0 +1,40 @@
+[32m[2026-10-01T13:01:42.843Z] [INFO][0m [search-flow] FAZA 15 Search Flow Control ready — queue ENABLED · maxConcurrent=250 · window=80ms × batch=80 · cap=10000 · maxWait=30000ms
+[32m[2026-10-01T13:01:42.849Z] [INFO][0m [search-rate] FAZA 16 Search Rate Management ready — ENABLED · perUserMs=500 · cooldown=1200ms · spam=3 arrivals/200ms → block 1000ms · burst=1000/1000ms
+[32m[2026-10-01T13:01:42.850Z] [INFO][0m [search-opt] FAZA 17 Search Optimization Layer ready — ENABLED · cache ttl=3000ms max=5000 · batches max=10000 · pipeline 10 stages (dedup → batching → cache → fts)
+[33m[2026-10-01T13:01:42.868Z] [WARN][0m [searchux] curator-reaper probe failed (non-fatal): near "erval": syntax error
+[32m[2026-10-01T13:01:42.873Z] [INFO][0m [search-stress] FAZA 18 Full Integration + Stress engine ready — 10000 cereri simultane (identice 1000 · diferite 1000 · mixte 5000 · spam 2000 · cooldown 1000 · rate-limit 1000) · projecție 10M utilizatori · eșantion real 500 concurenți
+[32m[2026-10-01T13:01:42.883Z] [INFO][0m [ar10m/thumbs] route GET /thumb/:id registered (dir /data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/data/thumbnails, 320x180 q75)
+[32m[2026-10-01T13:01:42.887Z] [INFO][0m [DB] SQLite-only database ready
+[32m[2026-10-01T13:01:42.901Z] [INFO][0m [platform] Schema verified — 34/34 statements OK (users, tokens, watchlist, history, comments, votes, likes, views, subscriptions, audit, aichats, searchdocs, contentsources, aisettings, aienrichment, aitrailercache, thumbnailcache, marathons, aisemantic)
+[32m[2026-10-01T13:01:42.905Z] [INFO][0m [aicloud] schema ready (pgvector: no)
+[32m[2026-10-01T13:01:42.907Z] [INFO][0m [aicloud] vector backend: mock (configured: auto, embeds: local-hash-256)
+[32m[2026-10-01T13:01:42.909Z] [INFO][0m [social] Schema verified — 16/16 statements OK (follows, reviews, reviewlikes, activityevents, watchparties, watchpartymembers, partymessages)
+[32m[2026-10-01T13:01:42.910Z] [INFO][0m [social] activity bus wired (comment:added → activityevents + realtime webhook)
+[32m[2026-10-01T13:01:42.914Z] [INFO][0m [tenant] Schema verified — 13/13 statements OK (tenants, tenantusers, tenantlimits, tenantconfig, tenantusageevents, tenantinvoices + additive columns)
+[32m[2026-10-01T13:01:42.916Z] [INFO][0m [miner] Schema verified — 11/11 statements OK (miner_jobs, miner_sources, miner_logs, miner_manifests)
+[32m[2026-10-01T13:01:42.918Z] [INFO][0m [miner] Boot: metrics collector attached, queue resumed
+[32m[2026-10-01T13:01:42.921Z] [INFO][0m [sharding] Schema verified — 3/3 statements OK (shardid columns on content/searchdocs/vectorembeddings + indexes; existing rows are already correct at shard 0 via DEFAULT — no data rewrite needed)
+[32m[2026-10-01T13:01:42.924Z] [INFO][0m [faza21] Schema verified — 6/6 statements OK (playlists, playlistitems, subtitles)
+[32m[2026-10-01T13:01:42.926Z] [INFO][0m [integrity] Schema verified — 4/4 statements OK (unique usernames, orphans cleaned, FKs searchdocs/contentsources → content)
+[32m[2026-10-01T13:01:42.926Z] [INFO][0m [boot] Integrity schema verified (unique usernames, orphans cleaned, FKs enforced)
+[32m[2026-10-01T13:01:42.927Z] [INFO][0m [auth-extra] Schema verified — 3/3 statements OK
+[32m[2026-10-01T13:01:42.927Z] [INFO][0m [admin-users] schema verified — users.banned ensured (idempotent)
+[32m[2026-10-01T13:01:42.930Z] [INFO][0m [boot] Database already has 9 items — skipping seed
+[32m[2026-10-01T13:01:42.941Z] [INFO][0m ============================================================
+[32m[2026-10-01T13:01:42.941Z] [INFO][0m   ANIMAXIA BACKEND v1.0.0 — listening on http://localhost:4000
+[32m[2026-10-01T13:01:42.941Z] [INFO][0m   DB driver: sqlite (connected: true)
+[32m[2026-10-01T13:01:42.941Z] [INFO][0m   Env: development · Cache TTL: undefinedms · Miner: ready
+[32m[2026-10-01T13:01:42.942Z] [INFO][0m ============================================================
+[32m[2026-10-01T13:01:47.929Z] [INFO][0m [collections] franchises warm-up: 23 collections, 0 failed
+[32m[2026-10-01T13:01:47.943Z] [INFO][0m [collections] trilogies warm-up: 10 collections, 0 failed
+[33m[2026-10-01T13:01:48.293Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 1/4)
+[33m[2026-10-01T13:01:48.303Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 1/4)
+[33m[2026-10-01T13:01:50.382Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 2/4)
+[33m[2026-10-01T13:01:50.388Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 2/4)
+[33m[2026-10-01T13:01:50.805Z] [WARN][0m [ai-hub] z-ai probe failed (Configuration file not found or invalid. Please create .z-ai-config in your project, home directory, or /etc.) — hashed-bow embeddings
+[32m[2026-10-01T13:01:50.808Z] [INFO][0m [ai-hub] semantic embedding provider: hashed-bow
+[32m[2026-10-01T13:01:50.854Z] [INFO][0m [ai-hub] semantic index: embedded 9 docs (hashed-bow)
+[33m[2026-10-01T13:01:54.661Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 3/4)
+[33m[2026-10-01T13:01:54.673Z] [WARN][0m [fetcher] jikan responded 504 Gateway Time-out for https://api.jikan.moe/v4/top/anime?page=1&limit=20 — retrying (attempt 3/4)
+[32m[2026-10-01T13:02:00.955Z] [INFO][0m [ai-home] external chunk #1 warm: 40 posters
+[32m[2026-10-01T13:02:00.985Z] [INFO][0m [ai-home] boot enrichment: 0 items

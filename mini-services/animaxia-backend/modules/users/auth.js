@@ -34,10 +34,10 @@ const authLimiter = userRateLimit({ scope: 'ip', max: 30, windowMs: 60000, key: 
 function authSecret() {
   if (process.env.AUTHSECRET) return process.env.AUTHSECRET;
   // Deterministic derived secret: stable across restarts without extra config,
-  // unique per deployment (bound to the DATABASEURL).
+  // deterministic local SQLite fallback.
   return crypto
     .createHash('sha256')
-    .update(`animaxia-auth:${process.env.DATABASEURL || 'local'}`)
+    .update('animaxia-auth:sqlite-local')
     .digest('hex');
 }
 
@@ -143,7 +143,7 @@ async function issueSession(user, ip, tenantSlug = null) {
   const refreshToken = crypto.randomBytes(48).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
   await rows(
-    `INSERT INTO refreshtokens (userid, tokenhash, expiresat, tenantid) VALUES ($1, $2, NOW() + ($3::text)::interval, $4)`,
+    `INSERT INTO refreshtokens (userid, tokenhash, expiresat, tenantid) VALUES ($1, $2, datetime('now','+' || $3), $4)`,
     [Number(user.id), tokenHash, `${Math.round(REFRESH_TTL_MS / 1000)} seconds`, tenant],
   );
   return { accessToken, refreshToken, expiresIn: ACCESS_TTL_SEC, tenant };
@@ -155,7 +155,7 @@ async function findRefreshToken(refreshToken) {
   const row = await one(
     `SELECT rt.*, u.id AS uid FROM refreshtokens rt
      JOIN users u ON u.id = rt.userid
-     WHERE rt.tokenhash = $1 AND rt.revoked = FALSE AND rt.expiresat > NOW()`,
+     WHERE rt.tokenhash = $1 AND rt.revoked = FALSE AND rt.expiresat > CURRENT_TIMESTAMP`,
     [tokenHash],
   );
   // FAZA 11: refresh tokens are tenant-aware — the rotated session keeps the
@@ -265,12 +265,12 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
-    const adminCount = await one(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin'`);
+    const adminCount = await one(`SELECT COUNT(*) AS count FROM users WHERE role = 'admin'`);
     const role = adminEmails.includes(String(email).toLowerCase()) || num(adminCount?.count) === 0 ? 'admin' : 'user';
 
     const inserted = await one(
       `INSERT INTO users (email, username, passwordhash, role, preferences)
-       VALUES ($1, $2, $3, $4, '{}'::jsonb)
+       VALUES ($1, $2, $3, $4, '{}')
        RETURNING *`,
       [String(email).toLowerCase(), String(username), hashPassword(password), role],
     );
@@ -285,7 +285,7 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
         const verifyToken = crypto.randomBytes(32).toString('hex');
         await rows(
           `INSERT INTO emailtokens (token, userid, purpose, expiresat)
-           VALUES ($1, $2, 'verify-email', NOW() + interval '24 hours')`,
+           VALUES ($1, $2, 'verify-email', datetime('now','+24 hours'))`,
           [verifyToken, Number(inserted.id)],
         );
         const appUrl = String(process.env.APPURL || 'http://localhost:81').replace(/\/+$/, '');
@@ -361,7 +361,7 @@ authRouter.post('/login', authLimiter, async (req, res, next) => {
       return res.status(403).json({ error: 'Cont suspendat', code: 'ACCOUNT_BANNED' });
     }
 
-    await rows(`UPDATE users SET lastloginat = NOW() WHERE id = $1`, [Number(row.id)]);
+    await rows(`UPDATE users SET lastloginat = CURRENT_TIMESTAMP WHERE id = $1`, [Number(row.id)]);
 
     // TS3 (2FA TOTP): enabled accounts must present a valid current code —
     // a missing code answers 401 2FA_REQUIRED so the client can re-prompt.
@@ -418,9 +418,9 @@ authRouter.post('/logout', async (req, res, next) => {
 authRouter.get('/me', requireAuth, async (req, res) => {
   const stats = await one(
     `SELECT
-       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
-       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history,
-       (SELECT COUNT(*)::int FROM comments WHERE userid = $1) AS comments`,
+       (SELECT COUNT(*) FROM watchlist WHERE userid = $1) AS watchlist,
+       (SELECT COUNT(*) FROM watchhistory WHERE userid = $1) AS history,
+       (SELECT COUNT(*) FROM comments WHERE userid = $1) AS comments`,
     [req.user.id],
   );
   res.json({ user: req.user, stats: { watchlist: num(stats?.watchlist), history: num(stats?.history), comments: num(stats?.comments) } });
@@ -441,13 +441,13 @@ authRouter.get('/verify', async (req, res, next) => {
     }
     const row = await one(
       `SELECT userid FROM emailtokens
-       WHERE token = $1 AND purpose = 'verify-email' AND usedat IS NULL AND expiresat > NOW()`,
+       WHERE token = $1 AND purpose = 'verify-email' AND usedat IS NULL AND expiresat > CURRENT_TIMESTAMP`,
       [token],
     );
     if (!row) {
       return res.status(400).json({ error: 'Invalid or expired verification token' });
     }
-    await rows(`UPDATE emailtokens SET usedat = NOW() WHERE token = $1`, [token]);
+    await rows(`UPDATE emailtokens SET usedat = CURRENT_TIMESTAMP WHERE token = $1`, [token]);
     await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(row.userid)]);
     await auditLog({ userid: Number(row.userid), action: 'auth.email.verified', ip: clientIpOf(req), meta: {} });
     logger.info(`[auth] Email verified for user ${row.userid}`);
@@ -554,7 +554,7 @@ authRouter.post('/forgot-password', authLimiter, async (req, res, next) => {
       const codeHash = crypto.createHash('sha256').update(`${normalized}:${code}`).digest('hex');
       await rows(
         `INSERT INTO passwordresets (userid, codehash, expiresat)
-         VALUES ($1, $2, NOW() + ($3::text)::interval)`,
+         VALUES ($1, $2, datetime('now','+' || $3))`,
         [Number(user.id), codeHash, `${RESET_CODE_TTL_MIN} minutes`],
       );
       // TS3: with SMTP configured the code is EMAILED — it is never placed in
@@ -610,7 +610,7 @@ authRouter.post('/reset-password', authLimiter, async (req, res, next) => {
     const reset = await one(
       `SELECT pr.id, pr.userid FROM passwordresets pr
        JOIN users u ON u.id = pr.userid
-       WHERE u.email = $1 AND pr.codehash = $2 AND pr.used = FALSE AND pr.expiresat > NOW()
+       WHERE u.email = $1 AND pr.codehash = $2 AND pr.used = FALSE AND pr.expiresat > CURRENT_TIMESTAMP
        ORDER BY pr.createdat DESC LIMIT 1`,
       [normalized, codeHash],
     );

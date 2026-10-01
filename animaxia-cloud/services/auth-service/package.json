@@ -1,0 +1,17 @@
+{
+  "name": "@animaxia/auth-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud auth-service — accounts and sessions (users/auth.js), authenticated profiles (users/profile.js) and the admin security console (security/security.js), plus the /internal/verify-admin admin-check contract consumed by the gateway's edge ACL.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

@@ -1,0 +1,141 @@
+# =============================================================================
+# Animaxia Cloud — on-demand worker jobs
+#
+# `animaxia-worker-once` enqueues ONE on-demand batch job (default:
+# indexing.batch — a full search reindex) into the PG-backed durable queue via
+# the queue-service REST API (POST /api/queue/jobs). The queue workers pick it
+# up asynchronously; the Job itself only confirms the enqueue (201).
+#
+# Usage (a Job manifest only RUNS once per name — delete it to re-arm):
+#   kubectl -n animaxia delete job animaxia-worker-once --ignore-not-found
+#   kubectl apply -f 91-workerjob.yaml
+#   kubectl -n animaxia logs job/animaxia-worker-once
+#   # then watch progress:
+#   kubectl -n animaxia exec deploy/queue-service -- \
+#     curl -s http://localhost:4009/api/queue/stats
+#
+# Commented variants below: analytics.batch, providers.refresh, maintenance
+# jobs (cleanup/reindex), and a queue purge/drain maintenance job.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: animaxia-worker-once
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-worker-job
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: maintenance
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: animaxia-worker-job
+        app.kubernetes.io/part-of: animaxia-cloud
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: enqueue
+          image: curlimages/curl:8.10.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - curl
+            - -fsS
+            - --max-time
+            - "60"
+            - -X
+            - POST
+            - -H
+            - "Content-Type: application/json"
+            - -d
+            # on-demand full search reindex (search-service rebuilds BM25 index)
+            - '{"type":"indexing.batch","payload":{},"priority":5}'
+            - http://queue-service:4009/api/queue/jobs
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+# =============================================================================
+# VARIANT 1 — one-off analytics rollup:
+#   change the -d body to: '{"type":"analytics.batch","payload":{}}'
+# =============================================================================
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: animaxia-worker-once
+#   namespace: animaxia
+#   labels:
+#     app.kubernetes.io/name: animaxia-worker-job
+#     app.kubernetes.io/part-of: animaxia-cloud
+#     app.kubernetes.io/component: maintenance
+# spec:
+#   activeDeadlineSeconds: 300
+#   backoffLimit: 2
+#   template:
+#     spec:
+#       restartPolicy: Never
+#       containers:
+#         - name: enqueue
+#           image: curlimages/curl:8.10.1
+#           command:
+#             - curl
+#             - -fsS
+#             - -X
+#             - POST
+#             - -H
+#             - "Content-Type: application/json"
+#             - -d
+#             - '{"type":"analytics.batch","payload":{}}'
+#             - http://queue-service:4009/api/queue/jobs
+
+# =============================================================================
+# VARIANT 2 — one-off provider refresh (tmdb or jikan):
+#   -d '{"type":"providers.refresh","payload":{"source":"tmdb"}}'
+#   (or enqueue via the compat API: POST /api/workers/refresh)
+# =============================================================================
+# (same Job shape — swap the -d body for:
+#  '{"type":"providers.refresh","payload":{"source":"tmdb"}}')
+
+# =============================================================================
+# VARIANT 3 — maintenance job (queue drain / cleanup), e.g. purge finished
+# jobs older than retention (queue-service exposes purgeFinished via
+# maintenance.cleanup-* jobs and DELETE /api/queue/jobs?status=done):
+# =============================================================================
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: animaxia-maintenance-job
+#   namespace: animaxia
+# spec:
+#   activeDeadlineSeconds: 300
+#   template:
+#     spec:
+#       restartPolicy: Never
+#       containers:
+#         - name: maintenance
+#           image: curlimages/curl:8.10.1
+#           command:
+#             - sh
+#             - -c
+#             - |
+#               # drain: purge finished jobs (done/failed older than retention)
+#               curl -fsS -X POST -H 'Content-Type: application/json' \
+#                 -d '{"job":"maintenance.cleanup-logs","payload":{}}' \
+#                 http://queue-service:4009/api/queue/cron/tick
+#               curl -fsS -X POST -H 'Content-Type: application/json' \
+#                 -d '{"type":"maintenance.reindex","payload":{}}' \
+#                 http://queue-service:4009/api/queue/jobs

@@ -1,0 +1,17 @@
+{
+  "name": "@animaxia/analytics-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud analytics service — view-event ingestion, trending content, per-user activity reports and the admin platform overview, with an every-15-min worker rolling raw viewevents up into dailyviewrollups.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

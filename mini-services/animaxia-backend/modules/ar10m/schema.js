@@ -34,7 +34,7 @@ export const AR10M_DDL = [
   source_url TEXT NOT NULL,
   embed_code TEXT,
   source_hash TEXT NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`,
 
   `CREATE TABLE IF NOT EXISTS ar10m.content (
@@ -44,8 +44,8 @@ export const AR10M_DDL = [
   year INTEGER,
   source_id INTEGER REFERENCES ar10m.content_sources(id) ON DELETE SET NULL,
   shard_id SMALLINT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`,
 
   `CREATE INDEX IF NOT EXISTS idx_ar10m_ntitle_prefix ON ar10m.content (normalized_title text_pattern_ops)`,
@@ -65,7 +65,7 @@ export const AR10M_DDL = [
   year INTEGER,
   shard_id SMALLINT NOT NULL,
   synthetic BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`,
 
   `CREATE INDEX IF NOT EXISTS idx_ar10m_bench_ntitle ON ar10m.bench_catalog (normalized_title text_pattern_ops)`,

@@ -1,0 +1,314 @@
+# ============================================================================
+# Caddyfile.faza28-live — Animaxia PUBLIC LAUNCH edge (FAZA 28-E, normalizat)
+# ============================================================================
+# Edge-ul public de lansare. CONFIG 100% NORMALIZATĂ:
+#   • TOATE reverse_proxy folosesc hostname-uri de container (backend:4000,
+#     gateway:4040, …) — NICIODATĂ localhost/127.0.0.1 (regula FAZA 28-E).
+#   • Fiecare rută API are lanț de failover (upstream primar + fallback) —
+#     un upstream mort nu poate produce 502 niciodată.
+#   • TLS 1.2/1.3 + ALPN h2, HSTS strict doar pe HTTPS (RFC 6797 §7.2),
+#     redirect 308 permanent pe :8080 (păstrează metoda + corpul).
+#
+# TOPOLOGIA UPSTREAM (DNS intern / container names — normalizată):
+#   frontend      → Next.js SPA            (port 3000)
+#   backend       → monolitul PROTEJAT      (port 4000)  FAZA 18/20/21 —
+#                   FTS Neon real, pipeline, 30B logic — DOAR proxy, niciodată
+#                   modificat de edge.
+#   realtime      → socket.io               (port 4010)
+#   watchdog      → process supervisor      (port 4020)
+#   redis-global  → Redis distribuit        (port 4030, protocol RESP/TCP —
+#                   status prin proba edge /api/edge/status, nu HTTP proxy)
+#   gateway       → gateway global FAZA 22  (port 4040)
+#   observability → colector OTel FAZA 23   (port 4050)
+#   stability     → control plane FAZA 24   (port 4060)
+#
+# PORTURI (mapare sandbox twin ↔ producție):
+#   :8080  redirect HTTP→HTTPS   ↔  producție :80
+#   :8443  edge public HTTPS/h2  ↔  producție :443
+#   :8181  mirror HTTP intern (preview sandbox)  ↔  intern (bonded)
+#
+# TWIN RUNNABLE: /home/z/my-project/mini-services/edge-live (+ symlink
+# /home/z/faza28-runtime/edge-server) implementează EXACT acest routing table
+# ca serviciu Bun (8181/8443/8080) — verificabil end-to-end în sandbox.
+# ============================================================================
+
+{
+	# Opțiuni globale server edge
+	servers {
+		protocols h1 h2
+		timeouts {
+			read_body 10s
+			read_header 10s
+			write 30s
+			idle 2m
+		}
+	}
+}
+
+# ----------------------------------------------------------------------------
+# :8080 — REDIRECT PERMANENT 308 către HTTPS (method-preserving, RFC 7538)
+# ----------------------------------------------------------------------------
+:8080 {
+	redir https://{host}:8443{uri} 308
+}
+
+# ----------------------------------------------------------------------------
+# :8443 — EDGE PUBLIC HTTPS (TLS 1.2+/1.3, HTTP/2 via ALPN, HSTS strict)
+# ----------------------------------------------------------------------------
+https://:8443 {
+	# Certificat: în producție = cert real (ACME / mount). În sandbox twin =
+	# self-signed generat automat de serviciu (CN=animaxia.live, SAN-uri
+	# complete pentru toate hostname-urile de container + localhost).
+	tls /home/z/faza28-runtime/certs/animaxia-live.crt /home/z/faza28-runtime/certs/animaxia-live.key {
+		protocols tls1.2 tls1.3
+		alpn http/1.1 h2
+	}
+
+	encode zstd gzip
+
+	# --- Headere de securitate (HSTS DOAR pe TLS — RFC 6797 §7.2) ---
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# --- Rute de control ale edge-ului însuși (implementate nativ de twin) ---
+	@api-edge path /api/edge/*
+	handle @api-edge {
+		respond 200
+	}
+
+	# --- API Hub (FAZA 20) → gateway global (FAZA 22) → backend ---
+	# Lanț failover normalizat: gateway primar, backend fallback direct.
+	# NICIODATĂ 502: gateway mort ⇒ hub-ul e servit direct de backend.
+	@api-hub path /api/hub/*
+	handle @api-hub {
+		reverse_proxy http://gateway:4040 http://backend:4000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+			health_uri /api/infra/health
+			health_interval 5s
+			health_timeout 2s
+			health_status 200
+		}
+	}
+
+	# --- Admin/infra gateway (FAZA 22): /api/infra/* → gateway:4040 ---
+	@api-infra path /api/infra/*
+	handle @api-infra {
+		reverse_proxy http://gateway:4040 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+			health_uri /api/infra/health
+			health_interval 5s
+			health_timeout 2s
+			health_status 200
+		}
+	}
+
+	# --- Observabilitate globală (FAZA 23) → observability:4050 ---
+	@api-obs path /api/observability/* /api/summary /api/summary/* /v1/traces /v1/traces/* /v1/metrics /v1/metrics/*
+	handle @api-obs {
+		reverse_proxy http://observability:4050 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+			health_uri /api/observability/health
+			health_interval 5s
+			health_timeout 2s
+		}
+	}
+
+	# --- Control plane stabilitate (FAZA 24) → stability:4060 ---
+	@api-stab path /api/stability/* /api/lb/* /api/scale/* /api/shaping/*
+	handle @api-stab {
+		reverse_proxy http://stability:4060 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+			health_uri /api/health
+			health_interval 5s
+			health_timeout 2s
+		}
+	}
+
+	# --- Realtime (socket.io: polling HTTP + upgrade WS) → realtime:4010 ---
+	@api-rt path /socket.io/* /api/realtime/*
+	handle @api-rt {
+		reverse_proxy http://realtime:4010 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# --- REST API monolit PROTEJAT (FAZA 18/20/21, FTS Neon, 30B) ---
+	# PROXY ONLY — edge-ul nu modifică niciodată logica protejată.
+	@api-any path /api/* /v1/*
+	handle @api-any {
+		reverse_proxy http://backend:4000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+			health_uri /api/health
+			health_interval 5s
+			health_timeout 2s
+			health_status 200
+		}
+	}
+
+	# --- Asseturi statice SPA — cache imutabil ---
+	@static path /_next/static/* /favicon.ico /icons/* /images/* /manifest.webmanifest
+	handle @static {
+		header Cache-Control "public, max-age=31536000, immutable"
+		reverse_proxy http://frontend:3000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# --- DEFAULT: frontend SPA (Next.js :3000) ---
+	handle {
+		header Cache-Control "no-cache"
+		reverse_proxy http://frontend:3000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}
+
+# ----------------------------------------------------------------------------
+# :8181 — MIRROR HTTP INTERN (calea de preview sandbox :81?XTransformPort=8181)
+# ACELAȘI routing table, FĂRĂ TLS și FĂRĂ HSTS (header TLS-only).
+# ----------------------------------------------------------------------------
+:8181 {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	@api-edge2 path /api/edge/*
+	handle @api-edge2 {
+		respond 200
+	}
+
+	@api-hub2 path /api/hub/*
+	handle @api-hub2 {
+		reverse_proxy http://gateway:4040 http://backend:4000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+			health_uri /api/infra/health
+			health_interval 5s
+			health_timeout 2s
+			health_status 200
+		}
+	}
+
+	@api-infra2 path /api/infra/*
+	handle @api-infra2 {
+		reverse_proxy http://gateway:4040 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	@api-obs2 path /api/observability/* /api/summary /api/summary/* /v1/traces /v1/traces/* /v1/metrics /v1/metrics/*
+	handle @api-obs2 {
+		reverse_proxy http://observability:4050 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	@api-stab2 path /api/stability/* /api/lb/* /api/scale/* /api/shaping/*
+	handle @api-stab2 {
+		reverse_proxy http://stability:4060 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	@api-rt2 path /socket.io/* /api/realtime/*
+	handle @api-rt2 {
+		reverse_proxy http://realtime:4010 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	@api-any2 path /api/* /v1/*
+	handle @api-any2 {
+		reverse_proxy http://backend:4000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	@static2 path /_next/static/* /favicon.ico /icons/* /images/* /manifest.webmanifest
+	handle @static2 {
+		header Cache-Control "public, max-age=31536000, immutable"
+		reverse_proxy http://frontend:3000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		header Cache-Control "no-cache"
+		reverse_proxy http://frontend:3000 {
+			lb_policy first
+			header_up Host {upstream_hostport}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto http
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

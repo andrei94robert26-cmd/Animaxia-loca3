@@ -495,8 +495,8 @@ async function putEnrichmentEntry(entry) {
   if (pgActive()) {
     try {
       await rows(
-        `INSERT INTO aienrichment (externalid, payload) VALUES ($1, $2::jsonb)
-         ON CONFLICT (externalid) DO UPDATE SET payload = EXCLUDED.payload, updatedat = NOW()`,
+        `INSERT INTO aienrichment (externalid, payload) VALUES ($1, $2)
+         ON CONFLICT (externalid) DO UPDATE SET payload = EXCLUDED.payload, updatedat = CURRENT_TIMESTAMP`,
         [entry.key, jsonb(entry)],
       );
     } catch (err) {
@@ -807,8 +807,8 @@ async function rememberTrailer(key, record) {
   if (pgActive()) {
     try {
       await rows(
-        `INSERT INTO aitrailercache (cachekey, payload) VALUES ($1, $2::jsonb)
-         ON CONFLICT (cachekey) DO UPDATE SET payload = EXCLUDED.payload, updatedat = NOW()`,
+        `INSERT INTO aitrailercache (cachekey, payload) VALUES ($1, $2)
+         ON CONFLICT (cachekey) DO UPDATE SET payload = EXCLUDED.payload, updatedat = CURRENT_TIMESTAMP`,
         [key, jsonb(payload)],
       );
     } catch (err) {
@@ -1184,8 +1184,8 @@ async function writeSettings(settings) {
   if (pgActive()) {
     try {
       await rows(
-        `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+        `INSERT INTO aisettings (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = CURRENT_TIMESTAMP`,
         ['home', jsonb(value)],
       );
     } catch (err) {

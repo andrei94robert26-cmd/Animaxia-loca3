@@ -1,0 +1,926 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * ai-view.tsx — AI hub (#/ai). Provider status header + four tools:
+     5→ * Recommendations (aiRecommendations), Summarize (aiSummarize with a library
+     6→ * content picker), Describe (aiDescribe form) and Chat (auth-gated
+     7→ * content-scoped aiChat). Plan-quota (402) errors render upgrade cards.
+     8→ */
+     9→
+    10→import { useEffect, useRef, useState } from 'react';
+    11→import { Crown, Dices, Loader2, Search, Send, Sparkles, X, Zap } from 'lucide-react';
+    12→import { toast } from 'sonner';
+    13→import { platform, PlatformError, type AiRecommendation, type PlatformUser } from '@/lib/animaxia/platform';
+    14→import { useApi } from '@/lib/animaxia/hooks';
+    15→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    16→import { useAuth } from '@/components/animaxia/auth-provider';
+    17→import { Button } from '@/components/ui/button';
+    18→import { Card, CardContent } from '@/components/ui/card';
+    19→import { Input } from '@/components/ui/input';
+    20→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    21→import { Skeleton } from '@/components/ui/skeleton';
+    22→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    23→import { Textarea } from '@/components/ui/textarea';
+    24→import { cn } from '@/lib/utils';
+    25→import { Container, PageHeader } from '../section';
+    26→import { BrandPlaceholder, EmptyState, ErrorState, LoadingCards, TypeBadge } from '../states';
+    27→
+    28→type AiTab = 'recommendations' | 'summarize' | 'describe' | 'chat';
+    29→
+    30→const TAB_TRIGGER_CLASS =
+    31→  'rounded-lg px-3 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:px-4';
+    32→
+    33→/* ------------------------------- local helpers ------------------------------ */
+    34→
+    35→interface Suggestion {
+    36→  id: number;
+    37→  title: string;
+    38→  type: string;
+    39→  thumbnail: string | null;
+    40→}
+    41→
+    42→interface ChatMessage {
+    43→  role: 'user' | 'ai';
+    44→  text: string;
+    45→}
+    46→
+    47→async function copyText(text: string) {
+    48→  try {
+    49→    await navigator.clipboard.writeText(text);
+    50→    toast.success('Copied to clipboard');
+    51→  } catch {
+    52→    toast.error('Clipboard is not available in this browser');
+    53→  }
+    54→}
+    55→
+    56→/** Renders AI output: bullet lines ("- " / "• ") become styled list items. */
+    57→function AiText({ text }: { text: string }) {
+    58→  const lines = text
+    59→    .split('\n')
+    60→    .map((l) => l.trim())
+    61→    .filter(Boolean);
+    62→  return (
+    63→    <div className="space-y-2.5">
+    64→      {lines.map((line, i) => {
+    65→        if (line.startsWith('- ') || line.startsWith('• ')) {
+    66→          return (
+    67→            <div key={i} className="flex gap-2.5">
+    68→              <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400" aria-hidden />
+    69→              <p className="text-sm leading-relaxed text-zinc-300">{line.slice(2)}</p>
+    70→            </div>
+    71→          );
+    72→        }
+    73→        return (
+    74→          <p key={i} className="text-sm leading-relaxed text-zinc-300">
+    75→            {line}
+    76→          </p>
+    77→        );
+    78→      })}
+    79→    </div>
+    80→  );
+    81→}
+    82→
+    83→function ProviderBadge({ provider }: { provider: string }) {
+    84→  const isLlm = provider === 'z-ai';
+    85→  return (
+    86→    <span
+    87→      className={cn(
+    88→        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider',
+    89→        isLlm ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    90→      )}
+    91→    >
+    92→      {isLlm ? <Sparkles className="h-3 w-3" aria-hidden /> : <Zap className="h-3 w-3" aria-hidden />}
+    93→      {provider}
+    94→    </span>
+    95→  );
+    96→}
+    97→
+    98→function UpgradeCard({ message }: { message: string }) {
+    99→  return (
+   100→    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.07] p-6 text-center">
+   101→      <p className="flex items-center justify-center gap-2 font-semibold text-amber-300">
+   102→        <Crown className="h-5 w-5 shrink-0" aria-hidden />
+   103→        Daily AI limit reached
+   104→      </p>
+   105→      <p className="mx-auto mt-1 max-w-md text-sm leading-relaxed text-zinc-400">{message}</p>
+   106→      <Button
+   107→        type="button"
+   108→        className="mt-4 bg-rose-600 font-bold text-white hover:bg-rose-500"
+   109→        onClick={() => navigate('/premium')}
+   110→      >
+   111→        <Crown aria-hidden /> See premium plans
+   112→      </Button>
+   113→    </div>
+   114→  );
+   115→}
+   116→
+   117→function TypingDots() {
+   118→  return (
+   119→    <span className="inline-flex items-center gap-1 py-1" role="status" aria-label="AI is thinking">
+   120→      {[0, 1, 2].map((i) => (
+   121→        <span
+   122→          key={i}
+   123→          className="h-1.5 w-1.5 animate-bounce rounded-full bg-rose-300"
+   124→          style={{ animationDelay: `${i * 150}ms` }}
+   125→        />
+   126→      ))}
+   127→    </span>
+   128→  );
+   129→}
+   130→
+   131→/* ------------------------------ content picker ------------------------------ */
+   132→
+   133→/**
+   134→ * Library content picker: debounced (300 ms) autocomplete dropdown with
+   135→ * thumbnails, keyboard (Escape) and click-outside dismissal, and a selected
+   136→ * chip. Reused by the Summarize and Chat tabs.
+   137→ */
+   138→function ContentPicker({
+   139→  selected,
+   140→  onSelect,
+   141→  label,
+   142→  inputId,
+   143→}: {
+   144→  selected: Suggestion | null;
+   145→  onSelect: (s: Suggestion | null) => void;
+   146→  label: string;
+   147→  inputId: string;
+   148→}) {
+   149→  const [query, setQuery] = useState('');
+   150→  const [open, setOpen] = useState(false);
+   151→  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+   152→  const [loading, setLoading] = useState(false);
+   153→  const rootRef = useRef<HTMLDivElement>(null);
+   154→
+   155→  /* Debounced autocomplete (300 ms while typing; instant clear otherwise —
+   156→     state updates happen inside the async timer to avoid sync setState). */
+   157→  useEffect(() => {
+   158→    const q = query.trim();
+   159→    const timer = setTimeout(
+   160→      () => {
+   161→        if (!open || q.length === 0) {
+   162→          setSuggestions([]);
+   163→          return;
+   164→        }
+   165→        setLoading(true);
+   166→        platform
+   167→          .autocomplete(q)
+   168→          .then((res) => setSuggestions(res.suggestions))
+   169→          .catch(() => setSuggestions([]))
+   170→          .finally(() => setLoading(false));
+   171→      },
+   172→      open && q.length > 0 ? 300 : 0,
+   173→    );
+   174→    return () => clearTimeout(timer);
+   175→  }, [query, open]);
+   176→
+   177→  /* Click-outside closes the dropdown. */
+   178→  useEffect(() => {
+   179→    if (!open) return;
+   180→    const onDown = (e: MouseEvent) => {
+   181→      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+   182→    };
+   183→    document.addEventListener('mousedown', onDown);
+   184→    return () => document.removeEventListener('mousedown', onDown);
+   185→  }, [open]);
+   186→
+   187→  return (
+   188→    <div className="space-y-2" ref={rootRef}>
+   189→      <label htmlFor={inputId} className="text-sm font-semibold text-zinc-300">
+   190→        {label}
+   191→      </label>
+   192→      <div className="relative">
+   193→        <Search
+   194→          className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500"
+   195→          aria-hidden
+   196→        />
+   197→        <Input
+   198→          id={inputId}
+   199→          type="text"
+   200→          role="combobox"
+   201→          aria-expanded={open}
+   202→          aria-controls={`${inputId}-listbox`}
+   203→          aria-autocomplete="list"
+   204→          autoComplete="off"
+   205→          value={query}
+   206→          placeholder="Search the library…"
+   207→          onChange={(e) => {
+   208→            setQuery(e.target.value);
+   209→            setOpen(true);
+   210→          }}
+   211→          onFocus={() => setOpen(true)}
+   212→          onKeyDown={(e) => {
+   213→            if (e.key === 'Escape') setOpen(false);
+   214→          }}
+   215→          className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   216→        />
+   217→        {open && query.trim().length > 0 && (
+   218→          <div
+   219→            id={`${inputId}-listbox`}
+   220→            role="listbox"
+   221→            aria-label="Library suggestions"
+   222→            className="absolute z-30 mt-2 max-h-72 w-full overflow-y-auto rounded-xl border border-white/10 bg-[#12121c] p-2 shadow-2xl shadow-black/70 custom-scrollbar"
+   223→          >
+   224→            {loading ? (
+   225→              <p className="px-2 py-3 text-xs text-zinc-500">Searching the library…</p>
+   226→            ) : suggestions.length === 0 ? (
+   227→              <p className="px-2 py-3 text-xs text-zinc-500">No titles match that search.</p>
+   228→            ) : (
+   229→              suggestions.map((s) => (
+   230→                <button
+   231→                  key={s.id}
+   232→                  type="button"
+   233→                  role="option"
+   234→                  aria-selected={selected?.id === s.id}
+   235→                  onClick={() => {
+   236→                    onSelect(s);
+   237→                    setQuery('');
+   238→                    setOpen(false);
+   239→                  }}
+   240→                  className="flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   241→                >
+   242→                  <span className="h-12 w-9 shrink-0 overflow-hidden rounded-md border border-white/10 bg-white/[0.03]">
+   243→                    {s.thumbnail ? (
+   244→                      <img src={s.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+   245→                    ) : (
+   246→                      <BrandPlaceholder title={s.title} />
+   247→                    )}
+   248→                  </span>
+   249→                  <span className="min-w-0 flex-1">
+   250→                    <span className="block truncate text-sm font-semibold text-zinc-100">{s.title}</span>
+   251→                  </span>
+   252→                  <TypeBadge type={s.type} />
+   253→                </button>
+   254→              ))
+   255→            )}
+   256→          </div>
+   257→        )}
+   258→      </div>
+   259→      {selected && (
+   260→        <div className="flex items-center gap-2">
+   261→          <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-rose-500/30 bg-rose-500/10 py-1 pl-1 pr-2 text-sm text-rose-200">
+   262→            <span className="h-7 w-7 shrink-0 overflow-hidden rounded-full border border-white/10 bg-white/[0.03]">
+   263→              {selected.thumbnail ? (
+   264→                <img src={selected.thumbnail} alt="" className="h-full w-full object-cover" />
+   265→              ) : (
+   266→                <BrandPlaceholder title={selected.title} />
+   267→              )}
+   268→            </span>
+   269→            <span className="truncate font-medium">{selected.title}</span>
+   270→            <button
+   271→              type="button"
+   272→              onClick={() => onSelect(null)}
+   273→              aria-label={`Clear ${selected.title}`}
+   274→              className="rounded-full p-1 text-rose-300/70 transition hover:bg-rose-500/20 hover:text-rose-100"
+   275→            >
+   276→              <X className="h-3.5 w-3.5" aria-hidden />
+   277→            </button>
+   278→          </span>
+   279→        </div>
+   280→      )}
+   281→    </div>
+   282→  );
+   283→}
+   284→
+   285→/* ---------------------------------- view ---------------------------------- */
+   286→
+   287→export function AiView(_route: { route: AppRoute }) {
+   288→  const { user } = useAuth();
+   289→  const [tab, setTab] = useState<AiTab>('recommendations');
+   290→
+   291→  const status = useApi('ai-status', () => platform.aiStatus());
+   292→  const statusData = status.data;
+   293→
+   294→  return (
+   295→    <Container className="space-y-8 py-8 sm:py-10">
+   296→      <PageHeader title="AI hub" subtitle="Powered by Animaxia Intelligence">
+   297→        <div className="flex flex-wrap items-center gap-2 pt-1">
+   298→          {statusData ? (
+   299→            statusData.provider === 'z-ai' && statusData.available ? (
+   300→              <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-300">
+   301→                <Sparkles className="h-3.5 w-3.5" aria-hidden /> LLM online
+   302→              </span>
+   303→            ) : (
+   304→              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
+   305→                <Zap className="h-3.5 w-3.5" aria-hidden /> {statusData.provider || 'offline'} mode
+   306→              </span>
+   307→            )
+   308→          ) : (
+   309→            <Skeleton className="h-7 w-28 rounded-full" />
+   310→          )}
+   311→          {statusData && (
+   312→            <span className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-zinc-400">
+   313→              {statusData.requestsToday} requests today
+   314→            </span>
+   315→          )}
+   316→          {statusData &&
+   317→            (['free', 'plus', 'pro'] as const)
+   318→              .filter((plan) => statusData.quota?.[plan] != null)
+   319→              .map((plan) => (
+   320→                <span
+   321→                  key={plan}
+   322→                  className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-zinc-400"
+   323→                >
+   324→                  <Crown className="h-3 w-3 text-amber-300/80" aria-hidden />
+   325→                  {plan} · {statusData.quota[plan]}/day
+   326→                </span>
+   327→              ))}
+   328→        </div>
+   329→      </PageHeader>
+   330→
+   331→      <Tabs value={tab} onValueChange={(v) => setTab(v as AiTab)}>
+   332→        <TabsList className="h-10 w-full justify-start gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   333→          <TabsTrigger value="recommendations" className={TAB_TRIGGER_CLASS}>
+   334→            Recommendations
+   335→          </TabsTrigger>
+   336→          <TabsTrigger value="summarize" className={TAB_TRIGGER_CLASS}>
+   337→            Summarize
+   338→          </TabsTrigger>
+   339→          <TabsTrigger value="describe" className={TAB_TRIGGER_CLASS}>
+   340→            Describe
+   341→          </TabsTrigger>
+   342→          <TabsTrigger value="chat" className={TAB_TRIGGER_CLASS}>
+   343→            Chat
+   344→          </TabsTrigger>
+   345→        </TabsList>
+   346→
+   347→        <TabsContent value="recommendations" className="pt-6">
+   348→          <RecommendationsTab user={user} />
+   349→        </TabsContent>
+   350→        <TabsContent value="summarize" className="pt-6">
+   351→          <SummarizeTab user={user} />
+   352→        </TabsContent>
+   353→        <TabsContent value="describe" className="pt-6">
+   354→          <DescribeTab />
+   355→        </TabsContent>
+   356→        <TabsContent value="chat" className="pt-6">
+   357→          <ChatTab user={user} />
+   358→        </TabsContent>
+   359→      </Tabs>
+   360→    </Container>
+   361→  );
+   362→}
+   363→
+   364→/* ---------------------------- recommendations tab ---------------------------- */
+   365→
+   366→function RecommendationsTab({ user }: { user: PlatformUser | null }) {
+   367→  const [picks, setPicks] = useState<AiRecommendation[] | null>(null);
+   368→  const [provider, setProvider] = useState('');
+   369→  const [loading, setLoading] = useState(false);
+   370→  const [error, setError] = useState<string | null>(null);
+   371→  const [upgrade, setUpgrade] = useState<string | null>(null);
+   372→
+   373→  async function fetchPicks() {
+   374→    if (loading) return;
+   375→    setLoading(true);
+   376→    setError(null);
+   377→    setUpgrade(null);
+   378→    try {
+   379→      const res = await platform.aiRecommendations(8);
+   380→      setPicks(res.data);
+   381→      setProvider(res.provider);
+   382→    } catch (e) {
+   383→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+   384→      else setError(e instanceof Error ? e.message : 'Could not get AI picks');
+   385→    } finally {
+   386→      setLoading(false);
+   387→    }
+   388→  }
+   389→
+   390→  return (
+   391→    <div className="space-y-6">
+   392→      {/* Hero */}
+   393→      <div className="rounded-2xl bg-gradient-to-br from-rose-500/50 via-fuchsia-500/30 to-amber-500/40 p-[1px]">
+   394→        <div className="rounded-2xl bg-[#0d0d14] p-5 sm:p-7">
+   395→          <div className="flex flex-wrap items-end justify-between gap-4">
+   396→            <div>
+   397→              <h2 className="flex items-center gap-2.5 text-xl font-black tracking-tight text-white sm:text-2xl">
+   398→                <Dices className="h-6 w-6 text-rose-400" aria-hidden />
+   399→                AI picks for you
+   400→              </h2>
+   401→              <p className="mt-1 max-w-xl text-sm text-zinc-400">
+   402→                {user
+   403→                  ? 'Eight picks ranked by the Animaxia LLM against your taste profile and watch history.'
+   404→                  : 'Eight LLM-ranked picks from the library. Sign in for picks personalized to your taste profile.'}
+   405→              </p>
+   406→            </div>
+   407→            <Button
+   408→              type="button"
+   409→              size="lg"
+   410→              onClick={fetchPicks}
+   411→              disabled={loading}
+   412→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   413→            >
+   414→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Dices aria-hidden />}
+   415→              {loading ? 'Thinking…' : picks ? 'Regenerate' : 'Get AI picks'}
+   416→            </Button>
+   417→          </div>
+   418→        </div>
+   419→      </div>
+   420→
+   421→      {upgrade && <UpgradeCard message={upgrade} />}
+   422→      {error && !upgrade && <ErrorState message={error} onRetry={fetchPicks} />}
+   423→      {loading && <LoadingCards count={8} />}
+   424→
+   425→      {!loading && picks && picks.length === 0 && (
+   426→        <EmptyState
+   427→          title="No picks right now"
+   428→          message="The library is too sparse for the LLM to work with — add a few more titles and try again."
+   429→        />
+   430→      )}
+   431→
+   432→      {!loading && picks && picks.length > 0 && (
+   433→        <>
+   434→          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   435→            {picks.map((rec) => (
+   436→              <RecommendationCard key={rec.content.id} rec={rec} />
+   437→            ))}
+   438→          </div>
+   439→          <p className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+   440→            Picks generated by Animaxia Intelligence <ProviderBadge provider={provider} />
+   441→          </p>
+   442→        </>
+   443→      )}
+   444→    </div>
+   445→  );
+   446→}
+   447→
+   448→function RecommendationCard({ rec }: { rec: AiRecommendation }) {
+   449→  const [imgError, setImgError] = useState(false);
+   450→  const c = rec.content;
+   451→  const md = c.metadata || {};
+   452→  const poster = c.thumbnail || (typeof md.backdrop === 'string' ? md.backdrop : null);
+   453→  const showImage = Boolean(poster) && !imgError;
+   454→
+   455→  return (
+   456→    <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+   457→      <div className="aspect-[2/3] w-full overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
+   458→        {showImage ? (
+   459→          <img
+   460→            src={poster as string}
+   461→            alt={`${c.title} poster`}
+   462→            loading="lazy"
+   463→            onError={() => setImgError(true)}
+   464→            className="h-full w-full object-cover"
+   465→          />
+   466→        ) : (
+   467→          <BrandPlaceholder title={c.title} />
+   468→        )}
+   469→      </div>
+   470→      <p className="line-clamp-4 text-sm italic leading-relaxed text-zinc-300">
+   471→        <span className="font-bold text-rose-400">&ldquo;</span>
+   472→        {rec.reason}
+   473→        <span className="font-bold text-rose-400">&rdquo;</span>
+   474→      </p>
+   475→      <div className="mt-auto space-y-2.5">
+   476→        <p className="line-clamp-1 text-sm font-semibold text-zinc-100">{c.title}</p>
+   477→        <div className="flex items-center justify-between gap-2">
+   478→          <TypeBadge type={c.type} />
+   479→          <Button
+   480→            type="button"
+   481→            size="sm"
+   482→            variant="outline"
+   483→            onClick={() => navigate(`/content/${c.id}`)}
+   484→            className="h-9 border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   485→          >
+   486→            View
+   487→          </Button>
+   488→        </div>
+   489→      </div>
+   490→    </div>
+   491→  );
+   492→}
+   493→
+   494→/* ------------------------------- summarize tab ------------------------------- */
+   495→
+   496→function SummarizeTab({ user }: { user: PlatformUser | null }) {
+   497→  const [selected, setSelected] = useState<Suggestion | null>(null);
+   498→  const [result, setResult] = useState<{ summary: string; provider: string } | null>(null);
+   499→  const [loading, setLoading] = useState(false);
+   500→  const [error, setError] = useState<string | null>(null);
+   501→  const [upgrade, setUpgrade] = useState<string | null>(null);
+   502→
+   503→  async function summarize() {
+   504→    if (!selected || loading) return;
+   505→    setLoading(true);
+   506→    setError(null);
+   507→    setUpgrade(null);
+   508→    try {
+   509→      const res = await platform.aiSummarize(selected.id);
+   510→      setResult({ summary: res.summary, provider: res.provider });
+   511→    } catch (e) {
+   512→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+   513→      else setError(e instanceof Error ? e.message : 'Could not generate a summary');
+   514→    } finally {
+   515→      setLoading(false);
+   516→    }
+   517→  }
+   518→
+   519→  return (
+   520→    <div className="mx-auto max-w-3xl space-y-6">
+   521→      <Card className="border-white/10 bg-white/[0.03]">
+   522→        <CardContent className="space-y-4 p-5 sm:p-6">
+   523→          <ContentPicker
+   524→            selected={selected}
+   525→            onSelect={(s) => {
+   526→              setSelected(s);
+   527→              setResult(null);
+   528→            }}
+   529→            label="Pick a title from your library"
+   530→            inputId="summarize-picker"
+   531→          />
+   532→          <div className="flex flex-wrap items-center justify-between gap-3">
+   533→            <p className="text-xs text-zinc-500">
+   534→              {!user && 'Anonymous visitors get 5 AI requests per day — sign in for higher daily limits.'}
+   535→            </p>
+   536→            <Button
+   537→              type="button"
+   538→              onClick={summarize}
+   539→              disabled={!selected || loading}
+   540→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   541→            >
+   542→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+   543→              {loading ? 'Summarizing…' : 'Summarize'}
+   544→            </Button>
+   545→          </div>
+   546→        </CardContent>
+   547→      </Card>
+   548→
+   549→      {upgrade && <UpgradeCard message={upgrade} />}
+   550→      {error && !upgrade && <ErrorState message={error} onRetry={summarize} />}
+   551→
+   552→      {loading && (
+   553→        <Card className="border-white/10 bg-white/[0.03]" aria-busy="true">
+   554→          <CardContent className="space-y-2.5 p-5 sm:p-6">
+   555→            <Skeleton className="h-5 w-2/5" />
+   556→            <Skeleton className="h-4 w-full" />
+   557→            <Skeleton className="h-4 w-11/12" />
+   558→            <Skeleton className="h-4 w-4/5" />
+   559→          </CardContent>
+   560→        </Card>
+   561→      )}
+   562→
+   563→      {!loading && result && (
+   564→        <Card className="border-white/10 bg-white/[0.03]">
+   565→          <CardContent className="space-y-4 p-5 sm:p-6">
+   566→            <div className="flex flex-wrap items-center justify-between gap-2">
+   567→              <h3 className="text-base font-bold text-zinc-100">{selected?.title}</h3>
+   568→              <ProviderBadge provider={result.provider} />
+   569→            </div>
+   570→            <AiText text={result.summary} />
+   571→            <div className="flex justify-end border-t border-white/5 pt-3">
+   572→              <Button
+   573→                type="button"
+   574→                variant="outline"
+   575→                size="sm"
+   576→                onClick={() => void copyText(result.summary)}
+   577→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   578→              >
+   579→                Copy summary
+   580→              </Button>
+   581→            </div>
+   582→          </CardContent>
+   583→        </Card>
+   584→      )}
+   585→    </div>
+   586→  );
+   587→}
+   588→
+   589→/* -------------------------------- describe tab -------------------------------- */
+   590→
+   591→const DESCRIBE_TYPES = ['movie', 'tv', 'anime', 'sports', 'news'] as const;
+   592→
+   593→const DESCRIBE_EXAMPLES: { label: string; title: string; type: (typeof DESCRIBE_TYPES)[number]; genres: string }[] = [
+   594→  { label: 'Neon cyberpunk revenge saga', title: 'Neon Requiem', type: 'movie', genres: 'Sci-Fi, Action, Thriller' },
+   595→  { label: 'Cozy slice-of-life bakery anime', title: 'Flour & Feelings', type: 'anime', genres: 'Slice of Life, Comedy, Gourmet' },
+   596→];
+   597→
+   598→function DescribeTab() {
+   599→  const [title, setTitle] = useState('');
+   600→  const [type, setType] = useState<(typeof DESCRIBE_TYPES)[number]>('movie');
+   601→  const [genres, setGenres] = useState('');
+   602→  const [result, setResult] = useState<{ description: string; provider: string } | null>(null);
+   603→  const [loading, setLoading] = useState(false);
+   604→  const [error, setError] = useState<string | null>(null);
+   605→  const [upgrade, setUpgrade] = useState<string | null>(null);
+   606→
+   607→  async function describe() {
+   608→    const trimmed = title.trim();
+   609→    if (!trimmed || loading) return;
+   610→    setLoading(true);
+   611→    setError(null);
+   612→    setUpgrade(null);
+   613→    try {
+   614→      const genreList = genres
+   615→        .split(',')
+   616→        .map((g) => g.trim())
+   617→        .filter(Boolean);
+   618→      const res = await platform.aiDescribe({ title: trimmed, type, genres: genreList.length ? genreList : undefined });
+   619→      setResult({ description: res.description, provider: res.provider });
+   620→    } catch (e) {
+   621→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+   622→      else setError(e instanceof Error ? e.message : 'Could not generate a description');
+   623→    } finally {
+   624→      setLoading(false);
+   625→    }
+   626→  }
+   627→
+   628→  return (
+   629→    <div className="mx-auto max-w-3xl space-y-6">
+   630→      <Card className="border-white/10 bg-white/[0.03]">
+   631→        <CardContent className="space-y-4 p-5 sm:p-6">
+   632→          <div className="space-y-2">
+   633→            <label htmlFor="describe-title" className="text-sm font-semibold text-zinc-300">
+   634→              Title
+   635→            </label>
+   636→            <Input
+   637→              id="describe-title"
+   638→              value={title}
+   639→              onChange={(e) => setTitle(e.target.value)}
+   640→              placeholder="e.g. Neon Requiem"
+   641→              maxLength={200}
+   642→              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   643→            />
+   644→          </div>
+   645→
+   646→          <div className="grid gap-4 sm:grid-cols-2">
+   647→            <div className="space-y-2">
+   648→              <label htmlFor="describe-type" className="text-sm font-semibold text-zinc-300">
+   649→                Type
+   650→              </label>
+   651→              <Select value={type} onValueChange={(v) => setType(v as (typeof DESCRIBE_TYPES)[number])}>
+   652→                <SelectTrigger
+   653→                  id="describe-type"
+   654→                  className="h-11 w-full rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 focus-visible:ring-rose-500/30"
+   655→                >
+   656→                  <SelectValue />
+   657→                </SelectTrigger>
+   658→                <SelectContent className="border-white/10 bg-[#12121c] text-zinc-100">
+   659→                  {DESCRIBE_TYPES.map((t) => (
+   660→                    <SelectItem key={t} value={t} className="capitalize focus:bg-white/10 focus:text-white">
+   661→                      <span className="capitalize">{t}</span>
+   662→                    </SelectItem>
+   663→                  ))}
+   664→                </SelectContent>
+   665→              </Select>
+   666→            </div>
+   667→            <div className="space-y-2">
+   668→              <label htmlFor="describe-genres" className="text-sm font-semibold text-zinc-300">
+   669→                Genres <span className="font-normal text-zinc-500">(comma separated)</span>
+   670→              </label>
+   671→              <Input
+   672→                id="describe-genres"
+   673→                value={genres}
+   674→                onChange={(e) => setGenres(e.target.value)}
+   675→                placeholder="e.g. Sci-Fi, Action, Thriller"
+   676→                maxLength={200}
+   677→                className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   678→              />
+   679→            </div>
+   680→          </div>
+   681→
+   682→          <div className="flex flex-wrap items-center gap-2">
+   683→            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Try</span>
+   684→            {DESCRIBE_EXAMPLES.map((ex) => (
+   685→              <button
+   686→                key={ex.label}
+   687→                type="button"
+   688→                onClick={() => {
+   689→                  setTitle(ex.title);
+   690→                  setType(ex.type);
+   691→                  setGenres(ex.genres);
+   692→                }}
+   693→                className="rounded-full border border-rose-500/25 bg-rose-500/10 px-3 py-1 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20 hover:text-rose-200"
+   694→              >
+   695→                {ex.label}
+   696→              </button>
+   697→            ))}
+   698→          </div>
+   699→
+   700→          <div className="flex justify-end">
+   701→            <Button
+   702→              type="button"
+   703→              onClick={describe}
+   704→              disabled={!title.trim() || loading}
+   705→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   706→            >
+   707→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+   708→              {loading ? 'Writing…' : 'Generate description'}
+   709→            </Button>
+   710→          </div>
+   711→        </CardContent>
+   712→      </Card>
+   713→
+   714→      {upgrade && <UpgradeCard message={upgrade} />}
+   715→      {error && !upgrade && <ErrorState message={error} onRetry={describe} />}
+   716→
+   717→      {loading && (
+   718→        <Card className="border-white/10 bg-white/[0.03]" aria-busy="true">
+   719→          <CardContent className="space-y-2.5 p-5 sm:p-6">
+   720→            <Skeleton className="h-5 w-2/5" />
+   721→            <Skeleton className="h-4 w-full" />
+   722→            <Skeleton className="h-4 w-11/12" />
+   723→          </CardContent>
+   724→        </Card>
+   725→      )}
+   726→
+   727→      {!loading && result && (
+   728→        <Card className="border-white/10 bg-white/[0.03]">
+   729→          <CardContent className="space-y-4 p-5 sm:p-6">
+   730→            <div className="flex flex-wrap items-center justify-between gap-2">
+   731→              <h3 className="text-base font-bold text-zinc-100">{title.trim()}</h3>
+   732→              <ProviderBadge provider={result.provider} />
+   733→            </div>
+   734→            <AiText text={result.description} />
+   735→            <div className="flex justify-end border-t border-white/5 pt-3">
+   736→              <Button
+   737→                type="button"
+   738→                variant="outline"
+   739→                size="sm"
+   740→                onClick={() => void copyText(result.description)}
+   741→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   742→              >
+   743→                Copy description
+   744→              </Button>
+   745→            </div>
+   746→          </CardContent>
+   747→        </Card>
+   748→      )}
+   749→    </div>
+   750→  );
+   751→}
+   752→
+   753→/* ---------------------------------- chat tab ---------------------------------- */
+   754→
+   755→function ChatTab({ user }: { user: PlatformUser | null }) {
+   756→  const [selected, setSelected] = useState<Suggestion | null>(null);
+   757→  const [messages, setMessages] = useState<ChatMessage[]>([]);
+   758→  const [input, setInput] = useState('');
+   759→  const [busy, setBusy] = useState(false);
+   760→  const [quotaError, setQuotaError] = useState<string | null>(null);
+   761→  const scrollRef = useRef<HTMLDivElement>(null);
+   762→
+   763→  useEffect(() => {
+   764→    const el = scrollRef.current;
+   765→    if (el) el.scrollTop = el.scrollHeight;
+   766→  }, [messages, busy]);
+   767→
+   768→  if (!user) {
+   769→    return (
+   770→      <div className="mx-auto max-w-3xl">
+   771→        <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.02] p-10 text-center">
+   772→          <div className="rounded-full bg-rose-500/10 p-3 text-rose-300">
+   773→            <Sparkles className="h-6 w-6" aria-hidden />
+   774→          </div>
+   775→          <div>
+   776→            <p className="font-semibold text-zinc-100">Sign in to chat with Animaxia AI</p>
+   777→            <p className="mt-1 max-w-md text-sm text-zinc-400">
+   778→              Ask anything about any title in the library — characters, plots, watch order, hidden gems.
+   779→            </p>
+   780→          </div>
+   781→          <Button
+   782→            type="button"
+   783→            className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   784→            onClick={() => navigate('/auth')}
+   785→          >
+   786→            Sign in to chat
+   787→          </Button>
+   788→        </div>
+   789→      </div>
+   790→    );
+   791→  }
+   792→
+   793→  async function send() {
+   794→    const text = input.trim();
+   795→    if (!text || !selected || busy) return;
+   796→    setBusy(true);
+   797→    setQuotaError(null);
+   798→    setMessages((prev) => [...prev, { role: 'user', text }]);
+   799→    setInput('');
+   800→    try {
+   801→      const res = await platform.aiChat(selected.id, text);
+   802→      setMessages((prev) => [...prev, { role: 'ai', text: res.reply }]);
+   803→    } catch (e) {
+   804→      if (e instanceof PlatformError && e.upgrade) {
+   805→        setQuotaError(e.message);
+   806→      } else {
+   807→        setMessages((prev) => [...prev, { role: 'ai', text: e instanceof Error ? e.message : 'Something went wrong.' }]);
+   808→      }
+   809→    } finally {
+   810→      setBusy(false);
+   811→    }
+   812→  }
+   813→
+   814→  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+   815→    if (e.key === 'Enter' && !e.shiftKey) {
+   816→      e.preventDefault();
+   817→      void send();
+   818→    }
+   819→  };
+   820→
+   821→  return (
+   822→    <div className="mx-auto max-w-3xl space-y-4">
+   823→      <Card className="border-white/10 bg-white/[0.03]">
+   824→        <CardContent className="p-5 sm:p-6">
+   825→          <ContentPicker
+   826→            selected={selected}
+   827→            onSelect={(s) => {
+   828→              setSelected(s);
+   829→              setMessages([]);
+   830→              setQuotaError(null);
+   831→            }}
+   832→            label="Pick a title to talk about"
+   833→            inputId="chat-picker"
+   834→          />
+   835→        </CardContent>
+   836→      </Card>
+   837→
+   838→      <div
+   839→        ref={scrollRef}
+   840→        className="custom-scrollbar max-h-96 space-y-3 overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-4"
+   841→        aria-live="polite"
+   842→        aria-label="Chat conversation"
+   843→      >
+   844→        {messages.length === 0 && !busy && !quotaError && (
+   845→          <p className="py-8 text-center text-xs leading-relaxed text-zinc-500">
+   846→            {selected
+   847→              ? `Ask anything about ${selected.title} — the AI knows the title's details and your conversation history.`
+   848→              : 'Pick a title above, then ask anything — characters, plot, where to start…'}
+   849→          </p>
+   850→        )}
+   851→        {messages.map((m, i) => (
+   852→          <div key={i} className={cn('flex gap-2.5', m.role === 'user' ? 'justify-end' : 'justify-start')}>
+   853→            {m.role === 'ai' && (
+   854→              <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+   855→                <Sparkles className="h-3.5 w-3.5 text-rose-300" aria-hidden />
+   856→              </span>
+   857→            )}
+   858→            <div
+   859→              className={cn(
+   860→                'max-w-[85%] whitespace-pre-wrap break-words px-3.5 py-2 text-sm leading-relaxed',
+   861→                m.role === 'user'
+   862→                  ? 'rounded-2xl rounded-br-sm bg-rose-600/20 text-rose-50'
+   863→                  : 'rounded-2xl rounded-bl-sm bg-white/5 text-zinc-200',
+   864→              )}
+   865→            >
+   866→              {m.text}
+   867→            </div>
+   868→          </div>
+   869→        ))}
+   870→        {busy && (
+   871→          <div className="flex justify-start">
+   872→            <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+   873→              <Sparkles className="h-3.5 w-3.5 text-rose-300" aria-hidden />
+   874→            </span>
+   875→            <div className="rounded-2xl rounded-bl-sm bg-white/5 px-3.5 py-2">
+   876→              <TypingDots />
+   877→            </div>
+   878→          </div>
+   879→        )}
+   880→      </div>
+   881→
+   882→      {quotaError && <UpgradeCard message={quotaError} />}
+   883→
+   884→      <div className="flex items-end gap-2">
+   885→        <Textarea
+   886→          value={input}
+   887→          onChange={(e) => setInput(e.target.value)}
+   888→          onKeyDown={onKeyDown}
+   889→          placeholder={selected ? `Ask about ${selected.title}…` : 'Pick a title first…'}
+   890→          aria-label="Message Animaxia AI"
+   891→          rows={2}
+   892→          maxLength={1000}
+   893→          disabled={!selected}
+   894→          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30 disabled:opacity-50"
+   895→        />
+   896→        <Button
+   897→          type="button"
+   898→          onClick={() => void send()}
+   899→          disabled={busy || !selected || !input.trim()}
+   900→          aria-label="Send message"
+   901→          className="h-11 bg-rose-600 font-bold text-white hover:bg-rose-500"
+   902→        >
+   903→          {busy ? <Loader2 className="animate-spin" aria-hidden /> : <Send aria-hidden />}
+   904→        </Button>
+   905→      </div>
+   906→      <div className="flex items-center justify-between gap-3">
+   907→        <p className="text-[11px] text-zinc-600">Enter to send · Shift+Enter for a new line</p>
+   908→        {messages.length > 0 && (
+   909→          <button
+   910→            type="button"
+   911→            onClick={() => {
+   912→              setMessages([]);
+   913→              setQuotaError(null);
+   914→            }}
+   915→            className="text-[11px] font-semibold text-zinc-500 transition hover:text-zinc-300"
+   916→          >
+   917→            Clear conversation
+   918→          </button>
+   919→        )}
+   920→      </div>
+   921→    </div>
+   922→  );
+   923→}
+   924→
+   925→export default AiView;
+   926→

@@ -1,0 +1,89 @@
+# animaxia-edge-cron — Cloudflare Worker config
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# The CRON worker drives the scheduled edge jobs (cfg.cron.jobs in
+# shared/config.ts — cloud warm-ups, admin TMDB/Jikan refreshes with public
+# fallbacks, edge-only KV compaction) PLUS the 5-minute analytics buffer
+# flush fanned out to animaxia-edge-analytics through the SVC_ANALYTICS
+# service binding. Every run is recorded to EDGE_CACHE (cron:log:*, 7-day
+# TTL) and surfaced on GET /cron/jobs; jobs can be triggered manually on
+# GET|POST /cron/run/:job (internal auth). Full logic: src/index.ts.
+
+name = "animaxia-edge-cron"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+# `wrangler whoami` shows your subdomain. Turn off once you route the zone
+# through the gateway worker if you don't want the extra public URL.
+workers_dev = true
+
+# --- Schedules ---------------------------------------------------------------
+# Every job schedule from DEFAULT_CONFIG.cron.jobs (shared/config.ts) plus
+# the 5-minute analytics flush. Schedules are UTC. The worker matches
+# event.cron against cfg.cron.jobs at runtime — an unmatched trigger runs the
+# analytics flush, so new crons can be added here without a code change.
+[triggers]
+crons = [
+  "0 5 * * *",     # daily-picks      GET  /api/all
+  "0 6 * * 1",     # weekly-recap     GET  /api/analytics/trending?window=7d&limit=20
+  "0 */6 * * *",   # tmdb-refresh     POST /api/workers/refresh {source:'tmdb'} (admin)
+  "30 */6 * * *",  # jikan-refresh    POST /api/workers/refresh {source:'jikan'} (admin)
+  "0 3 * * *",     # cleanup-logs     edge-only: compact waf:* + cron:log:* in EDGE_CACHE
+  "0 4 * * *",     # cleanup-sessions edge-only: compact rl:* + replay:* namespaces
+  "30 4 * * *",    # miner-sync       POST /api/miner/jobs {daily-sync, allTenants} (admin) — FAZA 12
+  "*/5 * * * *",   # analytics-flush  POST /analytics/flush via the SVC_ANALYTICS binding
+]
+
+# --- Bindings ----------------------------------------------------------------
+# KV: EDGE_CONFIG — runtime configuration (key "config", shared/config.ts
+# defaults + KV override; cfg.cron.jobs drives the schedule → job mapping).
+# Create with:  wrangler kv namespace create EDGE_CONFIG
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_CACHE — cron run log (cron:log:<ts>:<job>, TTL 7 days) + the
+# waf:* block logs compacted by cleanup-logs.
+[[kv_namespaces]]
+binding = "EDGE_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_RATELIMIT — rate-limit buckets (rl:*) compacted by cleanup-sessions.
+[[kv_namespaces]]
+binding = "EDGE_RATELIMIT"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_REPLAY — anti-replay jti registry (replay:*) compacted by
+# cleanup-sessions.
+[[kv_namespaces]]
+binding = "EDGE_REPLAY"
+id = "REPLACE_WITH_KV_ID"
+
+# Service binding to the analytics worker — the 5-minute buffer flush calls
+# POST /analytics/flush with the shared x-internal-token.
+[[services]]
+binding = "SVC_ANALYTICS"
+service = "animaxia-edge-analytics"
+
+# --- Vars --------------------------------------------------------------------
+# Where the cloud monolith / gateway is reached from the edge. The default
+# matches the local mini-services gateway for `wrangler dev` style setups —
+# production must point at the cloud gateway host.
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+
+# --- Secrets -----------------------------------------------------------------
+# NEVER put secrets in this file — use:  wrangler secret put <NAME>
+# (read them from `env.<NAME>`). This worker uses:
+#
+#   EDGE_ADMIN_JWT — optional admin Bearer token sent to adminAuth cron
+#                    endpoints (tmdb/jikan refresh; without it those jobs
+#                    fall back to their public warm-up endpoints) and
+#                    accepted by the /cron/* management routes.
+#
+#   EDGE_INTERNAL_TOKEN — shared token for the SVC_ANALYTICS flush call
+#                    (x-internal-token header). MUST match the token
+#                    configured on animaxia-edge-analytics, otherwise the
+#                    analytics worker rejects the flush with 401.

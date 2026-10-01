@@ -1,0 +1,149 @@
+/* PersonalTab.module.css — scoped styles for the AI Hub "Personal" tab. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* ------------------------------ greeting hero ------------------------------- */
+
+.greetingCard {
+  background: linear-gradient(140deg, rgba(244, 63, 94, 0.14) 0%, var(--card) 58%);
+  border: 1px solid var(--rose-line);
+  border-radius: var(--radius-lg);
+  padding: 26px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.greeting {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1.25;
+  letter-spacing: 0.2px;
+}
+
+.greetingSub {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ------------------------------ AI profile card ----------------------------- */
+
+.profileTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.profileSummary {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ------------------------------- recap expander ------------------------------ */
+
+.recapCard {
+  background: var(--card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.recapHeader {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--font);
+  text-align: left;
+}
+
+.recapTitle {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.chevron {
+  transition: transform 0.18s ease;
+}
+
+.chevronUp {
+  transform: rotate(180deg);
+}
+
+.recapPreview {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.recapLink {
+  background: none;
+  border: none;
+  padding: 0 0 0 4px;
+  color: var(--rose-soft);
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.recapLink:hover {
+  text-decoration: underline;
+}
+
+.recapWeek {
+  color: var(--emerald);
+  font-size: 11.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.recapText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.recapSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ------------------------------- stale hint --------------------------------- */
+
+.staleRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  align-self: center;
+  background: var(--amber-tint);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-pill);
+  padding: 6px 14px;
+  color: var(--amber);
+  font-family: var(--font);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}

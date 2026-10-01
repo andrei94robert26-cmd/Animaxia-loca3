@@ -1,0 +1,738 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * content-view.tsx — Title detail page. Handles two data paths:
+     5→ *  - numeric id   → DB library record (DbContent)
+     6→ *  - ext:type:id  → live provider detail (Jikan anime / TMDB movie / TMDB tv),
+     7→ *                   seeded instantly from the router's extItemCache.
+     8→ */
+     9→
+    10→import { useEffect, useRef, useState } from 'react';
+    11→import { Bookmark, BookmarkCheck, BookmarkPlus, Film, Loader2, Pickaxe, Play, Plus, Users } from 'lucide-react';
+    12→import { toast } from 'sonner';
+    13→import { api, dbToItem } from '@/lib/animaxia/api';
+    14→import { platform, PlatformError } from '@/lib/animaxia/platform';
+    15→import { social } from '@/lib/animaxia/social';
+    16→import { useApi } from '@/lib/animaxia/hooks';
+    17→import { extItemCache, navigate, type AppRoute } from '@/lib/animaxia/router';
+    18→import type { AnimeItem, DbContent, MediaItem, NormalizedItem } from '@/lib/animaxia/types';
+    19→import { useAuth } from '@/components/animaxia/auth-provider';
+    20→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+    21→import { Button } from '@/components/ui/button';
+    22→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    23→import { Skeleton } from '@/components/ui/skeleton';
+    24→import { Container, Section } from '../section';
+    25→import { ContentAiPanel } from '../content-ai-panel';
+    26→import { ContentReviews } from '../content-reviews';
+    27→import { ContentSocial } from '../content-social';
+    28→import { ContentRow } from '../content-row';
+    29→import { EmptyState, ErrorState, RatingBadge, TypeBadge } from '../states';
+    30→
+    31→/* ------------------------------- helpers ------------------------------- */
+    32→
+    33→function formatDate(iso?: string | null): string | null {
+    34→  if (!iso) return null;
+    35→  const d = new Date(iso);
+    36→  if (Number.isNaN(d.getTime())) return null;
+    37→  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    38→}
+    39→
+    40→function hostOf(url?: string): string | null {
+    41→  if (!url) return null;
+    42→  try {
+    43→    return new URL(url).hostname.replace(/^www\./, '');
+    44→  } catch {
+    45→    return null;
+    46→  }
+    47→}
+    48→
+    49→function dbSourceLabel(c: DbContent): string {
+    50→  const md = c.metadata || {};
+    51→  if (typeof md.source === 'string' && md.source) return md.source;
+    52→  if (typeof md.siteName === 'string' && md.siteName) return md.siteName;
+    53→  const ext = c.externalid || '';
+    54→  if (/^https?:\/\//.test(ext)) return hostOf(ext) || 'mined';
+    55→  const prefix = ext.split(':')[0];
+    56→  return prefix || 'animaxia';
+    57→}
+    58→
+    59→function isNotFound(message?: string | null): boolean {
+    60→  return Boolean(message && message.toLowerCase().includes('not found'));
+    61→}
+    62→
+    63→function Chip({ children }: { children: React.ReactNode }) {
+    64→  return (
+    65→    <span className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-medium text-zinc-300">
+    66→      {children}
+    67→    </span>
+    68→  );
+    69→}
+    70→
+    71→function SourceChip({ label }: { label: string }) {
+    72→  return (
+    73→    <span className="inline-flex items-center rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 font-mono text-[11px] font-semibold text-rose-300">
+    74→      {label}
+    75→    </span>
+    76→  );
+    77→}
+    78→
+    79→function PosterFrame({ poster, title, className }: { poster: string | null; title: string; className?: string }) {
+    80→  if (poster) {
+    81→    return (
+    82→      <img
+    83→        src={poster}
+    84→        alt={`${title} poster`}
+    85→        className={`aspect-[2/3] w-full rounded-xl border border-white/10 object-cover shadow-2xl shadow-black/60 ${className ?? ''}`}
+    86→      />
+    87→    );
+    88→  }
+    89→  return (
+    90→    <div
+    91→      className={`grid aspect-[2/3] w-full place-items-center rounded-xl border border-white/10 bg-gradient-to-br from-white/[0.08] to-white/[0.02] shadow-2xl shadow-black/60 ${className ?? ''}`}
+    92→    >
+    93→      <Film className="h-10 w-10 text-rose-400/60" aria-hidden />
+    94→    </div>
+    95→  );
+    96→}
+    97→
+    98→function NotFoundPanel({ message, onRetry }: { message?: string | null; onRetry?: () => void }) {
+    99→  return (
+   100→    <Container className="py-20">
+   101→      <EmptyState
+   102→        title="Title not found"
+   103→        message={message || 'This title is not in the library and could not be loaded.'}
+   104→        action={
+   105→          <div className="flex flex-wrap justify-center gap-2">
+   106→            {onRetry && (
+   107→              <Button variant="outline" className="border-white/15 bg-white/5 hover:bg-white/10" onClick={onRetry}>
+   108→                Try again
+   109→              </Button>
+   110→            )}
+   111→            <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/home')}>
+   112→              Back to home
+   113→            </Button>
+   114→          </div>
+   115→        }
+   116→      />
+   117→    </Container>
+   118→  );
+   119→}
+   120→
+   121→function ContentSkeleton() {
+   122→  return (
+   123→    <div aria-busy="true">
+   124→      <Skeleton className="h-[38vh] min-h-[260px] w-full rounded-none" />
+   125→      <Container className="relative -mt-20 sm:-mt-28">
+   126→        <div className="flex gap-5 sm:gap-8">
+   127→          <Skeleton className="aspect-[2/3] w-28 shrink-0 rounded-xl sm:w-44" />
+   128→          <div className="flex-1 space-y-4 pb-6 pt-2 sm:pt-8">
+   129→            <Skeleton className="h-4 w-44" />
+   130→            <Skeleton className="h-9 w-3/4 sm:h-11" />
+   131→            <Skeleton className="h-4 w-1/2" />
+   132→            <Skeleton className="h-11 w-56" />
+   133→            <Skeleton className="h-4 w-full max-w-xl" />
+   134→          </div>
+   135→        </div>
+   136→      </Container>
+   137→      <Container className="mt-10 space-y-4">
+   138→        <Skeleton className="h-5 w-24" />
+   139→        <Skeleton className="h-4 w-full" />
+   140→        <Skeleton className="h-4 w-11/12" />
+   141→        <Skeleton className="h-4 w-3/4" />
+   142→      </Container>
+   143→    </div>
+   144→  );
+   145→}
+   146→
+   147→/* ------------------------------ main view ------------------------------ */
+   148→
+   149→export function ContentView({ route }: { route: AppRoute }) {
+   150→  const ref = route.params[0] || '';
+   151→  const isNumeric = /^\d+$/.test(ref);
+   152→  const isExt = ref.startsWith('ext:');
+   153→  const [, extType, extId] = isExt ? ref.split(':') : [];
+   154→  const extTypeValid = extType === 'anime' || extType === 'movie' || extType === 'tv';
+   155→
+   156→  const db = useApi(`content-${ref}`, () => api.content(Number(ref)), { enabled: isNumeric });
+   157→
+   158→  const ext = useApi(
+   159→    `ext-${ref}`,
+   160→    () =>
+   161→      extType === 'anime'
+   162→        ? api.animeById(extId as string)
+   163→        : extType === 'tv'
+   164→          ? api.tvById(extId as string)
+   165→          : api.movieById(extId as string),
+   166→    { enabled: isExt && extTypeValid && Boolean(extId) },
+   167→  );
+   168→
+   169→  if (isNumeric) {
+   170→    /* useApi keeps the previous record while the key changes — only trust data matching the requested id. */
+   171→    const current = db.data && db.data.id === Number(ref) ? db.data : null;
+   172→    if (db.loading && !current) return <ContentSkeleton />;
+   173→    if (db.error && !current) {
+   174→      if (isNotFound(db.error)) return <NotFoundPanel message={db.error} />;
+   175→      return (
+   176→        <Container className="py-20">
+   177→          <ErrorState message={db.error} onRetry={db.refetch} />
+   178→        </Container>
+   179→      );
+   180→    }
+   181→    if (current) return <DbContentDetail content={current} />;
+   182→    return <ContentSkeleton />;
+   183→  }
+   184→
+   185→  if (isExt) {
+   186→    if (!extTypeValid || !extId) return <NotFoundPanel message="The external reference in the URL is malformed." />;
+   187→    const instant = extItemCache.get(`ext:${extType}:${extId}`);
+   188→    const live = ext.data && String(ext.data.data.id) === String(extId) ? ext.data.data : null;
+   189→    if (ext.loading && !live && !instant) return <ContentSkeleton />;
+   190→    if (ext.error && !live && !instant) {
+   191→      if (isNotFound(ext.error)) return <NotFoundPanel message={ext.error} />;
+   192→      return (
+   193→        <Container className="py-20">
+   194→          <ErrorState message={ext.error} onRetry={ext.refetch} />
+   195→        </Container>
+   196→      );
+   197→    }
+   198→    return <ExtContentDetail extType={extType} extId={extId} instant={instant} live={live} />;
+   199→  }
+   200→
+   201→  return <NotFoundPanel message="The content reference in the URL is missing or malformed." />;
+   202→}
+   203→
+   204→/* --------------------------- DB detail view --------------------------- */
+   205→
+   206→function DbContentDetail({ content }: { content: DbContent }) {
+   207→  const md = content.metadata || {};
+   208→  const poster = content.thumbnail || null;
+   209→  const backdrop = typeof md.backdrop === 'string' && md.backdrop ? md.backdrop : null;
+   210→  const overview =
+   211→    [md.overview, md.synopsis, md.description].find((v) => typeof v === 'string' && v.trim() !== '') || null;
+   212→  const rating = typeof md.rating === 'number' ? md.rating : typeof md.score === 'number' ? md.score : null;
+   213→  const year = md.year != null && md.year !== '' ? String(md.year) : null;
+   214→  const genres = Array.isArray(md.genres) ? md.genres.map(String) : [];
+   215→  const playable = Boolean(md.player?.sources?.length);
+   216→  const sourceLabel = dbSourceLabel(content);
+   217→  const mined = md.mined;
+   218→  const added = formatDate(content.createdat);
+   219→
+   220→  const runtime = typeof md.runtime === 'number' ? md.runtime : null;
+   221→  const episodes = typeof md.episodes === 'number' ? md.episodes : null;
+   222→  const status = typeof md.status === 'string' && md.status ? md.status : null;
+   223→  const studios = Array.isArray(md.studios) ? md.studios.map(String) : [];
+   224→
+   225→  const fetchMore = content.type !== 'featured';
+   226→  const more = useApi(
+   227→    `content-more-${content.type}-${content.id}`,
+   228→    () => api.all({ type: content.type, limit: 13 }),
+   229→    { enabled: fetchMore },
+   230→  );
+   231→  const moreItems = (more.data?.data || []).map(dbToItem).filter((i) => i.dbId !== content.id);
+   232→
+   233→  /* ---- platform: watchlist + view tracking (Task 10-b) ---- */
+   234→
+   235→  const { user } = useAuth();
+   236→  const [wlBusy, setWlBusy] = useState(false);
+   237→
+   238→  /* ---- FAZA 10: watch party (creates a live room for this title) ---- */
+   239→  const [partyBusy, setPartyBusy] = useState(false);
+   240→
+   241→  async function startWatchParty() {
+   242→    if (!user) {
+   243→      toast('Sign in to start a watch party');
+   244→      navigate('/auth');
+   245→      return;
+   246→    }
+   247→    if (partyBusy) return;
+   248→    setPartyBusy(true);
+   249→    try {
+   250→      const res = await social.createParty({ contentId: content.id });
+   251→      toast.success('Watch party started — share the invite code');
+   252→      navigate(`/social/party/${res.party.id}`);
+   253→    } catch (err) {
+   254→      toast.error(err instanceof Error ? err.message : 'Could not start the watch party');
+   255→    } finally {
+   256→      setPartyBusy(false);
+   257→    }
+   258→  }
+   259→  const watchlist = useApi(`watchlist-${user?.id ?? 'anon'}`, () => platform.watchlist(), {
+   260→    enabled: !!user,
+   261→  });
+   262→  const inWatchlist = Boolean(watchlist.data?.data.some((entry) => entry.content.id === content.id));
+   263→
+   264→  async function toggleWatchlist() {
+   265→    if (!user) {
+   266→      toast('Sign in to use your watchlist');
+   267→      navigate('/auth');
+   268→      return;
+   269→    }
+   270→    if (wlBusy) return;
+   271→    setWlBusy(true);
+   272→    try {
+   273→      if (!inWatchlist) {
+   274→        await platform.addWatchlist(content.id);
+   275→        toast.success('Added to watchlist');
+   276→      } else {
+   277→        await platform.removeWatchlist(content.id);
+   278→        toast('Removed from watchlist');
+   279→      }
+   280→      await watchlist.refetch();
+   281→    } catch (err) {
+   282→      if (err instanceof PlatformError && err.upgrade) {
+   283→        toast.error(err.message, { action: { label: 'Upgrade', onClick: () => navigate('/premium') } });
+   284→      } else {
+   285→        toast.error(err instanceof Error ? err.message : 'Could not update your watchlist');
+   286→      }
+   287→    } finally {
+   288→      setWlBusy(false);
+   289→    }
+   290→  }
+   291→
+   292→  /* Fire-and-forget analytics view event — once per content id per mount. */
+   293→  const viewedRef = useRef<number | null>(null);
+   294→  useEffect(() => {
+   295→    if (viewedRef.current === content.id) return;
+   296→    viewedRef.current = content.id;
+   297→    platform.recordView(content.id, 'view').catch(() => {
+   298→      /* analytics is best-effort */
+   299→    });
+   300→  }, [content.id]);
+   301→
+   302→  const heroImage = backdrop || poster;
+   303→
+   304→  return (
+   305→    <article>
+   306→      {/* Backdrop hero */}
+   307→      <div className="relative h-[38vh] min-h-[260px] w-full">
+   308→        {heroImage ? (
+   309→          <img src={heroImage} alt="" aria-hidden className="h-full w-full object-cover" />
+   310→        ) : (
+   311→          <div className="h-full w-full bg-gradient-to-br from-white/[0.08] via-transparent to-transparent" />
+   312→        )}
+   313→        <div aria-hidden className="absolute inset-0 bg-gradient-to-t from-[#0a0a10] via-[#0a0a10]/40 to-transparent" />
+   314→        <div aria-hidden className="absolute inset-0 bg-gradient-to-r from-[#0a0a10]/70 via-[#0a0a10]/10 to-transparent" />
+   315→      </div>
+   316→
+   317→      {/* Info panel */}
+   318→      <Container className="relative z-10 -mt-20 sm:-mt-28">
+   319→        <div className="flex gap-5 sm:gap-8">
+   320→          <div className="w-28 shrink-0 sm:w-44">
+   321→            <PosterFrame poster={poster} title={content.title} />
+   322→          </div>
+   323→          <div className="min-w-0 flex-1 space-y-3 pb-4 pt-1 sm:pt-6">
+   324→            <div className="flex flex-wrap items-center gap-2">
+   325→              <TypeBadge type={content.type} />
+   326→              {rating != null && <RatingBadge value={rating} />}
+   327→              {year && <span className="text-xs font-semibold text-zinc-400">{year}</span>}
+   328→              <SourceChip label={sourceLabel} />
+   329→              {playable && (
+   330→                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
+   331→                  <Play className="h-3 w-3 fill-emerald-300" aria-hidden /> Playable
+   332→                </span>
+   333→              )}
+   334→            </div>
+   335→            <h1 className="text-2xl font-black leading-tight tracking-tight text-white sm:text-4xl">
+   336→              {content.title}
+   337→            </h1>
+   338→            {genres.length > 0 && (
+   339→              <div className="flex flex-wrap items-center gap-1.5">
+   340→                {genres.slice(0, 4).map((g) => (
+   341→                  <Chip key={g}>{g}</Chip>
+   342→                ))}
+   343→                {genres.length > 4 && <Chip>+{genres.length - 4}</Chip>}
+   344→              </div>
+   345→            )}
+   346→            <div className="flex flex-wrap gap-3 pt-1">
+   347→              <Button
+   348→                size="lg"
+   349→                className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   350→                onClick={() => navigate(`/player/${content.id}`)}
+   351→              >
+   352→                <Play className="fill-white" aria-hidden /> Watch now
+   353→              </Button>
+   354→              <Button
+   355→                size="lg"
+   356→                variant="outline"
+   357→                aria-pressed={inWatchlist}
+   358→                onClick={toggleWatchlist}
+   359→                disabled={wlBusy}
+   360→                className={`border-white/15 bg-white/5 font-semibold hover:bg-white/10 ${
+   361→                  inWatchlist ? 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200' : ''
+   362→                }`}
+   363→              >
+   364→                {wlBusy ? (
+   365→                  <Loader2 className="animate-spin" aria-hidden />
+   366→                ) : inWatchlist ? (
+   367→                  <BookmarkCheck className="fill-rose-400/30" aria-hidden />
+   368→                ) : (
+   369→                  <BookmarkPlus aria-hidden />
+   370→                )}
+   371→                {inWatchlist ? 'In watchlist' : 'Watchlist'}
+   372→              </Button>
+   373→              <Button
+   374→                size="lg"
+   375→                variant="outline"
+   376→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   377→                onClick={() => navigate(`/franchise?q=${encodeURIComponent(content.title)}`)}
+   378→              >
+   379→                <Bookmark aria-hidden /> Franchise
+   380→              </Button>
+   381→              <Button
+   382→                size="lg"
+   383→                variant="outline"
+   384→                onClick={() => void startWatchParty()}
+   385→                disabled={partyBusy}
+   386→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   387→              >
+   388→                {partyBusy ? <Loader2 className="animate-spin" aria-hidden /> : <Users aria-hidden />}
+   389→                Watch party
+   390→              </Button>
+   391→            </div>
+   392→          </div>
+   393→        </div>
+   394→      </Container>
+   395→
+   396→      {/* Body */}
+   397→      <Container className="py-8 sm:py-10">
+   398→        <div className="grid gap-8 lg:grid-cols-3">
+   399→          <div className="space-y-8 lg:col-span-2">
+   400→            <Section title="Story">
+   401→              <p className="leading-relaxed text-zinc-300">
+   402→                {overview || 'No synopsis is available for this title yet.'}
+   403→              </p>
+   404→            </Section>
+   405→
+   406→            {(runtime != null || episodes != null || status || studios.length > 0) && (
+   407→              <div className="flex flex-wrap gap-2">
+   408→                {runtime != null && <Chip>{runtime} min</Chip>}
+   409→                {episodes != null && <Chip>{episodes} episodes</Chip>}
+   410→                {status && <Chip>{status}</Chip>}
+   411→                {studios.length > 0 && (
+   412→                  <Chip>
+   413→                    {studios.slice(0, 2).join(', ')}
+   414→                    {studios.length > 2 ? ` +${studios.length - 2}` : ''}
+   415→                  </Chip>
+   416→                )}
+   417→              </div>
+   418→            )}
+   419→
+   420→            {mined && (
+   421→              <Alert className="border-fuchsia-500/25 bg-fuchsia-500/[0.06] text-zinc-200">
+   422→                <Pickaxe className="text-fuchsia-300" aria-hidden />
+   423→                <AlertTitle className="text-zinc-100">
+   424→                  Mined from {mined.siteName || hostOf(mined.url) || 'external page'}
+   425→                </AlertTitle>
+   426→                <AlertDescription className="space-y-2">
+   427→                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+   428→                    {mined.url && (
+   429→                      <a
+   430→                        href={mined.url}
+   431→                        target="_blank"
+   432→                        rel="noopener noreferrer"
+   433→                        className="break-all text-fuchsia-300 underline decoration-fuchsia-500/40 underline-offset-2 transition hover:text-fuchsia-200"
+   434→                      >
+   435→                        {mined.url}
+   436→                      </a>
+   437→                    )}
+   438→                    {formatDate(mined.at) && <span>extracted {formatDate(mined.at)}</span>}
+   439→                  </div>
+   440→                  <div className="flex flex-wrap gap-1.5">
+   441→                    {(['mp4', 'm3u8', 'iframe', 'youtube'] as const).map((k) => (
+   442→                      <span
+   443→                        key={k}
+   444→                        className="rounded-full border border-white/10 bg-black/40 px-2 py-0.5 font-mono text-[10px] text-zinc-300"
+   445→                      >
+   446→                        {k} · {mined[k]?.length ?? 0}
+   447→                      </span>
+   448→                    ))}
+   449→                  </div>
+   450→                </AlertDescription>
+   451→              </Alert>
+   452→            )}
+   453→          </div>
+   454→
+   455→          <Card className="h-fit border-white/10 bg-white/[0.03]">
+   456→            <CardHeader className="pb-3">
+   457→              <CardTitle className="text-xs font-bold uppercase tracking-widest text-zinc-400">Details</CardTitle>
+   458→            </CardHeader>
+   459→            <CardContent>
+   460→              <dl className="space-y-2.5 text-sm">
+   461→                <DetailRow label="Type">
+   462→                  <TypeBadge type={content.type} />
+   463→                </DetailRow>
+   464→                {year && (
+   465→                  <DetailRow label="Year">
+   466→                    <dd className="font-medium text-zinc-200">{year}</dd>
+   467→                  </DetailRow>
+   468→                )}
+   469→                {rating != null && (
+   470→                  <DetailRow label="Rating">
+   471→                    <RatingBadge value={rating} />
+   472→                  </DetailRow>
+   473→                )}
+   474→                <DetailRow label="Source">
+   475→                  <dd className="font-mono text-xs text-zinc-300">{sourceLabel}</dd>
+   476→                </DetailRow>
+   477→                <DetailRow label="External id">
+   478→                  <dd className="max-w-[180px] truncate font-mono text-xs text-zinc-400" title={content.externalid}>
+   479→                    {content.externalid}
+   480→                  </dd>
+   481→                </DetailRow>
+   482→                {added && (
+   483→                  <DetailRow label="Added">
+   484→                    <dd className="text-zinc-300">{added}</dd>
+   485→                  </DetailRow>
+   486→                )}
+   487→                {genres.length > 0 && (
+   488→                  <DetailRow label="Genres">
+   489→                    <dd className="text-right text-zinc-300">{genres.join(', ')}</dd>
+   490→                  </DetailRow>
+   491→                )}
+   492→              </dl>
+   493→            </CardContent>
+   494→          </Card>
+   495→        </div>
+   496→
+   497→        {/* Community + AI assistant (Task 10-b) — DB titles only */}
+   498→        <div className="mt-10 grid items-start gap-8 lg:grid-cols-3">
+   499→          <div className="space-y-8 lg:col-span-2">
+   500→            <ContentReviews contentId={content.id} />
+   501→            <ContentSocial contentId={content.id} />
+   502→          </div>
+   503→          <ContentAiPanel contentId={content.id} title={content.title} />
+   504→        </div>
+   505→
+   506→        {fetchMore && moreItems.length > 0 && (
+   507→          <div className="mt-10">
+   508→            <ContentRow title="More like this" items={moreItems} seeAllHref={`/category/${content.type}`} />
+   509→          </div>
+   510→        )}
+   511→      </Container>
+   512→    </article>
+   513→  );
+   514→}
+   515→
+   516→function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+   517→  return (
+   518→    <div className="flex items-start justify-between gap-4 border-b border-white/5 pb-2.5 last:border-0 last:pb-0">
+   519→      <dt className="shrink-0 text-zinc-500">{label}</dt>
+   520→      <div className="min-w-0 text-right">{children}</div>
+   521→    </div>
+   522→  );
+   523→}
+   524→
+   525→/* -------------------------- External detail view -------------------------- */
+   526→
+   527→function ExtContentDetail({
+   528→  extType,
+   529→  extId,
+   530→  instant,
+   531→  live,
+   532→}: {
+   533→  extType: 'anime' | 'movie' | 'tv';
+   534→  extId: string;
+   535→  instant?: NormalizedItem;
+   536→  live: AnimeItem | MediaItem | null;
+   537→}) {
+   538→  const [adding, setAdding] = useState(false);
+   539→
+   540→  const isAnime = extType === 'anime';
+   541→  const liveAnime = isAnime && live ? (live as AnimeItem) : null;
+   542→  const liveMedia = !isAnime && live ? (live as MediaItem) : null;
+   543→
+   544→  const title = live?.title || instant?.title || 'Unknown title';
+   545→  const poster =
+   546→    (isAnime ? liveAnime?.image : liveMedia?.image || liveMedia?.backdrop || null) || instant?.image || null;
+   547→  const backdrop = liveMedia?.backdrop || instant?.backdrop || null;
+   548→  const overview = (isAnime ? liveAnime?.synopsis : liveMedia?.overview) || instant?.overview || null;
+   549→  const rating = (isAnime ? liveAnime?.score : liveMedia?.rating) ?? instant?.rating ?? null;
+   550→  const year = live?.year ?? instant?.year ?? null;
+   551→  const genres = live?.genres || instant?.genres || [];
+   552→  const source = isAnime ? 'jikan' : 'tmdb';
+   553→  const externalId = isAnime ? `jikan:anime:${extId}` : `tmdb:${extType}:${extId}`;
+   554→
+   555→  const status = liveAnime?.status || null;
+   556→  const episodes = typeof liveAnime?.episodes === 'number' ? liveAnime.episodes : null;
+   557→  const studios = liveAnime?.studios || [];
+   558→  const runtime = typeof liveMedia?.runtime === 'number' ? liveMedia.runtime : null;
+   559→  const trailerKey = liveMedia?.trailerKey || null;
+   560→  const heroImage = backdrop || poster;
+   561→
+   562→  async function handleAdd() {
+   563→    if (adding) return;
+   564→    setAdding(true);
+   565→    try {
+   566→      const metadata: Record<string, unknown> = {
+   567→        overview: overview ?? undefined,
+   568→        rating: rating ?? undefined,
+   569→        year: year != null && year !== '' ? String(year) : undefined,
+   570→        genres: genres.length > 0 ? genres : undefined,
+   571→        source,
+   572→        mediaType: extType,
+   573→      };
+   574→      if (backdrop) metadata.backdrop = backdrop;
+   575→      if (trailerKey) {
+   576→        metadata.player = {
+   577→          sources: [
+   578→            {
+   579→              type: 'youtube',
+   580→              url: `https://www.youtube.com/embed/${trailerKey}`,
+   581→              label: 'Official trailer',
+   582→            },
+   583→          ],
+   584→        };
+   585→      }
+   586→      const res = await api.upsertContent({
+   587→        externalid: externalId,
+   588→        type: extType,
+   589→        title,
+   590→        thumbnail: poster ?? null,
+   591→        metadata,
+   592→      });
+   593→      toast.success('Added to your Animaxia library');
+   594→      navigate(`/content/${res.record.id}`);
+   595→    } catch (e) {
+   596→      toast.error(e instanceof Error ? e.message : 'Could not add this title to the library');
+   597→    } finally {
+   598→      setAdding(false);
+   599→    }
+   600→  }
+   601→
+   602→  return (
+   603→    <article>
+   604→      {/* Backdrop hero */}
+   605→      <div className="relative h-[38vh] min-h-[260px] w-full">
+   606→        {heroImage ? (
+   607→          <img src={heroImage} alt="" aria-hidden className="h-full w-full object-cover" />
+   608→        ) : (
+   609→          <div className="h-full w-full bg-gradient-to-br from-white/[0.08] via-transparent to-transparent" />
+   610→        )}
+   611→        <div aria-hidden className="absolute inset-0 bg-gradient-to-t from-[#0a0a10] via-[#0a0a10]/40 to-transparent" />
+   612→        <div aria-hidden className="absolute inset-0 bg-gradient-to-r from-[#0a0a10]/70 via-[#0a0a10]/10 to-transparent" />
+   613→      </div>
+   614→
+   615→      {/* Info panel */}
+   616→      <Container className="relative z-10 -mt-20 sm:-mt-28">
+   617→        <div className="flex gap-5 sm:gap-8">
+   618→          <div className="w-28 shrink-0 sm:w-44">
+   619→            <PosterFrame poster={poster} title={title} />
+   620→          </div>
+   621→          <div className="min-w-0 flex-1 space-y-3 pb-4 pt-1 sm:pt-6">
+   622→            <div className="flex flex-wrap items-center gap-2">
+   623→              <TypeBadge type={extType} />
+   624→              {rating != null && <RatingBadge value={rating} />}
+   625→              {year != null && year !== '' && (
+   626→                <span className="text-xs font-semibold text-zinc-400">{String(year)}</span>
+   627→              )}
+   628→              <SourceChip label={source} />
+   629→              <span className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-medium text-zinc-400">
+   630→                Not in library
+   631→              </span>
+   632→            </div>
+   633→            <h1 className="text-2xl font-black leading-tight tracking-tight text-white sm:text-4xl">{title}</h1>
+   634→            {genres.length > 0 && (
+   635→              <div className="flex flex-wrap items-center gap-1.5">
+   636→                {genres.slice(0, 4).map((g) => (
+   637→                  <Chip key={g}>{g}</Chip>
+   638→                ))}
+   639→                {genres.length > 4 && <Chip>+{genres.length - 4}</Chip>}
+   640→              </div>
+   641→            )}
+   642→            <div className="flex flex-wrap gap-3 pt-1">
+   643→              <Button
+   644→                size="lg"
+   645→                className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   646→                onClick={handleAdd}
+   647→                disabled={adding}
+   648→              >
+   649→                {adding ? (
+   650→                  <Loader2 className="animate-spin" aria-hidden />
+   651→                ) : (
+   652→                  <Plus aria-hidden />
+   653→                )}
+   654→                {adding ? 'Adding…' : 'Add to Animaxia'}
+   655→              </Button>
+   656→              <Button
+   657→                size="lg"
+   658→                variant="outline"
+   659→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   660→                onClick={() => navigate(`/franchise?q=${encodeURIComponent(title)}`)}
+   661→              >
+   662→                <Bookmark aria-hidden /> Franchise
+   663→              </Button>
+   664→            </div>
+   665→          </div>
+   666→        </div>
+   667→      </Container>
+   668→
+   669→      {/* Body */}
+   670→      <Container className="py-8 sm:py-10">
+   671→        <div className="grid gap-8 lg:grid-cols-3">
+   672→          <div className="space-y-8 lg:col-span-2">
+   673→            <Section title="Story">
+   674→              <p className="leading-relaxed text-zinc-300">
+   675→                {overview || 'No synopsis is available for this title yet.'}
+   676→              </p>
+   677→            </Section>
+   678→
+   679→            {(runtime != null || episodes != null || status || studios.length > 0) && (
+   680→              <div className="flex flex-wrap gap-2">
+   681→                {runtime != null && <Chip>{runtime} min</Chip>}
+   682→                {episodes != null && <Chip>{episodes} episodes</Chip>}
+   683→                {status && <Chip>{status}</Chip>}
+   684→                {studios.length > 0 && (
+   685→                  <Chip>
+   686→                    {studios.slice(0, 2).join(', ')}
+   687→                    {studios.length > 2 ? ` +${studios.length - 2}` : ''}
+   688→                  </Chip>
+   689→                )}
+   690→              </div>
+   691→            )}
+   692→          </div>
+   693→
+   694→          <Card className="h-fit border-white/10 bg-white/[0.03]">
+   695→            <CardHeader className="pb-3">
+   696→              <CardTitle className="text-xs font-bold uppercase tracking-widest text-zinc-400">Details</CardTitle>
+   697→            </CardHeader>
+   698→            <CardContent>
+   699→              <dl className="space-y-2.5 text-sm">
+   700→                <DetailRow label="Type">
+   701→                  <TypeBadge type={extType} />
+   702→                </DetailRow>
+   703→                {year != null && year !== '' && (
+   704→                  <DetailRow label="Year">
+   705→                    <dd className="font-medium text-zinc-200">{String(year)}</dd>
+   706→                  </DetailRow>
+   707→                )}
+   708→                {rating != null && (
+   709→                  <DetailRow label="Rating">
+   710→                    <RatingBadge value={rating} />
+   711→                  </DetailRow>
+   712→                )}
+   713→                <DetailRow label="Source">
+   714→                  <dd className="font-mono text-xs text-zinc-300">{source}</dd>
+   715→                </DetailRow>
+   716→                <DetailRow label="External id">
+   717→                  <dd className="max-w-[180px] truncate font-mono text-xs text-zinc-400" title={externalId}>
+   718→                    {externalId}
+   719→                  </dd>
+   720→                </DetailRow>
+   721→                {genres.length > 0 && (
+   722→                  <DetailRow label="Genres">
+   723→                    <dd className="text-right text-zinc-300">{genres.join(', ')}</dd>
+   724→                  </DetailRow>
+   725→                )}
+   726→              </dl>
+   727→              <p className="mt-4 text-xs leading-relaxed text-zinc-500">
+   728→                Live details are fetched straight from {source === 'jikan' ? 'Jikan (MyAnimeList)' : 'TMDB'}. Adding
+   729→                it stores a snapshot in your Animaxia library.
+   730→              </p>
+   731→            </CardContent>
+   732→          </Card>
+   733→        </div>
+   734→      </Container>
+   735→    </article>
+   736→  );
+   737→}
+   738→

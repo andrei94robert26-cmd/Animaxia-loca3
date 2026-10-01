@@ -82,7 +82,7 @@ async function ensureSharedLimitsTable() {
     `CREATE TABLE IF NOT EXISTS sharedlimits (
       bucketkey TEXT PRIMARY KEY,
       tokens REAL NOT NULL,
-      updatedat TIMESTAMPTZ NOT NULL DEFAULT now()
+      updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
   );
   neonSchemaReady = true;
@@ -92,8 +92,8 @@ function neonUpdateSql() {
   // Atomic refill + consume in one statement; row lock serializes concurrent
   // nodes. tokens >= 0 after the statement → the take was allowed.
   return `UPDATE sharedlimits
-          SET tokens = GREATEST($4::real, LEAST($2::real, tokens + EXTRACT(EPOCH FROM (now() - updatedat)) * $3::real) - 1),
-              updatedat = now()
+          SET tokens = GREATEST($4::real, LEAST($2::real, tokens + EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - updatedat)) * $3::real) - 1),
+              updatedat = CURRENT_TIMESTAMP
           WHERE bucketkey = $1
           RETURNING tokens`;
 }
@@ -112,7 +112,7 @@ function createNeonLimiter({ name, capacity, refillPerSec }) {
         // Bucket does not exist yet — seed it (capacity − 1 = first take allowed).
         row = await one(
           `INSERT INTO sharedlimits (bucketkey, tokens, updatedat)
-           VALUES ($1, $2::real - 1, now())
+           VALUES ($1, $2::real - 1, CURRENT_TIMESTAMP)
            ON CONFLICT (bucketkey) DO NOTHING
            RETURNING tokens`,
           [bucketKey, capacity],
@@ -132,7 +132,7 @@ function createNeonLimiter({ name, capacity, refillPerSec }) {
     },
     async stats() {
       try {
-        const r = await one(`SELECT COUNT(*)::int AS count FROM sharedlimits`);
+        const r = await one(`SELECT COUNT(*) AS count FROM sharedlimits`);
         return { driver: 'neon', buckets: Number(r?.count ?? 0) };
       } catch {
         return { driver: 'neon', buckets: null };

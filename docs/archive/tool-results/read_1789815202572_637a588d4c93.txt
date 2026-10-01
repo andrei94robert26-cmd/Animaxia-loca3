@@ -1,0 +1,650 @@
+     1→/**
+     2→ * modules/search/opt.js — FAZA 17 (Task 17-1): Search Optimization Layer —
+     3→ * dedup + batching + micro-cache sitting between the FAZA 15 window
+     4→ * dispatcher and the real Neon FTS execution.
+     5→ *
+     6→ * WHAT IT IS (pinned spec, "FAZA 17 — Search Optimization Layer"):
+     7→ *   • SEARCH BATCHING — identical concurrent requests share ONE real Neon FTS
+     8→ *     execution. The first dispatched request for a canonical query creates a
+     9→ *     batch (batchMap[queryHash] = { promise, fanout, shardIds }); every
+    10→ *     identical request dispatched while the batch is in-flight attaches to it
+    11→ *     (`stats.batchHits`) and receives the SAME 100% real result. The batch is
+    12→ *     removed on settle — it can never leak (the 8s query budget guarantees
+    13→ *     settlement of the underlying execution).
+    14→ *   • SEARCH CACHE — successful results are stored in a global micro-cache
+    15→ *     keyed by the query hash: `searchCache[queryHash] = { result, storedAt,
+    16→ *     expiresAt }`. A request arriving within `cacheTtlMs` (default 3000 ms,
+    17→ *     1000–5000 ms) is served from the cache (`stats.cacheHits`) — Neon is
+    18→ *     never touched for it. The cached value IS the result of a real Neon
+    19→ *     query made ≤ ttl ms ago (nothing is fabricated). Expired entries are
+    20→ *     swept on the 1s history tick; 'content:changed' clears the whole cache
+    21→ *     (an index resync means the results changed — no stale serving).
+    22→ *   • SEARCH DEDUPLICATION — the umbrella counter: every request served from
+    23→ *     the cache OR attached to a batch is a deduplicated request
+    24→ *     (`stats.deduplicatedRequests`): 1000 identical requests → 1 real Neon
+    25→ *     query + 999 deduplicated servings (reduction 1000×).
+    26→ *   • PIPELINE — the layer runs INSIDE the FAZA 15 queue entry (after the
+    27→ *     window dispatch, before the FTS): the pinned deterministic order is
+    28→ *     antiSpam → rateLimit → cooldown → queue → priority → windowing →
+    29→ *     dedup → batching → cache → fts (SEARCH_PIPELINE_STAGES, exposed in
+    30→ *     /api/search/status as `pipeline`).
+    31→ *
+    32→ * WHAT IT IS NOT: it never fabricates, alters or merges search results. A
+    33→ * cache/batch serving returns the EXACT object the real Neon FTS execution
+    34→ * produced; the additive `opt: { source, queryHash }` response field documents
+    35→ * the provenance ('neon' | 'batch' | 'cache' | 'bypass'). Failures are never
+    36→ * cached — a failed execution propagates honestly to every attached request
+    37→ * and the next arrival retries a fresh real query.
+    38→ *
+    39→ * SHARD-AWARENESS: results are identical for every shard (the cluster fan-out
+    40→ * union is the whole 30×1B logical space; the hint only orders the nodes), so
+    41→ * the batch/cache key is GLOBAL on the semantic query params — one identical
+    42→ * query = ONE Neon execution regardless of which shards the users map to.
+    43→ * Every serving is still ATTRIBUTED per shard (served / cacheHits / batchHits
+    44→ * / ftsQueries per shard, 30 rows) — the per-shard table shows each shard's
+    45→ * Neon reduction. The cluster queryKey additionally includes the shardHint
+    46→ * (it cosmetically orders the cluster node report), so hinted and unhinted
+    47→ * variants of a query never share a cache entry (byte-identical responses).
+    48→ *
+    49→ * KEYING: queryKey = canonical JSON of ALL semantic params (q, type, genre,
+    50→ * year, minRating, actor, studio, category, sort, fuzzy, limit, page, cursor
+    51→ * for the legacy path / shardHint for the cluster path / q for autocomplete).
+    52→ * queryHash = sha256(key).slice(0, 16) — the observability handle.
+    53→ *
+    54→ * CONFIG (env, overridable at runtime by POST /api/search/opt/settings):
+    55→ *   SEARCHOPTENABLED        default true   — false bypasses the whole layer
+    56→ *   SEARCHOPTCACHETTLMS     default 3000   — cache TTL (1000–5000 ms, pinned range)
+    57→ *   SEARCHOPTCACHEMAX       default 5000   — max cache entries (LRU-ish eviction)
+    58→ *   SEARCHOPTBATCHMAX       default 10000  — max concurrent distinct batches
+    59→ *                                            (protective cap — beyond it the
+    60→ *                                            request executes directly, source
+    61→ *                                            'bypass', nothing is dropped)
+    62→ *
+    63→ * OBSERVABILITY (pinned in animaxia-ops/metrics/METRICS.md §10):
+    64→ *   animaxia_search_batch_hits / animaxia_search_cache_hits /
+    65→ *   animaxia_search_cache_misses / animaxia_search_dedup_count (the four
+    66→ *   spec-pinned series) + opt_enabled / cache_ttl_ms / cache_entries /
+    67→ *   cache_hit_ratio / active_batches / batches_created / batches_completed /
+    68→ *   batch_max_fanout / fts_queries_total / served_total / cache_evictions /
+    69→ *   bypassed_total / fts_errors_total gauges and sparse *_by_shard series —
+    70→ *   via the 'searchopt' pull collector wired in server.js. GET /api/search/opt
+    71→ *   serves the full console (config + counters + active batch list + 180×1s
+    72→ *   history + per-shard table); /api/search/status gains the pinned
+    73→ *   `batching` / `cache` / `dedup` / `pipeline` blocks. LOGS (bounded-rate —
+    74→ *   a 5000-request burst never blocks the event loop on console I/O):
+    75→ *   [search-opt] BATCH CREATED / BATCH COMPLETED (per real execution, with
+    76→ *   the fan-out N) / CACHE MISS (per real execution) / CACHE HIT (first
+    77→ *   serve per entry + every 100th global hit) / BATCH FAILED + a 1s sampler
+    78→ *   summary line (requests · cache hits · dedup-attach · real Neon queries)
+    79→ *   whenever the layer served traffic in the last second.
+    80→ *
+    81→ * This module is PURE optimization: it imports nothing from db.js or the
+    82→ * search engine — callers hand it a run() closure (the untouched FAZA 14 FTS
+    83→ * code path) and it decides whether Neon actually sees the query.
+    84→ */
+    85→
+    86→import { createHash } from 'node:crypto';
+    87→import { shardCount } from '../sharding/model.js';
+    88→import { events } from '../platform/events.js';
+    89→import { logger } from '../../utils/logger.js';
+    90→
+    91→/* --------------------------------- config ----------------------------------- */
+    92→
+    93→/** Clamp an int with a floor/ceiling; NaN → fallback. */
+    94→function clampInt(raw, fallback, min, max) {
+    95→  const n = parseInt(raw, 10);
+    96→  if (!Number.isInteger(n)) return fallback;
+    97→  return Math.min(max, Math.max(min, n));
+    98→}
+    99→
+   100→function envConfig() {
+   101→  return {
+   102→    enabled: String(process.env.SEARCHOPTENABLED ?? 'true') !== 'false',
+   103→    cacheTtlMs: clampInt(process.env.SEARCHOPTCACHETTLMS, 3000, 1000, 5000),
+   104→    cacheMax: clampInt(process.env.SEARCHOPTCACHEMAX, 5000, 100, 100000),
+   105→    batchMax: clampInt(process.env.SEARCHOPTBATCHMAX, 10000, 100, 50000),
+   106→  };
+   107→}
+   108→
+   109→/** Live config — env at boot, adjustable at runtime via the admin endpoint. */
+   110→const config = envConfig();
+   111→
+   112→/* --------------------------------- pipeline ---------------------------------- */
+   113→
+   114→/**
+   115→ * The pinned FAZA 17 optimization pipeline — the deterministic order every
+   116→ * search request traverses. Exposed verbatim in /api/search/status as the
+   117→ * `pipeline` block (contract: pipeline: ["antiSpam", "rateLimit", "cooldown",
+   118→ * "queue", "priority", "windowing", "dedup", "batching", "cache", "fts"]).
+   119→ */
+   120→export const SEARCH_PIPELINE_STAGES = [
+   121→  'antiSpam', // FAZA 16 — flood detection (≥3 arrivals / 200ms → auto-block)
+   122→  'rateLimit', // FAZA 16 — per-user pacing (1 search / perUserMs, per kind)
+   123→  'cooldown', // FAZA 16 — post-result cooldown (1200ms default)
+   124→  'queue', // FAZA 15 — admission (queueCap, explicit 503/504, never silent)
+   125→  'priority', // FAZA 15 — high (admin/ops) → normal (logged) → low (anon)
+   126→  'windowing', // FAZA 15 — intervalMs × batchSize controlled dispatch
+   127→  'dedup', // FAZA 17 — identical requests counted as one logical query
+   128→  'batching', // FAZA 17 — in-flight identical requests share one execution
+   129→  'cache', // FAZA 17 — 1–5s micro-cache of REAL results
+   130→  'fts', // Neon FTS — the 100% real full-text search (FAZA 14 semantics)
+   131→];
+   132→
+   133→/** pipeline block for /api/search/status (pinned contract — exact array). */
+   134→export function searchOptPipelineSnapshot() {
+   135→  return [...SEARCH_PIPELINE_STAGES];
+   136→}
+   137→
+   138→/* --------------------------------- counters ---------------------------------- */
+   139→
+   140→const stats = {
+   141→  served: 0, // requests that entered the opt layer (any disposition)
+   142→  ftsQueries: 0, // REAL Neon FTS executions started (the Neon-side truth)
+   143→  ftsErrors: 0, // executions that failed (never cached, honest propagation)
+   144→  cacheHits: 0, // served from the micro-cache (Neon untouched)
+   145→  cacheMisses: 0, // cache lookups that had to execute a real query
+   146→  batchHits: 0, // requests attached to an in-flight batch (Neon untouched)
+   147→  batchesCreated: 0, // distinct batches (== distinct real executions)
+   148→  batchesCompleted: 0, // batches that settled successfully (result cached)
+   149→  batchMaxFanout: 0, // largest batch observed (requests sharing 1 query)
+   150→  deduplicatedRequests: 0, // cacheHits + batchHits (the dedup umbrella)
+   151→  cacheEvictions: 0, // entries evicted by the cacheMax bound
+   152→  bypassed: 0, // served with the layer disabled / above the batch cap
+   153→  lastBatchAt: null,
+   154→  lastBatchCompletedAt: null,
+   155→  lastCacheHitAt: null,
+   156→  lastCacheMissAt: null,
+   157→};
+   158→
+   159→/* Per-shard attribution (shard id → { served, cacheHits, batchHits, ftsQueries }). */
+   160→function blankShardStats() {
+   161→  return { served: 0, cacheHits: 0, batchHits: 0, ftsQueries: 0 };
+   162→}
+   163→const byShard = new Map();
+   164→function shardStats(shardId) {
+   165→  let entry = byShard.get(shardId);
+   166→  if (!entry) {
+   167→    entry = blankShardStats();
+   168→    byShard.set(shardId, entry);
+   169→  }
+   170→  return entry;
+   171→}
+   172→
+   173→/* ------------------------------- history sampler ------------------------------ */
+   174→
+   175→/* Rolling console history — 1s samples of requests / fts / cache / batch.
+   176→ * The chart this feeds is the money chart: requests served vs REAL Neon
+   177→ * queries executed (the visual 1000× reduction). */
+   178→const HISTORY_LIMIT = 180;
+   179→const history = [];
+   180→let reqSamples = 0;
+   181→let ftsSamples = 0;
+   182→let cacheHitSamples = 0;
+   183→let batchHitSamples = 0;
+   184→
+   185→/* ---------------------------------- cache ------------------------------------ */
+   186→
+   187→/** Global micro-cache: queryHash → { result, storedAt, expiresAt, hits }. */
+   188→const searchCache = new Map();
+   189→
+   190→/* ---------------------------------- batches ---------------------------------- */
+   191→
+   192→/**
+   193→ * Global batch map: queryHash → { promise, fanout, createdAt, kind, describe,
+   194→ * shardIds }. Created by the FIRST dispatched request for a query; identical
+   195→ * requests dispatched while in-flight attach (fanout += 1). Removed on settle
+   196→ * — the 8s query budget of the underlying execution guarantees settlement.
+   197→ */
+   198→const batchMap = new Map();
+   199→
+   200→/** sha256(queryKey) — first 16 hex chars, the observability handle. */
+   201→function hashQueryKey(queryKey) {
+   202→  return createHash('sha256').update(String(queryKey), 'utf8').digest('hex').slice(0, 16);
+   203→}
+   204→
+   205→/**
+   206→ * Expired-entry sweep + capacity bound — piggybacked on the 1s history tick.
+   207→ * Map iteration is insertion-ordered, so the capacity eviction drops the
+   208→ * OLDEST entry (insertion order ≈ LRU for a TTL-bounded cache).
+   209→ */
+   210→function sweepCache(now) {
+   211→  for (const [hash, entry] of searchCache) {
+   212→    if (entry.expiresAt <= now) searchCache.delete(hash);
+   213→  }
+   214→  while (searchCache.size > config.cacheMax) {
+   215→    const oldest = searchCache.keys().next().value;
+   216→    if (oldest === undefined) break;
+   217→    searchCache.delete(oldest);
+   218→    stats.cacheEvictions += 1;
+   219→  }
+   220→}
+   221→
+   222→/* 'content:changed' (index resync debounced 3s upstream) → drop every cached
+   223→ * result: a rebuilt searchdocs index means the cached pages may be stale.
+   224→ * In-flight batches complete normally (their query already started against
+   225→ * the pre-resync index — the same window any concurrent request would see). */
+   226→events.on('content:changed', () => {
+   227→  if (searchCache.size > 0) {
+   228→    logger.info(`[search-opt] CACHE FLUSH — content:changed → ${searchCache.size} entr(ies) dropped (index resync)`);
+   229→    searchCache.clear();
+   230→  }
+   231→});
+   232→
+   233→/* --------------------------------- execution --------------------------------- */
+   234→
+   235→/**
+   236→ * FAZA 17 optimization executor — called INSIDE the FAZA 15 queue entry (the
+   237→ * run() closure handed to searchFlowExecute), i.e. AFTER the window dispatch
+   238→ * and BEFORE the Neon FTS. Pure dedup/batch/cache decision; the run() closure
+   239→ * is the untouched FAZA 14 execution path.
+   240→ *
+   241→ * Decision order (deterministic, single-threaded atomic check-then-set — the
+   242→ * pinned pipeline stages dedup → batching → cache → fts):
+   243→ *   1. layer disabled → run directly (source 'bypass');
+   244→ *   2. batch map hit (identical execution in flight) → attach to the batch
+   245→ *      promise (source 'batch'), Neon untouched;
+   246→ *   3. cache hit (entry younger than cacheTtlMs) → serve the stored REAL
+   247→ *      result (source 'cache'), Neon untouched;
+   248→ *   4. cache miss → create a batch and run the REAL execution (source
+   249→ *      'neon'); on success the result is cached for cacheTtlMs. Every cache
+   250→ *      miss therefore corresponds to exactly one real Neon query (the clean
+   251→ *      invariant: cacheMisses ≈ ftsQueries while under the batch cap).
+   252→ *
+   253→ * @param {{
+   254→ *   queryKey: string,            — canonical JSON of ALL semantic query params
+   255→ *   kind?: 'advanced'|'autocomplete',
+   256→ *   shardId?: number,            — attribution shard (X-Animaxia-Shard > tenant)
+   257→ *   describe?: string,           — human label for the logs
+   258→ *   run: () => Promise<any>,     — the 100% real FTS execution closure
+   259→ * }} input
+   260→ * @returns {Promise<{ result: any, source: 'neon'|'batch'|'cache'|'bypass',
+   261→ *                     queryHash: string|null, cached: boolean, batched: boolean }>}
+   262→ */
+   263→export function searchOptExecute({ queryKey, kind = 'advanced', shardId = 0, describe = '', run }) {
+   264→  if (typeof run !== 'function') {
+   265→    return Promise.reject(new Error('searchOptExecute: run() is required'));
+   266→  }
+   267→  const now = Date.now();
+   268→  const queryHash = hashQueryKey(queryKey);
+   269→  stats.served += 1;
+   270→  reqSamples += 1;
+   271→  shardStats(shardId).served += 1;
+   272→
+   273→  /* 1. Bypass path: the whole FAZA 17 layer disabled → FAZA 15/16 behavior
+   274→   *    (the caller may still layer its own single-flight — legacy path does). */
+   275→  if (!config.enabled) {
+   276→    stats.bypassed += 1;
+   277→    return Promise.resolve()
+   278→      .then(run)
+   279→      .then((result) => ({ result, source: 'bypass', queryHash, cached: false, batched: false }));
+   280→  }
+   281→
+   282→  /* 2. DEDUP + BATCHING — an identical execution is already in flight →
+   283→   *    attach to it (the pinned pipeline order: dedup → batching run BEFORE
+   284→   *    the cache stage). The check-then-set on batchMap is atomic within the
+   285→   *    event loop (no await between the map get and set), so exactly ONE
+   286→   *    batch per queryHash can exist at any moment — determinism is
+   287→   *    structural, not probabilistic. An in-flight batch and a valid cache
+   288→   *    entry can never coexist (a batch only starts on a cache miss and the
+   289→   *    entry is written only when it settles).
+   290→   *    (No per-attach log line: a 5000-request burst would print 5000 lines
+   291→   *    and block the event loop — the fan-out is reported by the BATCH
+   292→   *    COMPLETED line and by the 1s sampler summary below.) */
+   293→  const inFlight = batchMap.get(queryHash);
+   294→  if (inFlight) {
+   295→    inFlight.fanout += 1;
+   296→    inFlight.shardIds.add(shardId);
+   297→    stats.batchHits += 1;
+   298→    batchHitSamples += 1;
+   299→    stats.deduplicatedRequests += 1;
+   300→    shardStats(shardId).batchHits += 1;
+   301→    return inFlight.promise.then((result) => ({
+   302→      result,
+   303→      source: 'batch',
+   304→      queryHash,
+   305→      cached: false,
+   306→      batched: true,
+   307→    }));
+   308→  }
+   309→
+   310→  /* 3. CACHE — a REAL result produced ≤ cacheTtlMs ago for the exact query.
+   311→   *    (Per-hit logging is SAMPLED — the first serve of each entry plus every
+   312→   *    100th global hit — so a 5000-request burst does not block the event
+   313→   *    loop on synchronous console I/O; the 1s sampler summary below keeps
+   314→   *    continuous cache-hit evidence in the log.) */
+   315→  const cached = searchCache.get(queryHash);
+   316→  if (cached && cached.expiresAt > now) {
+   317→    cached.hits += 1;
+   318→    stats.cacheHits += 1;
+   319→    cacheHitSamples += 1;
+   320→    stats.deduplicatedRequests += 1;
+   321→    stats.lastCacheHitAt = new Date(now).toISOString();
+   322→    shardStats(shardId).cacheHits += 1;
+   323→    if (cached.hits === 1 || stats.cacheHits % 100 === 0) {
+   324→      logger.info(
+   325→        `[search-opt] CACHE HIT — ${kind} ${describe || queryHash} (hash=${queryHash}, age=${now - cached.storedAt}ms ≤ ttl=${config.cacheTtlMs}, shard=${shardId}, entry hits=${cached.hits}, total hits=${stats.cacheHits})`,
+   326→      );
+   327→    }
+   328→    return Promise.resolve({
+   329→      result: cached.result,
+   330→      source: 'cache',
+   331→      queryHash,
+   332→      cached: true,
+   333→      batched: false,
+   334→    });
+   335→  }
+   336→  if (cached) searchCache.delete(queryHash); // expired → honest miss
+   337→  stats.cacheMisses += 1;
+   338→  stats.lastCacheMissAt = new Date(now).toISOString();
+   339→  logger.info(
+   340→    `[search-opt] CACHE MISS — ${kind} ${describe || queryHash} (hash=${queryHash}, shard=${shardId}) → real FTS execution`,
+   341→  );
+   342→
+   343→  /* 4. Protective cap: too many DISTINCT concurrent batches → execute this
+   344→   *    request directly (honest bypass, nothing dropped, nothing cached). */
+   345→  if (batchMap.size >= config.batchMax) {
+   346→    stats.bypassed += 1;
+   347→    stats.ftsQueries += 1;
+   348→    ftsSamples += 1;
+   349→    shardStats(shardId).ftsQueries += 1;
+   350→    logger.warn(
+   351→      `[search-opt] BATCH CAP — ${batchMap.size} concurrent batches ≥ batchMax=${config.batchMax}; ${kind} ${queryHash} executes directly (no batch, no cache)`,
+   352→    );
+   353→    return Promise.resolve()
+   354→      .then(run)
+   355→      .then(
+   356→        (result) => ({ result, source: 'bypass', queryHash, cached: false, batched: false }),
+   357→        (err) => {
+   358→          stats.ftsErrors += 1;
+   359→          throw err;
+   360→        },
+   361→      );
+   362→  }
+   363→
+   364→  /* 5. NEW BATCH + the ONE real Neon FTS execution. Every identical request
+   365→   *    dispatched while this promise is pending attaches to it (step 3); on
+   366→   *    success the result is cached; on failure the error propagates honestly
+   367→   *    to every attached request and NOTHING is cached. */
+   368→  stats.batchesCreated += 1;
+   369→  stats.ftsQueries += 1;
+   370→  ftsSamples += 1;
+   371→  stats.lastBatchAt = new Date(now).toISOString();
+   372→  shardStats(shardId).ftsQueries += 1;
+   373→  logger.info(
+   374→    `[search-opt] BATCH CREATED — ${kind} ${describe || queryHash} (hash=${queryHash}, shard=${shardId}) → 1 real Neon FTS query starts`,
+   375→  );
+   376→
+   377→  const batch = {
+   378→    fanout: 1,
+   379→    createdAt: now,
+   380→    kind,
+   381→    describe: describe || queryHash,
+   382→    shardIds: new Set([shardId]),
+   383→    promise: null,
+   384→  };
+   385→  const promise = (async () => {
+   386→    try {
+   387→      const result = await run();
+   388→      const settledAt = Date.now();
+   389→      stats.batchesCompleted += 1;
+   390→      stats.lastBatchCompletedAt = new Date(settledAt).toISOString();
+   391→      if (batch.fanout > stats.batchMaxFanout) stats.batchMaxFanout = batch.fanout;
+   392→      searchCache.set(queryHash, {
+   393→        result,
+   394→        storedAt: settledAt,
+   395→        expiresAt: settledAt + config.cacheTtlMs,
+   396→        hits: 0,
+   397→      });
+   398→      logger.info(
+   399→        `[search-opt] BATCH COMPLETED — ${batch.describe} (hash=${queryHash}) ${batch.fanout} request(s) shared 1 Neon query, took ${settledAt - batch.createdAt}ms, result cached ${config.cacheTtlMs}ms`,
+   400→      );
+   401→      return result;
+   402→    } catch (err) {
+   403→      stats.ftsErrors += 1;
+   404→      logger.warn(
+   405→        `[search-opt] BATCH FAILED — ${batch.describe} (hash=${queryHash}) after ${Date.now() - batch.createdAt}ms — error propagates to ${batch.fanout} request(s), nothing cached: ${err?.message ?? err}`,
+   406→      );
+   407→      throw err;
+   408→    } finally {
+   409→      batchMap.delete(queryHash);
+   410→    }
+   411→  })();
+   412→  batch.promise = promise;
+   413→  batchMap.set(queryHash, batch);
+   414→
+   415→  return promise.then((result) => ({
+   416→    result,
+   417→    source: 'neon',
+   418→    queryHash,
+   419→    cached: false,
+   420→    batched: false,
+   421→  }));
+   422→}
+   423→
+   424→/* ------------------------------ history sampler ------------------------------ */
+   425→
+   426→let historyTimer = null;
+   427→function startHistorySampler() {
+   428→  if (historyTimer) return;
+   429→  historyTimer = setInterval(() => {
+   430→    try {
+   431→      const now = Date.now();
+   432→      history.push({
+   433→        t: new Date(now).toISOString(),
+   434→        requests: reqSamples, // requests served by the opt layer
+   435→        fts: ftsSamples, // REAL Neon FTS executions started
+   436→        cacheHits: cacheHitSamples,
+   437→        batchHits: batchHitSamples,
+   438→        cacheEntries: searchCache.size,
+   439→        activeBatches: batchMap.size,
+   440→      });
+   441→      if (history.length > HISTORY_LIMIT) history.shift();
+   442→      /* 1s observability summary — the bounded-rate replacement for
+   443→       * per-request cache-hit/dedup log lines (a 5000-request burst must
+   444→       * never block the event loop on synchronous console I/O). Only logged
+   445→       * when the layer actually served something in the last second. */
+   446→      if (reqSamples > 0 || ftsSamples > 0) {
+   447→        logger.info(
+   448→          `[search-opt] 1s — ${reqSamples} cereri · ${cacheHitSamples} cache hits · ${batchHitSamples} dedup-attach · ${ftsSamples} interogari Neon reale · cache ${searchCache.size} intrari · ${batchMap.size} batch-uri active`,
+   449→        );
+   450→      }
+   451→      reqSamples = 0;
+   452→      ftsSamples = 0;
+   453→      cacheHitSamples = 0;
+   454→      batchHitSamples = 0;
+   455→      sweepCache(now); // expired entries + capacity bound ride the same tick
+   456→    } catch (err) {
+   457→      logger.error(`[search-opt] history sampler failed: ${err?.message ?? err}`);
+   458→    }
+   459→  }, 1000);
+   460→  if (typeof historyTimer.unref === 'function') historyTimer.unref();
+   461→}
+   462→
+   463→/* --------------------------------- snapshots --------------------------------- */
+   464→
+   465→/** batching block for /api/search/status — the pinned FAZA 17 contract:
+   466→ *  { enabled: true, activeBatches: N } + live fan-out state. */
+   467→export function searchOptBatchingSnapshot() {
+   468→  return {
+   469→    enabled: config.enabled,
+   470→    activeBatches: batchMap.size,
+   471→    batchHits: stats.batchHits,
+   472→    created: stats.batchesCreated,
+   473→    completed: stats.batchesCompleted,
+   474→    maxFanout: stats.batchMaxFanout,
+   475→    maxConcurrentBatches: config.batchMax,
+   476→    lastBatchAt: stats.lastBatchAt,
+   477→    lastBatchCompletedAt: stats.lastBatchCompletedAt,
+   478→  };
+   479→}
+   480→
+   481→/** cache block for /api/search/status — the pinned FAZA 17 contract:
+   482→ *  { ttlMs: 3000, hits: X, misses: Y } + live entries / ratio state. */
+   483→export function searchOptCacheSnapshot() {
+   484→  const lookups = stats.cacheHits + stats.cacheMisses;
+   485→  return {
+   486→    enabled: config.enabled,
+   487→    ttlMs: config.cacheTtlMs,
+   488→    hits: stats.cacheHits,
+   489→    misses: stats.cacheMisses,
+   490→    entries: searchCache.size,
+   491→    hitRatio: lookups > 0 ? Number((stats.cacheHits / lookups).toFixed(4)) : 0,
+   492→    evictions: stats.cacheEvictions,
+   493→    maxEntries: config.cacheMax,
+   494→    lastHitAt: stats.lastCacheHitAt,
+   495→    lastMissAt: stats.lastCacheMissAt,
+   496→  };
+   497→}
+   498→
+   499→/** dedup block for /api/search/status — the pinned FAZA 17 contract:
+   500→ *  { active: true, deduplicatedRequests: N } + the served/Neon split. */
+   501→export function searchOptDedupSnapshot() {
+   502→  return {
+   503→    active: config.enabled,
+   504→    deduplicatedRequests: stats.deduplicatedRequests,
+   505→    cacheServed: stats.cacheHits,
+   506→    batchServed: stats.batchHits,
+   507→    ftsQueries: stats.ftsQueries,
+   508→    ftsErrors: stats.ftsErrors,
+   509→    served: stats.served,
+   510→    bypassed: stats.bypassed,
+   511→    /** The reduction factor: requests served per REAL Neon query (×N). */
+   512→    reductionFactor:
+   513→      stats.ftsQueries > 0 ? Number((stats.served / stats.ftsQueries).toFixed(2)) : 0,
+   514→  };
+   515→}
+   516→
+   517→/** Per-shard attribution table — one row per shard of the logical topology. */
+   518→function perShardSnapshot() {
+   519→  const out = [];
+   520→  const n = shardCount();
+   521→  for (let i = 0; i < n; i += 1) {
+   522→    const entry = byShard.get(i) ?? blankShardStats();
+   523→    out.push({ shardid: i, ...entry });
+   524→  }
+   525→  return out;
+   526→}
+   527→
+   528→/** Live in-flight batch list (top 50 by fanout) for the admin console. */
+   529→function activeBatchesList() {
+   530→  const now = Date.now();
+   531→  return [...batchMap.entries()]
+   532→    .map(([queryHash, batch]) => ({
+   533→      queryHash,
+   534→      kind: batch.kind,
+   535→      describe: batch.describe,
+   536→      fanout: batch.fanout,
+   537→      ageMs: now - batch.createdAt,
+   538→      shards: batch.shardIds.size,
+   539→    }))
+   540→    .sort((a, b) => b.fanout - a.fanout || b.ageMs - a.ageMs)
+   541→    .slice(0, 50);
+   542→}
+   543→
+   544→/** Full console snapshot for GET /api/search/opt (pinned blocks + config +
+   545→ *  counters + active batch list + rolling history + per-shard table).
+   546→ *  Public read-only (same policy as /flow and /rate). */
+   547→export function searchOptConsoleSnapshot() {
+   548→  return {
+   549→    batching: searchOptBatchingSnapshot(),
+   550→    cache: searchOptCacheSnapshot(),
+   551→    dedup: searchOptDedupSnapshot(),
+   552→    pipeline: searchOptPipelineSnapshot(),
+   553→    config: { ...config },
+   554→    counters: {
+   555→      served: stats.served,
+   556→      ftsQueries: stats.ftsQueries,
+   557→      ftsErrors: stats.ftsErrors,
+   558→      cacheHits: stats.cacheHits,
+   559→      cacheMisses: stats.cacheMisses,
+   560→      batchHits: stats.batchHits,
+   561→      batchesCreated: stats.batchesCreated,
+   562→      batchesCompleted: stats.batchesCompleted,
+   563→      batchMaxFanout: stats.batchMaxFanout,
+   564→      deduplicatedRequests: stats.deduplicatedRequests,
+   565→      cacheEvictions: stats.cacheEvictions,
+   566→      bypassed: stats.bypassed,
+   567→      reductionFactor:
+   568→        stats.ftsQueries > 0 ? Number((stats.served / stats.ftsQueries).toFixed(2)) : 0,
+   569→    },
+   570→    activeBatches: activeBatchesList(),
+   571→    history: history.slice(),
+   572→    perShard: perShardSnapshot(),
+   573→  };
+   574→}
+   575→
+   576→/**
+   577→ * Flat metrics shape for the 'searchopt' pull collector — consumed by
+   578→ * modules/ops/metrics.js renderPrometheus (animaxia_search_opt_*,
+   579→ * animaxia_search_batch_hits, animaxia_search_cache_hits,
+   580→ * animaxia_search_cache_misses, animaxia_search_dedup_count series) and
+   581→ * available as collectors.searchopt in the ?format=json snapshot.
+   582→ */
+   583→export function searchOptMetricsSnapshot() {
+   584→  return {
+   585→    enabled: config.enabled,
+   586→    cacheTtlMs: config.cacheTtlMs,
+   587→    cacheMax: config.cacheMax,
+   588→    batchMax: config.batchMax,
+   589→    activeBatches: batchMap.size,
+   590→    cacheEntries: searchCache.size,
+   591→    cacheHits: stats.cacheHits,
+   592→    cacheMisses: stats.cacheMisses,
+   593→    cacheHitRatio:
+   594→      stats.cacheHits + stats.cacheMisses > 0
+   595→        ? Number((stats.cacheHits / (stats.cacheHits + stats.cacheMisses)).toFixed(4))
+   596→        : 0,
+   597→    cacheEvictions: stats.cacheEvictions,
+   598→    batchHits: stats.batchHits,
+   599→    batchesCreated: stats.batchesCreated,
+   600→    batchesCompleted: stats.batchesCompleted,
+   601→    batchMaxFanout: stats.batchMaxFanout,
+   602→    deduplicatedRequests: stats.deduplicatedRequests,
+   603→    ftsQueries: stats.ftsQueries,
+   604→    ftsErrors: stats.ftsErrors,
+   605→    served: stats.served,
+   606→    bypassed: stats.bypassed,
+   607→    perShard: perShardSnapshot(),
+   608→  };
+   609→}
+   610→
+   611→/**
+   612→ * Runtime reconfiguration (POST /api/search/opt/settings, admin only).
+   613→ * Validates and clamps every knob; ttlMs changes do NOT flush the cache
+   614→ * (each entry carries its own expiresAt — old entries keep their old TTL,
+   615→ * new stores use the new one). Disabling the layer never strands anyone:
+   616→ * in-flight batches settle normally, cached entries simply stop being read.
+   617→ */
+   618→export function updateSearchOptConfig(patch = {}) {
+   619→  const before = { ...config };
+   620→  if (patch.enabled !== undefined) config.enabled = Boolean(patch.enabled);
+   621→  if (patch.cacheTtlMs !== undefined) {
+   622→    config.cacheTtlMs = clampInt(patch.cacheTtlMs, config.cacheTtlMs, 1000, 5000);
+   623→  }
+   624→  if (patch.cacheMax !== undefined) {
+   625→    config.cacheMax = clampInt(patch.cacheMax, config.cacheMax, 100, 100000);
+   626→  }
+   627→  if (patch.batchMax !== undefined) {
+   628→    config.batchMax = clampInt(patch.batchMax, config.batchMax, 100, 50000);
+   629→  }
+   630→  logger.info(
+   631→    `[search-opt] config updated${config.enabled ? '' : ' (DISABLED)'} — cacheTtlMs=${config.cacheTtlMs} cacheMax=${config.cacheMax} batchMax=${config.batchMax} (was: cacheTtlMs=${before.cacheTtlMs})`,
+   632→  );
+   633→  return { ...config };
+   634→}
+   635→
+   636→/** Is the FAZA 17 layer enabled? (The search routes use this to pick between
+   637→ *  the optimization executor and their legacy single-flight path.) */
+   638→export function searchOptEnabled() {
+   639→  return config.enabled === true;
+   640→}
+   641→
+   642→/* Boot: the 1s history sampler + cache sweeper run from module load (a tick
+   643→ * over empty state is a no-op). bun --watch restarts re-import the module
+   644→ * and the timer re-arms. */
+   645→startHistorySampler();
+   646→
+   647→logger.info(
+   648→  `[search-opt] FAZA 17 Search Optimization Layer ready — ${config.enabled ? 'ENABLED' : 'disabled'} · cache ttl=${config.cacheTtlMs}ms max=${config.cacheMax} · batches max=${config.batchMax} · pipeline ${SEARCH_PIPELINE_STAGES.length} stages (dedup → batching → cache → fts)`,
+   649→);
+   650→

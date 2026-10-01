@@ -1,0 +1,25 @@
+{{/* =============================================================================
+Non-secret configuration → ConfigMap "<fullname>-config" (envFrom everywhere).
+Managed keys (NOT from env.config):
+  TRACINGENABLED / METRICSENABLED / OTELSAMPLERATE ← observability.*
+  QUEUERETENTIONDAYS                               ← queue.retentionDays
+Phase-4 AI Cloud keys (AI_PROVIDER, AI_MODEL, AI_TIMEOUTMS, VECTOR_BACKEND,
+QDRANTURL, PINECONEURL) flow through env.config like every other key —
+set them under env.config in values.yaml (BLUEPRINT §11).
+============================================================================= */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "animaxia.configMapName" . }}
+  namespace: {{ include "animaxia.namespace" . }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" . "component" "config") | nindent 4 }}
+data:
+{{- range $key, $value := .Values.env.config }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}
+  # ---- managed keys (dedicated values sections) ----
+  TRACINGENABLED: {{ .Values.observability.tracingEnabled | quote }}
+  METRICSENABLED: {{ .Values.observability.metricsEnabled | quote }}
+  OTELSAMPLERATE: {{ .Values.observability.otelSampleRate | quote }}
+  QUEUERETENTIONDAYS: {{ .Values.queue.retentionDays | quote }}

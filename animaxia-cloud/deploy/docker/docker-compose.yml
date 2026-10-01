@@ -1,0 +1,479 @@
+# =============================================================================
+# Animaxia Cloud — full local development stack (BLUEPRINT §2 + §8)
+# =============================================================================
+# 10 microservices on the `animaxia` bridge network. Only the gateway is
+# exposed to the host (http://localhost:8080); the services find each other
+# through Docker DNS via the *SERVICEURL overrides below (consumed by
+# @animaxia/common/services.js serviceUrl()).
+#
+# PREREQ — create the repo root .env first (compose fails fast without it):
+#     cd /path/to/animaxia-cloud && cp .env.example .env
+#     # then fill in DATABASEURL (external Postgres, e.g. Neon) etc.
+#
+# BUILD & RUN (from this directory):
+#     docker compose up -d --build
+#
+# SMOKE TEST:
+#     curl http://localhost:8080/api/health     # aggregated fan-out health
+#
+# OBSERVABILITY STACK (agent 2-j owns docker-compose.observability.yml in this
+# same folder — Prometheus, Grafana, Loki + promtail, OTel Collector, Tempo).
+# Merge it on top of this file to bring the full stack up:
+#     docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+# OTELSENDPOINT below already points at http://otel-collector:4318/v1/traces,
+# so traces flow as soon as the collector is running. Trace export is
+# fire-and-forget (@animaxia/common/telemetry.js), so services stay healthy
+# when the observability overlay is NOT running.
+#
+# RESOURCE LIMITS — every service carries a commented `mem_limit` hint
+# (512m per microservice, 256m gateway). Plain `docker compose` (non-swarm)
+# enforces `mem_limit` directly; the swarm-style equivalent, for reference, is:
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 512m
+#
+# DEBUG PROFILE — see the commented block at the bottom of this file for
+# exposing service ports (4001-4009) directly on the host.
+#
+# NOTE — per-service Dockerfiles live at services/<name>/Dockerfile (one copy
+# of deploy/docker/Dockerfile.template each, owned by the service agents).
+# This file does NOT create them; build context is always the repo root.
+# =============================================================================
+
+name: animaxia-cloud
+
+services:
+  # ── API gateway :8080 — the only host-exposed service ─────────────────────
+  gateway-service:
+    build:
+      context: ../..                                  # repo root (BLUEPRINT §8)
+      dockerfile: services/gateway-service/Dockerfile
+    image: ghcr.io/animaxia/gateway-service:local     # CI pushes :sha / :latest
+    container_name: animaxia-gateway-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "8080"
+      # Inter-service base URLs — Docker DNS inside the `animaxia` network:
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      # OTel Collector from docker-compose.observability.yml (agent 2-j);
+      # fire-and-forget exporter — safe when the overlay is down.
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    ports:
+      - "8080:8080"                                   # gateway → host
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      content-service:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+      analytics-service:
+        condition: service_healthy
+      search-service:
+        condition: service_healthy
+      premium-service:
+        condition: service_healthy
+      social-service:
+        condition: service_healthy
+      mobile-service:
+        condition: service_healthy
+      queue-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # mem_limit: 256m    # resource hint — see header note
+
+  # ── auth-service :4001 — JWT sessions, users, profiles, security ──────────
+  # Leaf services have NO depends_on on purpose: each one only needs the
+  # external Postgres (DATABASEURL) to boot, so the whole mesh starts in
+  # parallel; cross-service calls go through serviceFetch() + circuit
+  # breakers and tolerate upstreams that are still warming up.
+  auth-service:
+    build:
+      context: ../..
+      dockerfile: services/auth-service/Dockerfile
+    image: ghcr.io/animaxia/auth-service:local
+    container_name: animaxia-auth-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4001"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4001:4001"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── content-service :4002 — providers, miner, player, cache, seed ─────────
+  content-service:
+    build:
+      context: ../..
+      dockerfile: services/content-service/Dockerfile
+    image: ghcr.io/animaxia/content-service:local
+    container_name: animaxia-content-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4002"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    volumes:
+      # Local fallback store + generated thumbnails (survives recreation).
+      # The image should create /app/data owned by uid 10001 (animaxia) so
+      # the named volume inherits writable permissions on first use.
+      - animaxia-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4002:4002"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── ai-service :4003 — AI router, chat, recommendations ───────────────────
+  ai-service:
+    build:
+      context: ../..
+      dockerfile: services/ai-service/Dockerfile
+    image: ghcr.io/animaxia/ai-service:local
+    container_name: animaxia-ai-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4003"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      # Phase 4 — Animaxia AI Cloud (llm-core provider chain + pluggable
+      # vector backends; consumed by domain/aicloud/* in this service).
+      AI_PROVIDER: ${AI_PROVIDER:-z-ai}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_TIMEOUTMS: ${AI_TIMEOUTMS:-25000}
+      VECTOR_BACKEND: ${VECTOR_BACKEND:-auto}
+      AI_API_KEY: ${AI_API_KEY:-}
+      QDRANTURL: ${QDRANTURL:-}
+      QDRANTAPIKEY: ${QDRANTAPIKEY:-}
+      PINECONEURL: ${PINECONEURL:-}
+      PINECONEAPIKEY: ${PINECONEAPIKEY:-}
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4003:4003"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── analytics-service :4004 — views, trending, rollups, admin overview ────
+  analytics-service:
+    build:
+      context: ../..
+      dockerfile: services/analytics-service/Dockerfile
+    image: ghcr.io/animaxia/analytics-service:local
+    container_name: animaxia-analytics-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4004"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4004:4004"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── search-service :4005 — Animaxia search engine + reindex worker ────────
+  search-service:
+    build:
+      context: ../..
+      dockerfile: services/search-service/Dockerfile
+    image: ghcr.io/animaxia/search-service:local
+    container_name: animaxia-search-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4005"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4005:4005"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── premium-service :4006 — plans + Stripe sandbox checkout ───────────────
+  premium-service:
+    build:
+      context: ../..
+      dockerfile: services/premium-service/Dockerfile
+    image: ghcr.io/animaxia/premium-service:local
+    container_name: animaxia-premium-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4006"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4006/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4006:4006"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── social-service :4007 — comments, votes, likes, feeds ──────────────────
+  social-service:
+    build:
+      context: ../..
+      dockerfile: services/social-service/Dockerfile
+    image: ghcr.io/animaxia/social-service:local
+    container_name: animaxia-social-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4007"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4007/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4007:4007"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── mobile-service :4008 — mobile home/config/feature API ─────────────────
+  mobile-service:
+    build:
+      context: ../..
+      dockerfile: services/mobile-service/Dockerfile
+    image: ghcr.io/animaxia/mobile-service:local
+    container_name: animaxia-mobile-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4008"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4008/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4008:4008"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+  # ── queue-service :4009 — Postgres durable queue + cron scheduler ─────────
+  queue-service:
+    build:
+      context: ../..
+      dockerfile: services/queue-service/Dockerfile
+    image: ghcr.io/animaxia/queue-service:local
+    container_name: animaxia-queue-service
+    restart: unless-stopped
+    env_file: ../../.env
+    environment:
+      PORT: "4009"
+      AUTHSERVICEURL: http://auth-service:4001
+      CONTENTSERVICEURL: http://content-service:4002
+      AISERVICEURL: http://ai-service:4003
+      ANALYTICSSERVICEURL: http://analytics-service:4004
+      SEARCHSERVICEURL: http://search-service:4005
+      PREMIUMSERVICEURL: http://premium-service:4006
+      SOCIALSERVICEURL: http://social-service:4007
+      MOBILESERVICEURL: http://mobile-service:4008
+      QUEUESERVICEURL: http://queue-service:4009
+      OTELSENDPOINT: http://otel-collector:4318/v1/traces
+    volumes:
+      # Local fallback store (job payloads scratch, thumbnails.generate output).
+      # The image should create /app/data owned by uid 10001 (animaxia) so
+      # the named volume inherits writable permissions on first use.
+      - animaxia-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4009/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - animaxia
+    # ports: ["4009:4009"]   # debug: expose directly on the host (see bottom)
+    # mem_limit: 512m        # resource hint — see header note
+
+# ── top-level ────────────────────────────────────────────────────────────────
+networks:
+  animaxia:
+    driver: bridge
+
+volumes:
+  animaxia-data:
+
+# =============================================================================
+# DEBUG PROFILE — expose service ports directly on the host (commented)
+# =============================================================================
+# By default the stack is gateway-only: everything goes through
+# http://localhost:8080. To hit a microservice directly from the host (e.g.
+# its /metrics or /health), either:
+#
+#   1) uncomment the `ports:` hint on that service above and recreate it:
+#        docker compose up -d content-service
+#
+#   2) or keep this file pristine and put the exposure behind a debug profile
+#      in a `docker-compose.debug.yml` overlay in this folder:
+#
+#        # docker-compose.debug.yml
+#        services:
+#          auth-service:
+#            profiles: [debug]          # only starts with --profile debug
+#            ports: ["4001:4001"]
+#          content-service:
+#            profiles: [debug]
+#            ports: ["4002:4002"]
+#          ai-service:
+#            profiles: [debug]
+#            ports: ["4003:4003"]
+#          analytics-service:
+#            profiles: [debug]
+#            ports: ["4004:4004"]
+#          search-service:
+#            profiles: [debug]
+#            ports: ["4005:4005"]
+#          premium-service:
+#            profiles: [debug]
+#            ports: ["4006:4006"]
+#          social-service:
+#            profiles: [debug]
+#            ports: ["4007:4007"]
+#          mobile-service:
+#            profiles: [debug]
+#            ports: ["4008:4008"]
+#          queue-service:
+#            profiles: [debug]
+#            ports: ["4009:4009"]
+#
+#      then start the stack + debug ports together:
+#        docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+#          --profile debug up -d
+#
+# Profile semantics worth knowing: a service tagged `profiles: [debug]` is
+# SKIPPED by plain `docker compose up` and only runs when the profile is
+# enabled — which is exactly why the debug exposure lives in a separate
+# overlay (or as the commented `ports` hints above) instead of on the
+# always-on service stanzas.
+#
+# Observability note: the same overlay mechanism brings up the monitoring
+# stack owned by agent 2-j (docker-compose.observability.yml, this folder):
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+# =============================================================================

@@ -1,0 +1,137 @@
+# =============================================================================
+# Animaxia — SLO definitions + availability/latency recording rules (FAZA 9)
+# =============================================================================
+# Canonical metric contract: animaxia-ops/metrics/METRICS.md (§4 SLO targets)
+# Companion alert rules:    animaxia-ops/alerts/alerts.yaml
+# Wiring (Prometheus/Grafana/Cloudflare): animaxia-ops/alerts/README.md
+#
+# ── slo metadata block ───────────────────────────────────────────────────────
+# Kept as a comment so this file loads directly as a Prometheus rule file
+# (Prometheus rejects unknown top-level keys). Shape below is the intended
+# machine-readable form if a future loader/generator wants it.
+#
+#   slo:
+#     window: 28d                    # SLO evaluation window
+#     error_budget: 0.005            # 100% - 99.5% availability = 0.5%
+#     budget_downtime: 3.36h         # 0.5% of 28d (672h) ≈ 3h 22m downtime / 28d
+#     availability_target: 0.995     # ≥ 99.5% success (success = non-5xx)
+#     latency_target_ms: 1500        # AI p95 < 1500 ms
+#     slos:
+#       - id: mobile_home
+#         source: monolith animaxia_http_requests_total{route="/api/mobile/home"}
+#       - id: ai_personal_home
+#         source: monolith animaxia_http_requests_total{route="/api/ai/personal/home"}
+#       - id: edge_gateway
+#         source: edge animaxia_edge_requests_total{module="gateway"}
+#       - id: ai_latency
+#         source: monolith animaxia_http_request_latency_ms_bucket{route=~"/api/ai.*"}
+#
+# Recording rules below produce, per availability SLO (label slo=<id>):
+#   slo:availability:ratio_5m       success (non-5xx) ratio over 5m
+#   slo:availability:ratio_1h       success (non-5xx) ratio over 1h
+#   slo:availability:error_ratio_1h 5xx ratio over 1h (consumed by the
+#                                   AnimaxiaErrorRateHigh alert: > 2% for 10m)
+# and for the latency SLO:
+#   slo:ai_latency:p95_1h           p95 latency in ms on /api/ai* routes
+#                                   (consumed by AnimaxiaAiLatencySLOBurn: > 1500)
+# =============================================================================
+
+groups:
+  - name: animaxia_slo
+    interval: 30s
+    rules:
+      # ── SLO mobile_home — /api/mobile/home (monolith) ──────────────────────
+      - record: slo:availability:ratio_5m
+        expr: |
+          sum(rate(animaxia_http_requests_total{route="/api/mobile/home", status!~"5.."}[5m]))
+            /
+          sum(rate(animaxia_http_requests_total{route="/api/mobile/home"}[5m]))
+        labels:
+          slo: mobile_home
+          target: "0.995"
+
+      - record: slo:availability:ratio_1h
+        expr: |
+          sum(rate(animaxia_http_requests_total{route="/api/mobile/home", status!~"5.."}[1h]))
+            /
+          sum(rate(animaxia_http_requests_total{route="/api/mobile/home"}[1h]))
+        labels:
+          slo: mobile_home
+          target: "0.995"
+
+      - record: slo:availability:error_ratio_1h
+        expr: |
+          sum(rate(animaxia_http_requests_total{route="/api/mobile/home", status=~"5.."}[1h]))
+            /
+          sum(rate(animaxia_http_requests_total{route="/api/mobile/home"}[1h]))
+        labels:
+          slo: mobile_home
+          target: "0.995"
+
+      # ── SLO ai_personal_home — /api/ai/personal/home (monolith) ────────────
+      - record: slo:availability:ratio_5m
+        expr: |
+          sum(rate(animaxia_http_requests_total{route="/api/ai/personal/home", status!~"5.."}[5m]))
+            /
+          sum(rate(animaxia_http_requests_total{route="/api/ai/personal/home"}[5m]))
+        labels:
+          slo: ai_personal_home
+          target: "0.995"
+
+      - record: slo:availability:ratio_1h
+        expr: |
+          sum(rate(animaxia_http_requests_total{route="/api/ai/personal/home", status!~"5.."}[1h]))
+            /
+          sum(rate(animaxia_http_requests_total{route="/api/ai/personal/home"}[1h]))
+        labels:
+          slo: ai_personal_home
+          target: "0.995"
+
+      - record: slo:availability:error_ratio_1h
+        expr: |
+          sum(rate(animaxia_http_requests_total{route="/api/ai/personal/home", status=~"5.."}[1h]))
+            /
+          sum(rate(animaxia_http_requests_total{route="/api/ai/personal/home"}[1h]))
+        labels:
+          slo: ai_personal_home
+          target: "0.995"
+
+      # ── SLO edge_gateway — module="gateway" (edge) ─────────────────────────
+      - record: slo:availability:ratio_5m
+        expr: |
+          sum(rate(animaxia_edge_requests_total{module="gateway", status!~"5.."}[5m]))
+            /
+          sum(rate(animaxia_edge_requests_total{module="gateway"}[5m]))
+        labels:
+          slo: edge_gateway
+          target: "0.995"
+
+      - record: slo:availability:ratio_1h
+        expr: |
+          sum(rate(animaxia_edge_requests_total{module="gateway", status!~"5.."}[1h]))
+            /
+          sum(rate(animaxia_edge_requests_total{module="gateway"}[1h]))
+        labels:
+          slo: edge_gateway
+          target: "0.995"
+
+      - record: slo:availability:error_ratio_1h
+        expr: |
+          sum(rate(animaxia_edge_requests_total{module="gateway", status=~"5.."}[1h]))
+            /
+          sum(rate(animaxia_edge_requests_total{module="gateway"}[1h]))
+        labels:
+          slo: edge_gateway
+          target: "0.995"
+
+      # ── SLO ai_latency — p95 < 1500 ms on /api/ai* (monolith, ms buckets) ──
+      - record: slo:ai_latency:p95_1h
+        expr: |
+          histogram_quantile(0.95,
+            sum by (route, le) (
+              rate(animaxia_http_request_latency_ms_bucket{route=~"/api/ai.*"}[1h])
+            )
+          )
+        labels:
+          slo: ai_latency
+          target_ms: "1500"

@@ -1,0 +1,702 @@
+    52→    52→import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+    53→    53→import { PartyRoom } from '../social/party-room';
+    54→    54→import { ContentMiniCard, PlanBadge, RatingPill, SignInPrompt, UserAvatar, timeAgo } from '../social/social-ui';
+    55→    55→
+    56→    56→/* ------------------------------ local helpers ------------------------------ */
+    57→    57→
+    58→    58→type SocialTab = 'feed' | 'people' | 'reviews' | 'parties' | 'ai';
+    59→    59→
+    60→    60→const TABS: { value: SocialTab; label: string }[] = [
+    61→    61→  { value: 'feed', label: 'Feed' },
+    62→    62→  { value: 'people', label: 'People' },
+    63→    63→  { value: 'reviews', label: 'Reviews' },
+    64→    64→  { value: 'parties', label: 'Parties' },
+    65→    65→  { value: 'ai', label: 'AI' },
+    66→    66→];
+    67→    67→
+    68→    68→const ACTIVITY_META: Record<ActivityType, { icon: React.ComponentType<{ className?: string }>; chip: string; verb: string }> = {
+    69→    69→  review: {
+    70→    70→    icon: Star,
+    71→    71→    chip: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    72→    72→    verb: 'reviewed',
+    73→    73→  },
+    74→    74→  comment: {
+    75→    75→    icon: MessageCircle,
+    76→    76→    chip: 'border-teal-500/30 bg-teal-500/10 text-teal-300',
+    77→    77→    verb: 'commented on',
+    78→    78→  },
+    79→    79→  follow: {
+    80→    80→    icon: UserPlus,
+    81→    81→    chip: 'border-violet-500/30 bg-violet-500/10 text-violet-300',
+    82→    82→    verb: 'started following',
+    83→    83→  },
+    84→    84→  'party:create': {
+    85→    85→    icon: Users,
+    86→    86→    chip: 'border-rose-500/30 bg-rose-500/10 text-rose-300',
+    87→    87→    verb: 'started a watch party for',
+    88→    88→  },
+    89→    89→  'party:join': {
+    90→    90→    icon: LogIn,
+    91→    91→    chip: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+    92→    92→    verb: 'joined',
+    93→    93→  },
+    94→    94→  'party:ended': {
+    95→    95→    icon: CircleStop,
+    96→    96→    chip: 'border-white/15 bg-white/5 text-zinc-400',
+    97→    97→    verb: 'ended a watch party',
+    98→    98→  },
+    99→    99→};
+   100→   100→
+   101→   101→function activityTarget(event: ActivityEvent): string | null {
+   102→   102→  const meta = event.metadata || {};
+   103→   103→  if (event.type === 'follow' && typeof meta.username === 'string') return meta.username;
+   104→   104→  return null;
+   105→   105→}
+   106→   106→
+   107→   107→/* ---------------------------------- view ---------------------------------- */
+   108→   108→
+   109→   109→export function SocialView({ route }: { route: AppRoute }) {
+   110→   110→  if (route.params[0] === 'party') {
+   111→   111→    const partyId = Number(route.params[1]);
+   112→   112→    return <PartyRoom key={partyId} partyId={partyId} />;
+   113→   113→  }
+   114→   114→  return <SocialHub route={route} />;
+   115→   115→}
+   116→   116→
+   117→   117→function SocialHub({ route }: { route: AppRoute }) {
+   118→   118→  const { user } = useAuth();
+   119→   119→  const initialTab = route.query.get('tab');
+   120→   120→  const [tab, setTab] = useState<SocialTab>(
+   121→   121→    TABS.some((t) => t.value === initialTab) ? (initialTab as SocialTab) : 'feed',
+   122→   122→  );
+   123→   123→
+   124→   124→  /* ONE socket while the hub is mounted (anon ok): presence + live ticker. */
+   125→   125→  const [online, setOnline] = useState<number | null>(null);
+   126→   126→  const [liveEvents, setLiveEvents] = useState<ActivityEvent[]>([]);
+   127→   127→
+   128→   128→  useEffect(() => {
+   129→   129→    const socket = createSocialSocket();
+   130→   130→    socket.on('hello', (d: { online?: number }) => {
+   131→   131→      if (typeof d.online === 'number') setOnline(d.online);
+   132→   132→    });
+   133→   133→    socket.on('presence:online', (d: { online: number }) => setOnline(d.online));
+   134→   134→    socket.on('social:activity', (event: ActivityEvent) => {
+   135→   135→      if (!event || typeof event !== 'object' || event.id == null) return;
+   136→   136→      setLiveEvents((prev) => (prev.some((e) => e.id === event.id) ? prev : [event, ...prev].slice(0, 30)));
+   137→   137→    });
+   138→   138→    return () => {
+   139→   139→      socket.removeAllListeners();
+   140→   140→      socket.disconnect();
+   141→   141→    };
+   142→   142→  }, []);
+   143→   143→
+   144→   144→  return (
+   145→   145→    <Container className="space-y-8 py-8 sm:py-10">
+   146→   146→      <PageHeader title="Social" subtitle="Follow people, review titles, join watch parties — live.">
+   147→   147→        <div className="flex flex-wrap items-center gap-2 pt-1">
+   148→   148→          {online != null && (
+   149→   149→            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+   150→   150→              <span className="relative flex h-1.5 w-1.5">
+   151→   151→                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+   152→   152→                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+   153→   153→              </span>
+   154→   154→              {online} online
+   155→   155→            </span>
+   156→   156→          )}
+   157→   157→          {!user && (
+   158→   158→            <Button
+   159→   159→              type="button"
+   160→   160→              size="sm"
+   161→   161→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   162→   162→              onClick={() => navigate('/auth')}
+   163→   163→            >
+   164→   164→              <LogIn aria-hidden /> Sign in
+   165→   165→            </Button>
+   166→   166→          )}
+   167→   167→        </div>
+   168→   168→      </PageHeader>
+   169→   169→
+   170→   170→      <Tabs value={tab} onValueChange={(v) => setTab(v as SocialTab)}>
+   171→   171→        <TabsList className="h-10 w-full justify-start gap-1 overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   172→   172→          {TABS.map((t) => (
+   173→   173→            <TabsTrigger
+   174→   174→              key={t.value}
+   175→   175→              value={t.value}
+   176→   176→              className="shrink-0 whitespace-nowrap rounded-lg px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:px-5"
+   177→   177→            >
+   178→   178→              {t.label}
+   179→   179→            </TabsTrigger>
+   180→   180→          ))}
+   181→   181→        </TabsList>
+   182→   182→
+   183→   183→        <TabsContent value="feed" className="pt-6">
+   184→   184→          <FeedTab liveEvents={liveEvents} />
+   185→   185→        </TabsContent>
+   186→   186→        <TabsContent value="people" className="pt-6">
+   187→   187→          <PeopleTab />
+   188→   188→        </TabsContent>
+   189→   189→        <TabsContent value="reviews" className="pt-6">
+   190→   190→          <ReviewsTab />
+   191→   191→        </TabsContent>
+   192→   192→        <TabsContent value="parties" className="pt-6">
+   193→   193→          <PartiesTab />
+   194→   194→        </TabsContent>
+   195→   195→        <TabsContent value="ai" className="pt-6">
+   196→   196→          <AiTab />
+   197→   197→        </TabsContent>
+   198→   198→      </Tabs>
+   199→   199→    </Container>
+   200→   200→  );
+   201→   201→}
+   202→   202→
+   203→   203→/* --------------------------------- feed tab -------------------------------- */
+   204→   204→
+   205→   205→function FeedTab({ liveEvents }: { liveEvents: ActivityEvent[] }) {
+   206→   206→  const { user } = useAuth();
+   207→   207→  const feed = useApi(`social-feed-v2-${user ? `u${user.id}` : 'anon'}`, () =>
+   208→   208→    user ? social.feed() : social.publicFeed(),
+   209→   209→  );
+   210→   210→
+   211→   211→  /* Cursor pagination — same accumulate-locally pattern as feed-view. */
+   212→   212→  const [moreItems, setMoreItems] = useState<ActivityEvent[]>([]);
+   213→   213→  const [moreCursor, setMoreCursor] = useState<string | null | undefined>(undefined);
+   214→   214→  const [loadingMore, setLoadingMore] = useState(false);
+   215→   215→  const [moreError, setMoreError] = useState<string | null>(null);
+   216→   216→
+   217→   217→  useEffect(() => {
+   218→   218→    setMoreItems([]);
+   219→   219→    setMoreCursor(undefined);
+   220→   220→    setMoreError(null);
+   221→   221→  }, [feed.data]);
+   222→   222→
+   223→   223→  const items = useMemo(() => [...(feed.data?.data ?? []), ...moreItems], [feed.data, moreItems]);
+   224→   224→  const activeCursor = moreCursor !== undefined ? moreCursor : (feed.data?.nextCursor ?? null);
+   225→   225→
+   226→   226→  async function loadMore() {
+   227→   227→    if (!activeCursor || loadingMore) return;
+   228→   228→    setLoadingMore(true);
+   229→   229→    setMoreError(null);
+   230→   230→    try {
+   231→   231→      const res = user ? await social.feed(activeCursor) : await social.publicFeed(activeCursor);
+   232→   232→      setMoreItems((prev) => [...prev, ...res.data]);
+   233→   233→      setMoreCursor(res.nextCursor);
+   234→   234→    } catch (e) {
+   235→   235→      setMoreError(e instanceof Error ? e.message : 'Could not load more activity');
+   236→   236→    } finally {
+   237→   237→      setLoadingMore(false);
+   238→   238→    }
+   239→   239→  }
+   240→   240→
+   241→   241→  if (feed.loading && !feed.data) return <FeedSkeleton />;
+   242→   242→  if (feed.error && !feed.data) return <ErrorState message={feed.error} onRetry={feed.refetch} />;
+   243→   243→
+   244→   244→  /* Live events on top, deduped against everything already listed. */
+   245→   245→  const listedIds = new Set(items.map((e) => e.id));
+   246→   246→  const fresh = liveEvents.filter((e) => !listedIds.has(e.id));
+   247→   247→
+   248→   248→  return (
+   249→   249→    <div className="mx-auto max-w-3xl space-y-4">
+   250→   250→      {fresh.length > 0 && (
+   251→   251→        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-rose-300">
+   252→   252→          <Radio className="h-3.5 w-3.5 animate-pulse" aria-hidden /> Live
+   253→   253→        </p>
+   254→   254→      )}
+   255→   255→      {fresh.map((event) => (
+   256→   256→        <ActivityCard key={`live-${event.id}`} event={event} live />
+   257→   257→      ))}
+   258→   258→      {fresh.length > 0 && items.length > 0 && <div className="h-px bg-white/10" role="separator" />}
+   259→   259→
+   260→   260→      {items.length === 0 && fresh.length === 0 ? (
+   261→   261→        <EmptyState
+   262→   262→          icon={<Clapperboard className="h-6 w-6" aria-hidden />}
+   263→   263→          title="Nothing here yet"
+   264→   264→          message="Reviews, follows and watch parties all show up here as they happen. Be the first — follow someone or start a party."
+   265→   265→          action={
+   266→   266→            <Button variant="outline" className="border-white/15 bg-white/5 hover:bg-white/10" onClick={() => navigate('/home')}>
+   267→   267→              Browse the library
+   268→   268→            </Button>
+   269→   269→          }
+   270→   270→        />
+   271→   271→      ) : (
+   272→   272→        <ol className="space-y-3" aria-label="Social activity">
+   273→   273→          {items.map((event, i) => (
+   274→   274→            <li key={`${event.type}-${event.id}-${i}`}>
+   275→   275→              <ActivityCard event={event} />
+   276→   276→            </li>
+   277→   277→          ))}
+   278→   278→        </ol>
+   279→   279→      )}
+   280→   280→
+   281→   281→      {activeCursor && (
+   282→   282→        <div className="space-y-2 pt-1">
+   283→   283→          {moreError && (
+   284→   284→            <p className="text-center text-xs text-rose-300" role="alert">
+   285→   285→              {moreError}
+   286→   286→            </p>
+   287→   287→          )}
+   288→   288→          <Button
+   289→   289→            type="button"
+   290→   290→            variant="outline"
+   291→   291→            onClick={() => void loadMore()}
+   292→   292→            disabled={loadingMore}
+   293→   293→            className="w-full border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   294→   294→          >
+   295→   295→            {loadingMore ? <Loader2 className="animate-spin" aria-hidden /> : <ChevronDown aria-hidden />}
+   296→   296→            {loadingMore ? 'Loading…' : 'Load more'}
+   297→   297→          </Button>
+   298→   298→        </div>
+   299→   299→      )}
+   300→   300→    </div>
+   301→   301→  );
+   302→   302→}
+   303→   303→
+   304→   304→function ActivityCard({ event, live }: { event: ActivityEvent; live?: boolean }) {
+   305→   305→  const meta = ACTIVITY_META[event.type] ?? ACTIVITY_META.comment;
+   306→   306→  const Icon = meta.icon;
+   307→   307→  const target = activityTarget(event);
+   308→   308→
+   309→   309→  return (
+   310→   310→    <article
+   311→   311→      className={cn(
+   312→   312→        'flex gap-4 rounded-xl border bg-white/[0.03] p-4 transition-colors hover:border-white/20',
+   313→   313→        live ? 'border-rose-500/30' : 'border-white/10',
+   314→   314→      )}
+   315→   315→    >
+   316→   316→      <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl border', meta.chip)} aria-hidden>
+   317→   317→        <Icon className="h-5 w-5" />
+   318→   318→      </span>
+   319→   319→      <div className="min-w-0 flex-1 space-y-2">
+   320→   320→        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+   321→   321→          <p className="min-w-0 text-sm text-zinc-400">
+   322→   322→            {live && (
+   323→   323→              <span className="mr-1.5 inline-flex items-center gap-1 rounded-full bg-rose-600 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-white">
+   324→   324→                Live
+   325→   325→              </span>
+   326→   326→            )}
+   327→   327→            <span className="font-semibold text-zinc-100">{event.user?.username}</span> {meta.verb}
+   328→   328→            {target ? <span className="font-semibold text-zinc-100"> {target}</span> : null}
+   329→   329→          </p>
+   330→   330→          <time className="shrink-0 text-[11px] text-zinc-500" dateTime={event.createdat}>
+   331→   331→            {timeAgo(event.createdat)}
+   332→   332→          </time>
+   333→   333→        </div>
+   334→   334→        {event.content ? <ContentMiniCard content={event.content} /> : null}
+   335→   335→        {event.preview ? <p className="line-clamp-2 break-words text-sm text-zinc-400">{event.preview}</p> : null}
+   336→   336→      </div>
+   337→   337→    </article>
+   338→   338→  );
+   339→   339→}
+   340→   340→
+   341→   341→function FeedSkeleton() {
+   342→   342→  return (
+   343→   343→    <div className="mx-auto max-w-3xl space-y-3" aria-busy="true" aria-label="Loading social feed">
+   344→   344→      {Array.from({ length: 5 }).map((_, i) => (
+   345→   345→        <div key={i} className="flex gap-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+   346→   346→          <Skeleton className="h-10 w-10 shrink-0 rounded-xl" />
+   347→   347→          <div className="flex-1 space-y-2">
+   348→   348→            <Skeleton className="h-4 w-44" />
+   349→   349→            <Skeleton className="h-3 w-20" />
+   350→   350→            <Skeleton className="h-16 w-full rounded-lg" />
+   351→   351→          </div>
+   352→   352→        </div>
+   353→   353→      ))}
+   354→   354→    </div>
+   355→   355→  );
+   356→   356→}
+   357→   357→
+   358→   358→/* -------------------------------- people tab ------------------------------- */
+   359→   359→
+   360→   360→function PeopleTab() {
+   361→   361→  const { user } = useAuth();
+   362→   362→  const [query, setQuery] = useState('');
+   363→   363→  const [debouncedQ, setDebouncedQ] = useState('');
+   364→   364→  const [profileId, setProfileId] = useState<number | null>(null);
+   365→   365→
+   366→   366→  /* Debounced search (400 ms). */
+   367→   367→  useEffect(() => {
+   368→   368→    const timer = setTimeout(() => setDebouncedQ(query.trim()), 400);
+   369→   369→    return () => clearTimeout(timer);
+   370→   370→  }, [query]);
+   371→   371→
+   372→   372→  const people = useApi(
+   373→   373→    `social-people-${debouncedQ.toLowerCase()}`,
+   374→   374→    () => social.people(debouncedQ || undefined, 12),
+   375→   375→    { enabled: !!user },
+   376→   376→  );
+   377→   377→  const following = useApi(`social-following-${user?.id ?? 'anon'}`, () => social.following(), { enabled: !!user });
+   378→   378→
+   379→   379→  /* Optimistic follow overrides shared by every list below. */
+   380→   380→  const [overrides, setOverrides] = useState<Record<number, boolean>>({});
+   381→   381→  const [busy, setBusy] = useState<Record<number, boolean>>({});
+   382→   382→
+   383→   383→  function isFollowing(u: SocialUserCard): boolean {
+   384→   384→    return overrides[u.id] ?? u.isfollowing ?? false;
+   385→   385→  }
+   386→   386→
+   387→   387→  async function toggleFollow(u: SocialUserCard) {
+   388→   388→    if (!user) {
+   389→   389→      toast('Sign in to follow people');
+   390→   390→      navigate('/auth');
+   391→   391→      return;
+   392→   392→    }
+   393→   393→    if (busy[u.id]) return;
+   394→   394→    const next = !isFollowing(u);
+   395→   395→    setOverrides((prev) => ({ ...prev, [u.id]: next }));
+   396→   396→    setBusy((prev) => ({ ...prev, [u.id]: true }));
+   397→   397→    try {
+   398→   398→      await (next ? social.follow(u.id) : social.unfollow(u.id));
+   399→   399→    } catch (err) {
+   400→   400→      setOverrides((prev) => ({ ...prev, [u.id]: !next }));
+   401→   401→      toast.error(err instanceof Error ? err.message : 'Could not update follows');
+   402→   402→    } finally {
+   403→   403→      setBusy((prev) => ({ ...prev, [u.id]: false }));
+   404→   404→    }
+   405→   405→  }
+   406→   406→
+   407→   407→  if (!user) {
+   408→   408→    return (
+   409→   409→      <SignInPrompt
+   410→   410→        title="Sign in to find people"
+   411→   411→        message="Follow reviewers with your taste — the People tab ranks the community so you can build your feed."
+   412→   412→      />
+   413→   413→    );
+   414→   414→  }
+   415→   415→
+   416→   416→  return (
+   417→   417→    <div className="space-y-8">
+   418→   418→      <div className="mx-auto max-w-2xl">
+   419→   419→        <div className="relative">
+   420→   420→          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden />
+   421→   421→          <label htmlFor="people-search" className="sr-only">
+   422→   422→            Search people
+   423→   423→          </label>
+   424→   424→          <Input
+   425→   425→            id="people-search"
+   426→   426→            value={query}
+   427→   427→            onChange={(e) => setQuery(e.target.value)}
+   428→   428→            placeholder="Search people by username…"
+   429→   429→            autoComplete="off"
+   430→   430→            className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   431→   431→          />
+   432→   432→        </div>
+   433→   433→      </div>
+   434→   434→
+   435→   435→      <Section
+   436→   436→        title={debouncedQ ? `Results for “${debouncedQ}”` : 'Suggested people'}
+   437→   437→        subtitle="Most active members of the community."
+   438→   438→      >
+   439→   439→        {people.loading && !people.data ? (
+   440→   440→          <PeopleGridSkeleton />
+   441→   441→        ) : people.error ? (
+   442→   442→          <ErrorState message={people.error} onRetry={people.refetch} />
+   443→   443→        ) : (people.data?.data ?? []).length === 0 ? (
+   444→   444→          <EmptyState
+   445→   445→            icon={<Users className="h-6 w-6" aria-hidden />}
+   446→   446→            title={debouncedQ ? 'No one matches that search' : 'No people yet'}
+   447→   447→            message={debouncedQ ? 'Try a different username.' : 'The community will show up here as people join.'}
+   448→   448→          />
+   449→   449→        ) : (
+   450→   450→          <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="Suggested people">
+   451→   451→            {(people.data?.data ?? []).map((u) => (
+   452→   452→              <li key={u.id}>
+   453→   453→                <PersonCard person={u} following={isFollowing(u)} busy={!!busy[u.id]} onToggle={() => void toggleFollow(u)} onOpen={() => setProfileId(u.id)} />
+   454→   454→              </li>
+   455→   455→            ))}
+   456→   456→          </ul>
+   457→   457→        )}
+   458→   458→      </Section>
+   459→   459→
+   460→   460→      <Section title="You follow" subtitle="People whose activity fills your Feed tab.">
+   461→   461→        {following.loading && !following.data ? (
+   462→   462→          <div className="space-y-2" aria-busy="true">
+   463→   463→            <Skeleton className="h-16 w-full rounded-xl" />
+   464→   464→            <Skeleton className="h-16 w-full rounded-xl" />
+   465→   465→          </div>
+   466→   466→        ) : following.error ? (
+   467→   467→          <ErrorState message={following.error} onRetry={following.refetch} compact />
+   468→   468→        ) : (following.data?.data ?? []).length === 0 ? (
+   469→   469→          <EmptyState
+   470→   470→            icon={<UserPlus className="h-6 w-6" aria-hidden />}
+   471→   471→            title="You don't follow anyone yet"
+   472→   472→            message="Follow a few people above and their reviews, comments and parties will light up your feed."
+   473→   473→          />
+   474→   474→        ) : (
+   475→   475→          <ul className="grid gap-3 sm:grid-cols-2" aria-label="People you follow">
+   476→   476→            {(following.data?.data ?? []).map((u) => (
+   477→   477→              <li key={u.id}>
+   478→   478→                <PersonCard
+   479→   479→                  person={u}
+   480→   480→                  following={isFollowing(u)}
+   481→   481→                  busy={!!busy[u.id]}
+   482→   482→                  onToggle={() => void toggleFollow(u)}
+   483→   483→                  onOpen={() => setProfileId(u.id)}
+   484→   484→                />
+   485→   485→              </li>
+   486→   486→            ))}
+   487→   487→          </ul>
+   488→   488→        )}
+   489→   489→      </Section>
+   490→   490→
+   491→   491→      <ProfileDialog
+   492→   492→        userId={profileId}
+   493→   493→        onClose={() => setProfileId(null)}
+   494→   494→        isFollowing={(u) => isFollowing(u)}
+   495→   495→        busy={(id) => !!busy[id]}
+   496→   496→        onToggle={(u) => void toggleFollow(u)}
+   497→   497→      />
+   498→   498→    </div>
+   499→   499→  );
+   500→   500→}
+   501→   501→
+   502→   502→function PersonCard({
+   503→   503→  person,
+   504→   504→  following,
+   505→   505→  busy,
+   506→   506→  onToggle,
+   507→   507→  onOpen,
+   508→   508→}: {
+   509→   509→  person: SocialUserCard;
+   510→   510→  following: boolean;
+   511→   511→  busy: boolean;
+   512→   512→  onToggle: () => void;
+   513→   513→  onOpen: () => void;
+   514→   514→}) {
+   515→   515→  return (
+   516→   516→    <Card className="group border-white/10 bg-white/[0.03] transition-colors hover:border-white/20">
+   517→   517→      <CardContent className="flex items-center gap-3 p-4">
+   518→   518→        <button
+   519→   519→          type="button"
+   520→   520→          onClick={onOpen}
+   521→   521→          aria-label={`Open ${person.username}'s profile`}
+   522→   522→          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   523→   523→        >
+   524→   524→          <UserAvatar username={person.username} avatar={person.avatar} className="h-11 w-11 shrink-0" />
+   525→   525→          <span className="min-w-0 flex-1">
+   526→   526→            <span className="flex items-center gap-1.5">
+   527→   527→              <span className="truncate text-sm font-bold text-zinc-100">{person.username}</span>
+   528→   528→              <PlanBadge plan={person.plan} />
+   529→   529→            </span>
+   530→   530→            <span className="mt-0.5 block text-xs text-zinc-500">
+   531→   531→              {person.followers} {person.followers === 1 ? 'follower' : 'followers'} · {person.reviews}{' '}
+   532→   532→              {person.reviews === 1 ? 'review' : 'reviews'}
+   533→   533→            </span>
+   534→   534→          </span>
+   535→   535→        </button>
+   536→   536→        <Button
+   537→   537→          type="button"
+   538→   538→          size="sm"
+   539→   539→          variant="outline"
+   540→   540→          onClick={onToggle}
+   541→   541→          disabled={busy}
+   542→   542→          aria-pressed={following}
+   543→   543→          className={cn(
+   544→   544→            'shrink-0 font-semibold',
+   545→   545→            following
+   546→   546→              ? 'border-white/15 bg-white/5 text-zinc-300 hover:bg-white/10'
+   547→   547→              : 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
+   548→   548→          )}
+   549→   549→        >
+   550→   550→          {busy ? (
+   551→   551→            <Loader2 className="animate-spin" aria-hidden />
+   552→   552→          ) : following ? (
+   553→   553→            <>
+   554→   554→              <LogOut aria-hidden /> Unfollow
+   555→   555→            </>
+   556→   556→          ) : (
+   557→   557→            <>
+   558→   558→              <UserPlus aria-hidden /> Follow
+   559→   559→            </>
+   560→   560→          )}
+   561→   561→        </Button>
+   562→   562→      </CardContent>
+   563→   563→    </Card>
+   564→   564→  );
+   565→   565→}
+   566→   566→
+   567→   567→function PeopleGridSkeleton() {
+   568→   568→  return (
+   569→   569→    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true" aria-label="Loading people">
+   570→   570→      {Array.from({ length: 6 }).map((_, i) => (
+   571→   571→        <Skeleton key={i} className="h-[76px] rounded-xl" />
+   572→   572→      ))}
+   573→   573→    </div>
+   574→   574→  );
+   575→   575→}
+   576→   576→
+   577→   577→/* ------------------------------ profile dialog ----------------------------- */
+   578→   578→
+   579→   579→function ProfileDialog({
+   580→   580→  userId,
+   581→   581→  onClose,
+   582→   582→  isFollowing,
+   583→   583→  busy,
+   584→   584→  onToggle,
+   585→   585→}: {
+   586→   586→  userId: number | null;
+   587→   587→  onClose: () => void;
+   588→   588→  isFollowing: (u: SocialUserCard) => boolean;
+   589→   589→  busy: (id: number) => boolean;
+   590→   590→  onToggle: (u: SocialUserCard) => void;
+   591→   591→}) {
+   592→   592→  const profile = useApi(`social-profile-${userId ?? 0}`, () => social.userProfile(userId as number), {
+   593→   593→    enabled: userId != null,
+   594→   594→  });
+   595→   595→
+   596→   596→  const data: SocialUserProfile | null = userId != null ? profile.data : null;
+   597→   597→  const person: SocialUserCard | null = data
+   598→   598→    ? {
+   599→   599→        id: data.user.id,
+   600→   600→        username: data.user.username,
+   601→   601→        avatar: data.user.avatar,
+   602→   602→        plan: data.user.plan,
+   603→   603→        followers: data.stats.followers,
+   604→   604→        following: data.stats.following,
+   605→   605→        reviews: data.stats.reviews,
+   606→   606→        isfollowing: data.relation?.isfollowing ?? false,
+   607→   607→      }
+   608→   608→    : null;
+   609→   609→
+   610→   610→  return (
+   611→   611→    <Dialog open={userId != null} onOpenChange={(open) => !open && onClose()}>
+   612→   612→      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto border-white/10 bg-[#12121c] text-zinc-100 custom-scrollbar">
+   613→   613→        {userId == null ? null : !data ? (
+   614→   614→          profile.error ? (
+   615→   615→            <div>
+   616→   616→              <DialogTitle className="sr-only">Member profile</DialogTitle>
+   617→   617→              <ErrorState message={profile.error} onRetry={profile.refetch} compact />
+   618→   618→            </div>
+   619→   619→          ) : (
+   620→   620→            <div className="space-y-4" aria-busy="true" aria-label="Loading profile">
+   621→   621→              <DialogTitle className="sr-only">Member profile</DialogTitle>
+   622→   622→              <div className="flex items-center gap-3">
+   623→   623→                <Skeleton className="h-14 w-14 rounded-full" />
+   624→   624→                <div className="space-y-2">
+   625→   625→                  <Skeleton className="h-5 w-36" />
+   626→   626→                  <Skeleton className="h-3 w-24" />
+   627→   627→                </div>
+   628→   628→              </div>
+   629→   629→              <Skeleton className="h-20 w-full rounded-xl" />
+   630→   630→              <Skeleton className="h-32 w-full rounded-xl" />
+   631→   631→            </div>
+   632→   632→          )
+   633→   633→        ) : !person ? null : (
+   634→   634→          <>
+   635→   635→            <DialogHeader>
+   636→   636→              <div className="flex items-center gap-3">
+   637→   637→                <UserAvatar username={data.user.username} avatar={data.user.avatar} className="h-14 w-14" />
+   638→   638→                <div className="min-w-0 flex-1">
+   639→   639→                  <DialogTitle className="flex flex-wrap items-center gap-2 truncate text-lg font-black text-white">
+   640→   640→                    {data.user.username}
+   641→   641→                    <PlanBadge plan={data.user.plan} />
+   642→   642→                  </DialogTitle>
+   643→   643→                  <DialogDescription className="mt-0.5">
+   644→   644→                    Joined {new Date(data.user.createdat).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+   645→   645→                    {data.relation?.followsme ? ' · follows you' : ''}
+   646→   646→                  </DialogDescription>
+   647→   647→                </div>
+   648→   648→                <Button
+   649→   649→                  type="button"
+   650→   650→                  size="sm"
+   651→   651→                  variant="outline"
+   652→   652→                  onClick={() => onToggle(person)}
+   653→   653→                  disabled={busy(person.id)}
+   654→   654→                  aria-pressed={isFollowing(person)}
+   655→   655→                  className={cn(
+   656→   656→                    'shrink-0 font-semibold',
+   657→   657→                    isFollowing(person)
+   658→   658→                      ? 'border-white/15 bg-white/5 text-zinc-300 hover:bg-white/10'
+   659→   659→                      : 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
+   660→   660→                  )}
+   661→   661→                >
+   662→   662→                  {busy(person.id) ? (
+   663→   663→                    <Loader2 className="animate-spin" aria-hidden />
+   664→   664→                  ) : isFollowing(person) ? (
+   665→   665→                    <>
+   666→   666→                      <LogOut aria-hidden /> Unfollow
+   667→   667→                    </>
+   668→   668→                  ) : (
+   669→   669→                    <>
+   670→   670→                      <UserPlus aria-hidden /> Follow
+   671→   671→                    </>
+   672→   672→                  )}
+   673→   673→                </Button>
+   674→   674→              </div>
+   675→   675→            </DialogHeader>
+   676→   676→
+   677→   677→            <div className="space-y-5">
+   678→   678→              {/* Stats row */}
+   679→   679→              <dl className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+   680→   680→                {[
+   681→   681→                  { label: 'Followers', value: data.stats.followers },
+   682→   682→                  { label: 'Following', value: data.stats.following },
+   683→   683→                  { label: 'Reviews', value: data.stats.reviews },
+   684→   684→                  { label: 'Comments', value: data.stats.comments },
+   685→   685→                  { label: 'Parties', value: data.stats.partiesHosted },
+   686→   686→                ].map((s) => (
+   687→   687→                  <div key={s.label} className="rounded-xl border border-white/10 bg-white/[0.03] p-2.5 text-center">
+   688→   688→                    <dd className="text-base font-black text-zinc-100">{s.value}</dd>
+   689→   689→                    <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{s.label}</dt>
+   690→   690→                  </div>
+   691→   691→                ))}
+   692→   692→              </dl>
+   693→   693→
+   694→   694→              {/* Taste overlap */}
+   695→   695→              {data.taste && (data.taste.score > 0 || data.taste.sharedGenres.length > 0) && (
+   696→   696→                <div className="rounded-xl border border-rose-500/20 bg-rose-500/[0.06] p-4">
+   697→   697→                  <p className="flex flex-wrap items-center gap-2 text-sm font-bold text-zinc-100">
+   698→   698→                    <Sparkles className="h-4 w-4 text-rose-400" aria-hidden />
+   699→   699→                    Taste overlap
+   700→   700→                    <span className="rounded-full border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-bold text-rose-300">
+   701→   701→                      {Math.round(data.taste.score * 100)}% match
+   702→   702→                    </span>
+   703→   703→                  </p>
+   704→   704→                  {data.taste.sharedGenres.length > 0 && (
+   705→   705→                    <div className="mt-2 flex flex-wrap gap-1.5">
+   706→   706→                      {data.taste.sharedGenres.slice(0, 8).map((g) => (
+   707→   707→                        <span
+   708→   708→                          key={g}
+   709→   709→                          className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-medium text-zinc-300"
+   710→   710→                        >
+   711→   711→                          {g}
+   712→   712→                        </span>
+   713→   713→                      ))}
+   714→   714→                    </div>
+   715→   715→                  )}
+   716→   716→                </div>
+   717→   717→              )}
+   718→   718→
+   719→   719→              {/* Recent reviews */}
+   720→   720→              <Section title="Recent reviews">
+   721→   721→                {data.recentReviews.length === 0 ? (
+   722→   722→                  <p className="text-sm text-zinc-500">No reviews yet.</p>
+   723→   723→                ) : (
+   724→   724→                  <ul className="space-y-3">
+   725→   725→                    {data.recentReviews.slice(0, 4).map((r) => (
+   726→   726→                      <li key={r.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+   727→   727→                        <div className="flex flex-wrap items-center gap-2">
+   728→   728→                          <RatingPill rating={r.rating} />
+   729→   729→                          {r.title ? <span className="text-sm font-semibold text-zinc-100">{r.title}</span> : null}
+   730→   730→                          <span className="ml-auto text-[11px] text-zinc-500">{timeAgo(r.createdat)}</span>
+   731→   731→                        </div>
+   732→   732→                        <p className="mt-1.5 line-clamp-2 text-sm text-zinc-400">{r.body}</p>
+   733→   733→                        <div className="mt-2">
+   734→   734→                          <ContentMiniCard content={r.content} compact />
+   735→   735→                        </div>
+   736→   736→                      </li>
+   737→   737→                    ))}
+   738→   738→                  </ul>
+   739→   739→                )}
+   740→   740→              </Section>
+   741→   741→
+   742→   742→              {/* Recent activity */}
+   743→   743→              <Section title="Recent activity">
+   744→   744→                {data.recentActivity.length === 0 ? (
+   745→   745→                  <p className="text-sm text-zinc-500">No recent activity.</p>
+   746→   746→                ) : (
+   747→   747→                  <ul className="space-y-1.5">
+   748→   748→                    {data.recentActivity.slice(0, 5).map((a) => {
+   749→   749→                      const meta = ACTIVITY_META[(a.type as ActivityType) ?? 'comment'] ?? ACTIVITY_META.comment;
+   750→   750→                      const Icon = meta.icon;
+   751→   751→                      return (
+
+[showing lines 52-751 of 1397; use offset=752 with limit to continue reading]

@@ -1,0 +1,931 @@
+mini-services/animaxia-backend/cache.js:15:    this.sweepTimer = setInterval(() => this.sweep(), 60000);
+mini-services/animaxia-backend/cache.js:81: * NEON FREE PLAN: acceptă { ttlMs } per-rută — rutele de catalog DB-backed
+mini-services/animaxia-backend/cache.js:84: * Neon decât la primul vizitator sau la conținut schimbat.
+mini-services/animaxia-backend/db.js:2: * db.js — Unified async data layer: Neon PostgreSQL first, with automatic
+mini-services/animaxia-backend/db.js:3: * local JSON-file fallback (data/content.json) when Postgres is unreachable.
+mini-services/animaxia-backend/db.js:4: * Includes a 60s reconnect probe that migrates local rows back into Postgres.
+mini-services/animaxia-backend/db.js:8:import pg from 'pg';
+mini-services/animaxia-backend/db.js:35:VALUES ($1, $2, $3, $4::jsonb, $5)
+mini-services/animaxia-backend/db.js:45:let driver = null; // 'postgres' | 'local'
+mini-services/animaxia-backend/db.js:116:  all() {
+mini-services/animaxia-backend/db.js:203:/* NEON FREE PLAN (optimizare scale-to-zero): timestamp-ul ultimei interogări
+mini-services/animaxia-backend/db.js:204: * reușite pe PostgreSQL — folosit de /api/health ca să decidă ONEST dacă merită
+mini-services/animaxia-backend/db.js:206: * să servească valorile din cache fără să trezească compute-ul Neon adormit. */
+mini-services/animaxia-backend/db.js:209:/** Ultima activitate reală pe PostgreSQL (ms epoch); 0 = niciodată (driver local). */
+mini-services/animaxia-backend/db.js:220:    logger.error(`[DB] PostgreSQL query error: ${err.message}`);
+mini-services/animaxia-backend/db.js:233: * One-time migration of local-fallback rows into PostgreSQL (idempotent upserts).
+mini-services/animaxia-backend/db.js:237:async function migrateLocalToPostgres() {
+mini-services/animaxia-backend/db.js:268:  logger.info(`[DB] Migrated ${migrated}/${rows.length} local rows into PostgreSQL`);
+mini-services/animaxia-backend/db.js:273: * AR10M (NEON FREE PLAN, strict): reconnect LAZY, on-demand — fost probe
+mini-services/animaxia-backend/db.js:274: * setInterval 60s (interzis de regula AR10M: zero timere de fond/interogări
+mini-services/animaxia-backend/db.js:277: * ZERO setInterval). Neon scale-to-zero rămâne neatins fără trafic real.
+mini-services/animaxia-backend/db.js:280:const RECONNECT_ATTEMPT_INTERVAL_MS = 60_000;
+mini-services/animaxia-backend/db.js:285:  if (now - lastReconnectAttemptAt < RECONNECT_ATTEMPT_INTERVAL_MS) return;
+mini-services/animaxia-backend/db.js:290:    await migrateLocalToPostgres();
+mini-services/animaxia-backend/db.js:291:    driver = 'postgres';
+mini-services/animaxia-backend/db.js:294:    logger.info('[DB] Reconnected to PostgreSQL (lazy, on-demand — zero timer)');
+mini-services/animaxia-backend/db.js:301: * Probe PostgreSQL and initialise the schema; on failure fall back to the
+mini-services/animaxia-backend/db.js:309:    logger.error('[DB] PostgreSQL unavailable (DATABASEURL missing) — switching to local fallback store');
+mini-services/animaxia-backend/db.js:314:  pool = new pg.Pool({
+mini-services/animaxia-backend/db.js:323:  /* NEON FREE PLAN (cold-start toleranță): Neon scale-to-zero suspendă compute-ul
+mini-services/animaxia-backend/db.js:346:    await migrateLocalToPostgres();
+mini-services/animaxia-backend/db.js:347:    driver = 'postgres';
+mini-services/animaxia-backend/db.js:349:    logger.info('[DB] Connected to PostgreSQL (Neon) — schema ready');
+mini-services/animaxia-backend/db.js:352:    logger.error(`[DB] PostgreSQL unavailable (${err.message}) — switching to local fallback store`);
+mini-services/animaxia-backend/db.js:381:    clauses.push(`title ILIKE '%' || $${values.length} || '%'`);
+mini-services/animaxia-backend/db.js:429: * FAZA 16-a central dedup hook: after a successful postgres upsert, extract
+mini-services/animaxia-backend/db.js:438:    if (driver !== 'postgres' || !record?.id) return;
+mini-services/animaxia-backend/db.js:530:    driver: driver === 'postgres' ? 'postgres' : 'local-fallback',
+mini-services/animaxia-backend/db.js:531:    connected: driver === 'postgres',
+mini-services/animaxia-backend/db.js:532:    ...(driver !== 'postgres' && lastError ? { lastError } : {}),
+mini-services/animaxia-backend/db.js:548: * Generic SQL query on the active PostgreSQL pool — used by the Phase-2
+mini-services/animaxia-backend/db.js:553:  if (driver !== 'postgres' || !pool) {
+mini-services/animaxia-backend/db.js:554:    const err = new Error('SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use)');
+mini-services/animaxia-backend/db.js:562:  if (driver === 'postgres') {
+mini-services/animaxia-backend/db.js:577:      logger.info('[DB] PostgreSQL pool closed');
+mini-services/animaxia-backend/db.js:585: * FAZA 13 (sharding — Task 13-2): Neon multi-branch shard pool registry.
+mini-services/animaxia-backend/db.js:592: * Neon branch (physical mode, activated purely by configuration). queryOnShard
+mini-services/animaxia-backend/db.js:599:/** Create a standalone pg.Pool for a Neon branch (same tuning as the main
+mini-services/animaxia-backend/db.js:602:  const branchPool = new pg.Pool({
+mini-services/animaxia-backend/db.js:620:export function ensureShardPool(shardId) {
+mini-services/animaxia-backend/db.js:642:    logger.info(`[DB] shard ${id} → dedicated Neon branch pool (${branch})`);
+mini-services/animaxia-backend/db.js:654:    healthy: null, // mirrors driver === 'postgres' at read time
+mini-services/animaxia-backend/db.js:665:  const entry = ensureShardPool(shardId);
+mini-services/animaxia-backend/db.js:674:    code.startsWith('08') || // PostgreSQL class 08 — connection_exception
+mini-services/animaxia-backend/db.js:692: * query() when the PostgreSQL driver is inactive (local fallback store).
+mini-services/animaxia-backend/db.js:695:  if (driver !== 'postgres' || !pool) {
+mini-services/animaxia-backend/db.js:696:    const err = new Error('SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use)');
+mini-services/animaxia-backend/db.js:700:  const entry = ensureShardPool(shardId);
+mini-services/animaxia-backend/db.js:731:      const entry = ensureShardPool(id);
+mini-services/animaxia-backend/db.js:755:        connected: driver === 'postgres',
+mini-services/animaxia-backend/index.js:14: * single byte of the protected server.js (FAZA 18/20/21/23/24/25/28, Neon
+mini-services/animaxia-backend/modules/ai/ai.js:127:const quotaSweep = setInterval(() => {
+mini-services/animaxia-backend/modules/ai/home.js:7: *                                `limit` (default 20) posters: the Neon library
+mini-services/animaxia-backend/modules/ai/home.js:13: *                                the external posters + the Neon library.
+mini-services/animaxia-backend/modules/ai/home.js:84: * cache) now live in Neon (aisettings / aienrichment / aitrailercache) when
+mini-services/animaxia-backend/modules/ai/home.js:85: * the postgres driver is active — data/*.json is kept ONLY as the local
+mini-services/animaxia-backend/modules/ai/home.js:86: * fallback store, and nothing is written to disk while postgres is active.
+mini-services/animaxia-backend/modules/ai/home.js:252:    source: 'neon',
+mini-services/animaxia-backend/modules/ai/home.js:320:  const [lib, extChunk1] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/home.js:356:    sourcesChecked: ['neon-library', 'tmdb-trending', 'jikan-top'],
+mini-services/animaxia-backend/modules/ai/home.js:422:  const [trendingSize, tvSize, jikanSize] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/home.js:471: * FAZA 16-a: entries persist for 24h (TTL by updatedat) in the Neon
+mini-services/animaxia-backend/modules/ai/home.js:472: * `aienrichment` table when postgres is active; data/ai-home-enrichment.json
+mini-services/animaxia-backend/modules/ai/home.js:492:/** Persist one enrichment entry (Neon upsert, or file store in fallback mode). */
+mini-services/animaxia-backend/modules/ai/home.js:498:        `INSERT INTO aienrichment (externalid, payload) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/home.js:634:        // Persist immediately (crash-safe per entry, Neon upsert).
+mini-services/animaxia-backend/modules/ai/home.js:663:  const [lib, franchiseHub, trilogyHub] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/home.js:766: * Neon `aitrailercache` table when postgres is active; the data/*.json file
+mini-services/animaxia-backend/modules/ai/home.js:785:/** Fetch one cached trailer entry (Neon point-read, or file store). */
+mini-services/animaxia-backend/modules/ai/home.js:810:        `INSERT INTO aitrailercache (cachekey, payload) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/home.js:1001:  const [lib, franchiseHub, trilogyHub] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/home.js:1162: * FAZA 16-a: the 4 AI Home toggles persist in the Neon `aisettings` table
+mini-services/animaxia-backend/modules/ai/home.js:1163: * (key 'home') when postgres is active; data/ai-home-settings.json remains
+mini-services/animaxia-backend/modules/ai/home.js:1187:        `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/hub.js:3: * toggle on/off persistent în Neon (tabela `aisettings`, key `hub:{key}`).
+mini-services/animaxia-backend/modules/ai/hub.js:189: * Toggles persist in the Neon `aisettings` table — one row per AI,
+mini-services/animaxia-backend/modules/ai/hub.js:216:    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ai/hub.js:617:    const [perContent, eventsRow] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/hub.js:667:      const [recentAdds, topRated] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/hub.js:871:        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4}::jsonb,$${base + 5},$${base + 6},NOW())`;
+mini-services/animaxia-backend/modules/ai/hub.js:976:    warning: { message: 'Latență bază de date ridicată', hint: 'Verifică pool-ul Neon (poolStats) și eventuale query-uri lente.' },
+mini-services/animaxia-backend/modules/ai/hub.js:1301:  const [totalRow, translationRows] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/hub.js:1303:    rows(`SELECT metadata->'translations' AS t FROM content WHERE metadata ? 'translations' AND metadata->'translations' <> '{}'::jsonb`),
+mini-services/animaxia-backend/modules/ai/hub.js:1334:    ] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/hub.js:1469:      `UPDATE content SET metadata = metadata || $2::jsonb WHERE id = $1 RETURNING id`,
+mini-services/animaxia-backend/modules/ai/hub.js:1505:  const [keep, merge] = await Promise.all([getContentById(keepId), getContentById(mergeId)]);
+mini-services/animaxia-backend/modules/ai/hub.js:1592:  const [embeddedRow, totalRow] = await Promise.all([
+mini-services/animaxia-backend/modules/ai/hub.js:1635:     VALUES ($1, $2, $3, $4, $5::jsonb)
+mini-services/animaxia-backend/modules/ai/hub.js:1748:       SET metadata = metadata || jsonb_build_object(
+mini-services/animaxia-backend/modules/ai/hub.js:1750:         COALESCE(metadata->'translations', '{}'::jsonb) || jsonb_build_object($2::text, $3::text)
+mini-services/animaxia-backend/modules/ai/hub.js:1762:      `UPDATE content SET metadata = metadata || jsonb_build_object('description', $2::text) WHERE id = $1 AND NOT (metadata ? 'overview' OR metadata ? 'synopsis' OR metadata ? 'description')`,
+mini-services/animaxia-backend/modules/aicloud/admin.js:20:/** Total persisted aiusagelogs rows (Neon) — null on the local driver. */
+mini-services/animaxia-backend/modules/aicloud/agent.js:14: *                      the `agentconversations` Neon table.
+mini-services/animaxia-backend/modules/aicloud/agent.js:123:function asToolCall(parsed) {
+mini-services/animaxia-backend/modules/aicloud/agent.js:131:function parseToolCall(text) {
+mini-services/animaxia-backend/modules/aicloud/agent.js:163:    const call = asToolCall(parsed);
+mini-services/animaxia-backend/modules/aicloud/agent.js:192:/** Best-effort persistence of every assistant turn (Neon `agentconversations`). */
+mini-services/animaxia-backend/modules/aicloud/agent.js:197:       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+mini-services/animaxia-backend/modules/aicloud/agent.js:205:/** Load the caller's recent conversation from Neon (long-term DB memory). */
+mini-services/animaxia-backend/modules/aicloud/agent.js:331:  if (finalText != null && parseToolCall(finalText)) finalText = null;
+mini-services/animaxia-backend/modules/aicloud/agent.js:343:  /* ---- memory persistence (vector + Neon) ---- */
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:17: *     dashboard) and a best-effort row in the `aiusagelogs` Postgres table.
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:102: * Record one LLM call. In-memory always; Postgres `aiusagelogs` best-effort
+mini-services/animaxia-backend/modules/aicloud/llm-core.js:247:const quotaSweep = setInterval(() => {
+mini-services/animaxia-backend/modules/aicloud/personal.js:53:       VALUES ($1,$2,$3::jsonb, NOW())
+mini-services/animaxia-backend/modules/aicloud/router.js:72: * Idempotent Phase-4 DDL (Neon PostgreSQL; safe to re-run, no-op on the local
+mini-services/animaxia-backend/modules/aicloud/router.js:104:      toolsused JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/aicloud/router.js:111:      tastetags JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:12: *   • 'pgvector'  — Neon Postgres + pgvector (`vectorembeddings` table,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:229:         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:540:        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:782:  // refid must fit a Postgres INTEGER (2^31-1) — ms timestamp modulo keeps it
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:820:  /* NEON FREE PLAN: indexare LAZY — primul search real declanșează indexarea
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:822:   * după start, ținea Neon treaz la fiecare restart fără niciun utilizator). */
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:904:/** NEON FREE PLAN: indexarea de content rulează LA PRIMA UTILIZARE REALĂ
+mini-services/animaxia-backend/modules/aicloud/vector-service.js:927: * (ensureContentIndexedLazily) pentru NEON FREE PLAN scale-to-zero.
+mini-services/animaxia-backend/modules/ainew/common.js:226:    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/ainew/curation.js:126:  const [pop, match] = await Promise.all([
+mini-services/animaxia-backend/modules/ainew/dubbing.js:217:    return { status: 503, error: 'Sursa de subtitrări este momentan indisponibilă (PostgreSQL necesar)' , detail: String(err.message || '').slice(0, 120) };
+mini-services/animaxia-backend/modules/ainew/editor.js:6: * title ILIKE; salvare file-based data/ainew/playlists/<userId>.json
+mini-services/animaxia-backend/modules/ainew/mood.js:139:        WHERE metadata->'genres' ?| $1::text[]
+mini-services/animaxia-backend/modules/ainew/routes.js:235:    return { status: 503, error: 'Sursa de subtitrări este momentan indisponibilă (PostgreSQL necesar)' };
+mini-services/animaxia-backend/modules/aisuite/common.js:4: * modul protejat (FAZA 15/16/18/20/21/23/24/25/28, Neon FTS, player;
+mini-services/animaxia-backend/modules/aisuite/common.js:147:    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
+mini-services/animaxia-backend/modules/aisuite/engines.js:25:  const [jobsByStatus, jobsByType, sources, recentJobs, contents, mined, waves] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:106:  const [total, coverage] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:261:  await Promise.all(
+mini-services/animaxia-backend/modules/aisuite/engines.js:330:  const [counts, topCommented, topReviewed, activity, follows, recentComments, recentReviews] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:390:  const [totals, active, members, messages, topTitles, recent] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:681:  const [totals, byFeature, byProvider, daily, latency, errors, suiteToggles] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:740:  const where = genre ? `WHERE c.metadata->'genres' @> $1::jsonb` : '';
+mini-services/animaxia-backend/modules/aisuite/engines.js:769:  const totalRow = genre ? await one(`SELECT count(*) n FROM content c WHERE c.metadata->'genres' @> $1::jsonb`, [JSON.stringify([genre])]) : await one(`SELECT count(*) n FROM content`);
+mini-services/animaxia-backend/modules/aisuite/engines.js:853:  const [byKind, total, recent] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:859:  const probes = await Promise.all(
+mini-services/animaxia-backend/modules/aisuite/engines.js:986:  const results = await Promise.all(
+mini-services/animaxia-backend/modules/aisuite/engines.js:1052:  const [now7, prev7, byGenre, watchMomentum, topContent] = await Promise.all([
+mini-services/animaxia-backend/modules/aisuite/engines.js:1121:  const checks = await Promise.all(
+mini-services/animaxia-backend/modules/aisuite/engines.js:1181:  const [dbInfo, recentUsage, auditRecent] = await Promise.all([
+mini-services/animaxia-backend/modules/analytics/analytics.js:43:/** Trending window keys → PostgreSQL intervals. */
+mini-services/animaxia-backend/modules/analytics/analytics.js:86:  const interval = WINDOWS[windowKey];
+mini-services/animaxia-backend/modules/analytics/analytics.js:98:    [interval, TRENDING_MAX_ROWS],
+mini-services/animaxia-backend/modules/analytics/analytics.js:136:  const [totalsRow, byDayRows, topContentRows, planRows, activeRow, signupRows] = await Promise.all([
+mini-services/animaxia-backend/modules/analytics/analytics.js:183:    if (Object.prototype.hasOwnProperty.call(planDistribution, r.plan)) {
+mini-services/animaxia-backend/modules/analytics/analytics.js:275:  const [totalsRow, byDayRows, topTypeRows] = await Promise.all([
+mini-services/animaxia-backend/modules/analytics/playerhub.js:26:import { rows, one, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/analytics/playerhub.js:56:  assertPostgres();
+mini-services/animaxia-backend/modules/analytics/playerhub.js:59:  const [playbackTotals, byKindRows, topWatchedRows, usersWatchingRow, avgProgressRow] = await Promise.all([
+mini-services/animaxia-backend/modules/analytics/playerhub.js:88:    const [subTotalRow, subPerContentRows] = await Promise.all([
+mini-services/animaxia-backend/modules/analytics/playerhub.js:112:  const [withSourcesRow, modeRows] = await Promise.all([
+mini-services/animaxia-backend/modules/analytics/playerhub.js:115:       WHERE (jsonb_typeof(c.metadata->'player'->'sources') = 'array' AND jsonb_array_length(c.metadata->'player'->'sources') > 0)
+mini-services/animaxia-backend/modules/analytics/playerhub.js:116:          OR (jsonb_typeof(c.metadata->'sources') = 'array' AND jsonb_array_length(c.metadata->'sources') > 0)`,
+mini-services/animaxia-backend/modules/analytics/playerhub.js:121:       CROSS JOIN LATERAL jsonb_array_elements(
+mini-services/animaxia-backend/modules/analytics/playerhub.js:123:           WHEN jsonb_typeof(c.metadata->'player'->'sources') = 'array' THEN c.metadata->'player'->'sources'
+mini-services/animaxia-backend/modules/analytics/playerhub.js:124:           WHEN jsonb_typeof(c.metadata->'sources') = 'array' THEN c.metadata->'sources'
+mini-services/animaxia-backend/modules/analytics/playerhub.js:171:  assertPostgres();
+mini-services/animaxia-backend/modules/analytics/playerhub.js:199:  assertPostgres();
+mini-services/animaxia-backend/modules/analytics/playerhub.js:202:  const [watchRow, byTypeRows, activeDayRows, watchlistRow, viewsRow, topGenreRows] = await Promise.all([
+mini-services/animaxia-backend/modules/ar10m/budget.js:2: * modules/ar10m/budget.js — Neon free-budget module (Task AR10M-2-BE).
+mini-services/animaxia-backend/modules/ar10m/budget.js:4: * supplied via env, or marked 'indisponibil'. NO DB polling, NO Neon API
+mini-services/animaxia-backend/modules/ar10m/budget.js:17: *   • NEON_CU_HOURS_USED / NEON_CU_HOURS_LIMIT → cuHours pct (else the
+mini-services/animaxia-backend/modules/ar10m/budget.js:19: *   • NEON_TRANSFER_BYTES_USED → transferBytes override (else 'indisponibil').
+mini-services/animaxia-backend/modules/ar10m/budget.js:32:/** Neon free tier storage limit (512 MB) — real, measurable against pg_database_size(). */
+mini-services/animaxia-backend/modules/ar10m/budget.js:33:export const NEON_FREE_STORAGE_BYTES = 512 * 1024 * 1024;
+mini-services/animaxia-backend/modules/ar10m/budget.js:93:  const cuUsed = numEnv('NEON_CU_HOURS_USED');
+mini-services/animaxia-backend/modules/ar10m/budget.js:94:  const cuLimit = numEnv('NEON_CU_HOURS_LIMIT');
+mini-services/animaxia-backend/modules/ar10m/budget.js:95:  const transferBytes = numEnv('NEON_TRANSFER_BYTES_USED');
+mini-services/animaxia-backend/modules/ar10m/budget.js:97:  const storagePct = storageBytes !== null && storageBytes > 0 ? (storageBytes / NEON_FREE_STORAGE_BYTES) * 100 : null;
+mini-services/animaxia-backend/modules/ar10m/budget.js:120:      storage: { pct: r1(storagePct), limitBytes: NEON_FREE_STORAGE_BYTES, basis: 'pg_database_size(primary) / 512MB Neon free — măsurat la ultima rulare refresh-metrics/stats' },
+mini-services/animaxia-backend/modules/ar10m/budget.js:121:      cuHours: { pct: r1(cuPct), basis: 'NEON_CU_HOURS_USED / NEON_CU_HOURS_LIMIT din env (manual, fără polling API Neon)' },
+mini-services/animaxia-backend/modules/ar10m/budget.js:164:      cuHours: m.cuUsed !== null ? m.cuUsed : 'indisponibil', // no Neon API polling — manual env only
+mini-services/animaxia-backend/modules/ar10m/budget.js:210:      payload: { ok: false, reason: 'economic-mode', feature, message: 'Funcționalitate suspendată temporar pentru protejarea bugetului Neon free.' },
+mini-services/animaxia-backend/modules/ar10m/routes.js:29: * ZERO setInterval/cron/background timers: the bench insert runner uses
+mini-services/animaxia-backend/modules/ar10m/routes.js:155: * batches of 5000 with 250ms Neon-friendly pauses, checkpoint after every
+mini-services/animaxia-backend/modules/ar10m/schema.js:4: * The AR10M real catalog lives in a DEDICATED Postgres schema `ar10m`:
+mini-services/animaxia-backend/modules/ar10m/search-gateway.js:290:    await Promise.all(batch.map(runSlot));
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:8: *     logical shards physically live on the primary Neon branch).
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:17: *     each routed query via a ONE-SHOT unref'd setTimeout (no setInterval).
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:28: * hosts ('ep-****.eu-central-1.aws.neon.tech' style) appear in logs/reports.
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:31:import pg from 'pg';
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:67: * 'ep-cool-123.eu-central-1.aws.neon.tech' → 'ep-****.eu-central-1.aws.neon.tech'.
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:86:  msg = msg.replace(/postgres(ql)?:\/\/[^\s'"]+/gi, 'postgres://***');
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:140:function getPool(entry) {
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:142:  const pool = new pg.Pool({
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:147:    // House style (db.js): explicit SSL when PGSSL=true — Neon requires it.
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:250:    getPool(entry)
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:257:            releaseClient(settled ? true : !!err);
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:276:            setTimeout(() => releaseClient(true), 5_000).unref?.();
+mini-services/animaxia-backend/modules/ar10m/shard-router.js:330: * unref'd check (no setInterval anywhere). Only closes when 0 in-flight and
+mini-services/animaxia-backend/modules/cache/advancedCache.js:37:const SWEEP_INTERVAL_MS = 60000;
+mini-services/animaxia-backend/modules/cache/advancedCache.js:55:    this.sweepTimer = setInterval(() => this.sweepExpired(), SWEEP_INTERVAL_MS);
+mini-services/animaxia-backend/modules/hub/hub.js:4: * 9 routes, 100% real Neon data (zero mock/placeholder — every number is a
+mini-services/animaxia-backend/modules/hub/hub.js:17: *   GET /scale           → honest scale report: real Neon numbers (items,
+mini-services/animaxia-backend/modules/hub/hub.js:30: *   GET /recommendations → real Neon picks only (trending 7d views +
+mini-services/animaxia-backend/modules/hub/hub.js:40:import { rows, one, num, isoOrNull, parseJsonb, assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/hub/hub.js:80:const GENRES_ARRAY = `CASE WHEN jsonb_typeof(metadata->'genres') = 'array' THEN metadata->'genres' ELSE '[]'::jsonb END`;
+mini-services/animaxia-backend/modules/hub/hub.js:81:const ACTORS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'actors') = 'array' THEN metadata->'actors' ELSE '[]'::jsonb END`;
+mini-services/animaxia-backend/modules/hub/hub.js:82:const STUDIOS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'studios') = 'array' THEN metadata->'studios' ELSE '[]'::jsonb END`;
+mini-services/animaxia-backend/modules/hub/hub.js:125:    // Exact case-insensitive match inside metadata.genres[] (ILIKE without wildcards).
+mini-services/animaxia-backend/modules/hub/hub.js:175:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:233:  const [countRow, dataRows, typesFacet, genresFacet, yearsFacet] = await Promise.all(queries);
+mini-services/animaxia-backend/modules/hub/hub.js:250:    source: 'neon',
+mini-services/animaxia-backend/modules/hub/hub.js:268:  const [totalRow, byType, completeRow, registryRow, registryByKind, providers, viewsRow, topViewed, usersRow] = await Promise.all([
+mini-services/animaxia-backend/modules/hub/hub.js:276:           ROUND(100.0 * COUNT(*) FILTER (WHERE jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_genres,
+mini-services/animaxia-backend/modules/hub/hub.js:279:             AND jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_complete
+mini-services/animaxia-backend/modules/hub/hub.js:332:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:336:    source: 'neon',
+mini-services/animaxia-backend/modules/hub/hub.js:349:/* 3. GET /scale — honest AR10M scale report: real Neon numbers + capacity
+mini-services/animaxia-backend/modules/hub/hub.js:353:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:361:    source: 'neon (real measurements) + ar10m capacity framing',
+mini-services/animaxia-backend/modules/hub/hub.js:363:      label: 'measured live from Neon (real rows)',
+mini-services/animaxia-backend/modules/hub/hub.js:382:    honesty: 'AR10M: toate cifrele „real” sunt măsurători SQL live din Neon (rânduri reale). Capacitatea proiectată este 10.000.000 de titluri pe arhitectura reală 15-shard (modules/ar10m); testată/demonstrată — doar ce arată benchmark-urile reale (/api/ar10m/stats). Fostul spațiu logic 30B simulat a fost eliminat.',
+mini-services/animaxia-backend/modules/hub/hub.js:389:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:420:    source: 'neon',
+mini-services/animaxia-backend/modules/hub/hub.js:484:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:486:  res.json({ ok: true, source: 'neon', data, total: data.length, generatedAt: new Date().toISOString() });
+mini-services/animaxia-backend/modules/hub/hub.js:491:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:495:    source: 'neon',
+mini-services/animaxia-backend/modules/hub/hub.js:508:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:512:    source: 'neon',
+mini-services/animaxia-backend/modules/hub/hub.js:526:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:544:      source: 'neon:watchlist+history',
+mini-services/animaxia-backend/modules/hub/hub.js:549:      source: 'neon:watchlist+history',
+mini-services/animaxia-backend/modules/hub/hub.js:578:      source: 'neon:activity',
+mini-services/animaxia-backend/modules/hub/hub.js:589:      source: 'neon:viewevents-fallback',
+mini-services/animaxia-backend/modules/hub/hub.js:625:    source: 'neon:ai-fallback',
+mini-services/animaxia-backend/modules/hub/hub.js:659:/* 9. GET /recommendations — real Neon picks only (AR10M: fostul „logical”
+mini-services/animaxia-backend/modules/hub/hub.js:663:  assertPostgres();
+mini-services/animaxia-backend/modules/hub/hub.js:685:                        AND jsonb_array_length(${GENRES_ARRAY}) > 0
+mini-services/animaxia-backend/modules/hub/hub.js:704:    real: { items: realItems, count: realItems.length, source: 'neon' },
+mini-services/animaxia-backend/modules/ingest/dedup.js:22:router.get('/sources',wrap(async(req,res)=>{const limit=Math.min(100,Math.max(1,parseInt(req.query.limit,10)||50)),page=Math.max(1,parseInt(req.query.page,10)||1),offset=(page-1)*limit;const data=localAll('SELECT * FROM ContentSource ORDER BY lastSeenAt DESC,id DESC LIMIT ? OFFSET ?',[limit,offset]).map(row);const total=Number(localOne('SELECT COUNT(*) n FROM ContentSource')?.n||0);res.json({data,total,page,storage:'local-sqlite'})}));
+mini-services/animaxia-backend/modules/ingest/dedup.js:23:router.get('/stats',wrap(async(_req,res)=>{const total=Number(localOne('SELECT COUNT(*) n FROM ContentSource')?.n||0),duplicatesBlocked=Number(localOne('SELECT COUNT(*) n FROM ContentSource WHERE hits>1')?.n||0),linkedContents=Number(localOne('SELECT COUNT(*) n FROM ContentSource WHERE contentId IS NOT NULL')?.n||0);const byKind=Object.fromEntries(localAll('SELECT kind,COUNT(*) n FROM ContentSource GROUP BY kind').map(r=>[r.kind,Number(r.n)]));res.json({total,byKind,duplicatesBlocked,linkedContents,storage:'local-sqlite'})}));
+mini-services/animaxia-backend/modules/miner/ai-index.js:45:         VALUES ($1, $2, $3, 0, $4, $5::vector, $6::jsonb, $7, $8)
+mini-services/animaxia-backend/modules/miner/core.js:5: *   • Jobs live in Neon (miner_jobs) — they survive restarts. The runner is
+mini-services/animaxia-backend/modules/miner/core.js:101:     VALUES ($1, $2, 'queued', $3, $4::jsonb, $5)`,
+mini-services/animaxia-backend/modules/miner/core.js:363:      `UPDATE miner_jobs SET status = 'done', result = $2::jsonb, error = NULL, finishedat = NOW() WHERE id = $1`,
+mini-services/animaxia-backend/modules/miner/core.js:424:     VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+mini-services/animaxia-backend/modules/miner/core.js:531:              COUNT(*) FILTER (WHERE m.lastsync > NOW() - interval '1 day')::int AS synced24h
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:6: * ensureTenantSchema(); safe to re-run on Neon PostgreSQL and a no-op on the
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:32:    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/miner/miner-migrations.js:79: * statement count. Throws on the first failing statement on Neon (boot then
+mini-services/animaxia-backend/modules/mobile/mobile.js:80:     WHERE v.createdat > NOW() - interval '7 days'
+mini-services/animaxia-backend/modules/mobile/mobile.js:121:  const [trending, latest, anime, movies, cont] = await Promise.all([
+mini-services/animaxia-backend/modules/observability/otel.js:66:const EXPORT_INTERVAL_MS = 2_000;   // flush la 2s …
+mini-services/animaxia-backend/modules/observability/otel.js:386:          else if (source === 'miss') emit('pipeline.layer10.neon-fts.executed', 200, {}, endMs, endMs);
+mini-services/animaxia-backend/modules/observability/otel.js:419:    /* NEON FREE PLAN: fostul timer permanent de flush la 2s a fost eliminat
+mini-services/animaxia-backend/modules/observability/otel.js:624:    emit(`animaxia_pipeline_executor_latency_p50_ms ${num(byName['neon-fts']?.p50Ms)}`);
+mini-services/animaxia-backend/modules/observability/otel.js:626:    emit(`animaxia_pipeline_executor_latency_p95_ms ${num(byName['neon-fts']?.p95Ms)}`);
+mini-services/animaxia-backend/modules/observability/otel.js:628:    emit(`animaxia_pipeline_executor_inflight ${num(byName['neon-fts']?.inflight)}`);
+mini-services/animaxia-backend/modules/perso/index.js:10: * deterministă onestă, etichetată ca atare), ZERO setInterval cu DB/fetch
+mini-services/animaxia-backend/modules/perso/index.js:11: * (regula NEON FREE PLAN — totul on-demand, cache în memorie cu TTL).
+mini-services/animaxia-backend/modules/perso/storage.js:20: * ZERO setInterval cu DB/fetch (regula NEON FREE PLAN) — expirarea e leneșă,
+mini-services/animaxia-backend/modules/platform/migrations.js:21:    preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/platform/migrations.js:122:  // FAZA 16 (Task 16-a): Neon FTS search docs — denormalized, queryable index table.
+mini-services/animaxia-backend/modules/platform/migrations.js:161:  // FAZA 16: ai/home stores moved from data/*.json into Neon.
+mini-services/animaxia-backend/modules/platform/migrations.js:177:  // FAZA 16: SVG thumbnail storage moved from disk into Neon.
+mini-services/animaxia-backend/modules/platform/resilience.js:5: *   • event-loop lag monitor — 500ms sampling interval (unref'd), setTimeout
+mini-services/animaxia-backend/modules/platform/resilience.js:15: *   • memory watchdog — 30s interval (unref'd): rss > 85% limit → HTTP cache
+mini-services/animaxia-backend/modules/platform/resilience.js:28:const LAG_SAMPLE_INTERVAL_MS = 500; // event-loop sampling cadence
+mini-services/animaxia-backend/modules/platform/resilience.js:30:const WATCHDOG_INTERVAL_MS = 30000; // memory watchdog cadence
+mini-services/animaxia-backend/modules/platform/resilience.js:82:const lagTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/platform/resilience.js:85:    const driftMs = Number(process.hrtime.bigint() - start) / 1e6 - LAG_SAMPLE_INTERVAL_MS;
+mini-services/animaxia-backend/modules/platform/resilience.js:87:  }, LAG_SAMPLE_INTERVAL_MS).unref?.();
+mini-services/animaxia-backend/modules/platform/resilience.js:88:}, LAG_SAMPLE_INTERVAL_MS);
+mini-services/animaxia-backend/modules/platform/resilience.js:224:const watchdogTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/platform/resilience.js:239:}, WATCHDOG_INTERVAL_MS);
+mini-services/animaxia-backend/modules/platform/scale.js:7: * process + a single Neon branch CANNOT sustain 10M users / 10M contents /
+mini-services/animaxia-backend/modules/platform/scale.js:99:  // Neon deployment facts: branch (db name from DATABASEURL) + pool gauges.
+mini-services/animaxia-backend/modules/platform/scale.js:106:  measured.neon = {
+mini-services/animaxia-backend/modules/platform/scale.js:135:  const poolMax = m.neon?.poolMax || 10;
+mini-services/animaxia-backend/modules/platform/scale.js:147:        `(pool ${poolMax} conexiuni Neon, latență DB ${m.dbLatencyMs ?? '?'}ms, un singur proces Node).`,
+mini-services/animaxia-backend/modules/platform/scale.js:149:        `Un singur proces Node cu un pool de ${poolMax} conexiuni la un singur branch Neon (` +
+mini-services/animaxia-backend/modules/platform/scale.js:183:        `de orice import mai mare, și resurse Neon plătite — infrastructura gratuită NU garantează ` +
+mini-services/animaxia-backend/modules/platform/scale.js:200:        `rezultate — nu un singur proces cu un singur branch Neon.`,
+mini-services/animaxia-backend/modules/platform/scale.js:206:  const poolMax = m.neon?.poolMax || 10;
+mini-services/animaxia-backend/modules/platform/scale.js:216:      recommendation: 'pgBouncer (sau Neon pooler) în fața Postgres + pool per instanță; mii de clienți nu pot împărți 10 conexiuni directe.',
+mini-services/animaxia-backend/modules/platform/scale.js:220:      missing: '10M documente necesită sharding real (15 proiecte Neon) + cluster de căutare dedicat',
+mini-services/animaxia-backend/modules/platform/scale.js:225:      missing: 'Un singur branch Neon — fără read replicas',
+mini-services/animaxia-backend/modules/platform/scale.js:275:      missing: 'Thumbnail-uri SVG stocate în Postgres (thumbnailcache)',
+mini-services/animaxia-backend/modules/platform/scale.js:276:      recommendation: 'La scară: object storage (S3/R2) + CDN pentru binare; Postgres păstrează doar metadata și referințele.',
+mini-services/animaxia-backend/modules/platform/scale.js:287:  const poolMax = m.neon?.poolMax || 10;
+mini-services/animaxia-backend/modules/platform/scale.js:290:    `${m.items ?? '?'} itemi în Neon, ${m.searchdocs ?? '?'} documente indexate FTS, latență DB ` +
+mini-services/animaxia-backend/modules/platform/scale.js:295:    `Un singur proces Node cu un pool de ${poolMax} conexiuni la un singur branch Neon poate ` +
+mini-services/animaxia-backend/modules/platform/scale.js:334:      detail: 'Interval 30s: rss > 85% din limită → purge cache HTTP + contor memoryPurges; cererile blocate au timeout per-request; procesul are graceful shutdown (SIGINT/SIGTERM).',
+mini-services/animaxia-backend/modules/platform/shared-state.js:11: *   • driver 'neon' (SHAREDSTATE=neon): buckets stored in the `sharedlimits`
+mini-services/animaxia-backend/modules/platform/shared-state.js:12: *     table on the shared Neon Postgres — take() is an atomic UPSERT
+mini-services/animaxia-backend/modules/platform/shared-state.js:75:/* -------------------------------- neon driver -------------------------------- */
+mini-services/animaxia-backend/modules/platform/shared-state.js:77:let neonSchemaReady = false;
+mini-services/animaxia-backend/modules/platform/shared-state.js:80:  if (neonSchemaReady) return;
+mini-services/animaxia-backend/modules/platform/shared-state.js:88:  neonSchemaReady = true;
+mini-services/animaxia-backend/modules/platform/shared-state.js:91:function neonUpdateSql() {
+mini-services/animaxia-backend/modules/platform/shared-state.js:101:function createNeonLimiter({ name, capacity, refillPerSec }) {
+mini-services/animaxia-backend/modules/platform/shared-state.js:104:    driver: 'neon',
+mini-services/animaxia-backend/modules/platform/shared-state.js:110:      let row = await one(neonUpdateSql(), [bucketKey, capacity, refillPerSec, REFILL_FLOOR]);
+mini-services/animaxia-backend/modules/platform/shared-state.js:122:          row = await one(neonUpdateSql(), [bucketKey, capacity, refillPerSec, REFILL_FLOOR]);
+mini-services/animaxia-backend/modules/platform/shared-state.js:136:        return { driver: 'neon', buckets: Number(r?.count ?? 0) };
+mini-services/animaxia-backend/modules/platform/shared-state.js:138:        return { driver: 'neon', buckets: null };
+mini-services/animaxia-backend/modules/platform/shared-state.js:148: *   SHAREDSTATE=neon (and the PostgreSQL driver connected) → neon driver;
+mini-services/animaxia-backend/modules/platform/shared-state.js:152:  const wantNeon = (process.env.SHAREDSTATE || '').trim().toLowerCase() === 'neon';
+mini-services/animaxia-backend/modules/platform/shared-state.js:153:  if (wantNeon && driverInfo().connected) {
+mini-services/animaxia-backend/modules/platform/shared-state.js:154:    logger.info(`[shared-state] limiter '${name}' using the NEON driver (sharedlimits table)`);
+mini-services/animaxia-backend/modules/platform/shared-state.js:155:    return createNeonLimiter({ name, capacity, refillPerSec });
+mini-services/animaxia-backend/modules/platform/shared-state.js:157:  if (wantNeon) {
+mini-services/animaxia-backend/modules/platform/shared-state.js:158:    logger.warn(`[shared-state] SHAREDSTATE=neon requested but PostgreSQL is not connected — falling back to the memory driver`);
+mini-services/animaxia-backend/modules/platform/shared-state.js:168: * status call so the driver is selected AFTER boot/initDb (SHAREDSTATE=neon
+mini-services/animaxia-backend/modules/platform/shared-state.js:169: * needs the PostgreSQL driver to be connected, which is never true at module
+mini-services/animaxia-backend/modules/platform/shared-state.js:194:        'Shared-state limiter demo — driver: memory (single-node, default) or neon (SHAREDSTATE=neon, sharedlimits table, multi-node safe). ' +
+mini-services/animaxia-backend/modules/platform/sql.js:10:/** Throw a 503 when the PostgreSQL driver is inactive (local fallback mode). */
+mini-services/animaxia-backend/modules/platform/sql.js:11:export function assertPostgres() {
+mini-services/animaxia-backend/modules/platform/sql.js:17:    .replace(/\$\d+::jsonb/g, '?')
+mini-services/animaxia-backend/modules/platform/sql.js:21:    .replace(/::jsonb/g, '')
+mini-services/animaxia-backend/modules/platform/sql.js:25:    .replace(/NOW\(\)\s*-\s*INTERVAL\s*'(\d+)\s+days?'/gi, "datetime('now','-$1 days')")
+mini-services/animaxia-backend/modules/platform/sql.js:26:    .replace(/NOW\(\)\s*-\s*INTERVAL\s*'(\d+)\s+hours?'/gi, "datetime('now','-$1 hours')")
+mini-services/animaxia-backend/modules/platform/sql.js:32:  return localDb.prepare(sqliteSql(text)).all(...params);
+mini-services/animaxia-backend/modules/platform/sql.js:80:export async function oneOnShard(shardId, text, params = []) {
+mini-services/animaxia-backend/modules/platform/stress.js:23: * The workers call the REAL engine functions directly (Neon FTS search load,
+mini-services/animaxia-backend/modules/platform/stress.js:159:  await Promise.all(workers);
+mini-services/animaxia-backend/modules/player/hub.js:8: * public platform stats. 100% REAL data in Neon (playlists, playlistitems,
+mini-services/animaxia-backend/modules/player/hub.js:310:  if (Object.prototype.hasOwnProperty.call(body, 'title')) {
+mini-services/animaxia-backend/modules/player/hub.js:319:  if (Object.prototype.hasOwnProperty.call(body, 'description')) {
+mini-services/animaxia-backend/modules/player/hub.js:476:       FROM unnest($2::int[], $3::int[]) AS u(cid, pos)
+mini-services/animaxia-backend/modules/player/hub.js:723:       WHERE updatedat > NOW() - interval '7 days'`,
+mini-services/animaxia-backend/modules/player/subtitles.js:30:import { rows, one, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/player/subtitles.js:278:  assertPostgres();
+mini-services/animaxia-backend/modules/player/subtitles.js:334:  assertPostgres();
+mini-services/animaxia-backend/modules/player/subtitles.js:366:  assertPostgres();
+mini-services/animaxia-backend/modules/player/subtitles.js:381:  assertPostgres();
+mini-services/animaxia-backend/modules/player/subtitles.js:429:  assertPostgres();
+mini-services/animaxia-backend/modules/playerx/index.js:25: * metadata, inspectate pe rândurile reale Neon din 2026-09-26, 18.925 itemi):
+mini-services/animaxia-backend/modules/playerx/index.js:35: *   (startsec≥endsec sau durată în afara intervalului 5..600s) sunt săriți la
+mini-services/animaxia-backend/modules/playerx/index.js:241:const useSweeper = setInterval(() => {
+mini-services/animaxia-backend/modules/playerx/index.js:297:  if (Object.prototype.hasOwnProperty.call(votes, partyId)) {
+mini-services/animaxia-backend/modules/playerx/index.js:306: * reale Neon, 2026-09-26): duration (secunde, string numeric — tv), runtime
+mini-services/animaxia-backend/modules/playerx/index.js:366:      logger.warn(`[playerx] marker curat sărit pentru content ${contentId} kind ${kind} (interval invalid: ${startsec}..${endsec})`);
+mini-services/animaxia-backend/modules/playerx/index.js:449:    content = await getContentById(contentId); // clientul DB partajat (Neon: SELECT by id; local fallback), ca la /api/content/:id
+mini-services/animaxia-backend/modules/playerx/index.js:490: * contentId; validare completă a intervalului (aceleași reguli ca la citire). */
+mini-services/animaxia-backend/modules/playerx/index.js:609:  const isFirstSave = !Object.prototype.hasOwnProperty.call(settings, userid);
+mini-services/animaxia-backend/modules/premium/stripe.js:55:const sweepTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/premium/stripe.js:108:        'line_items[0][price_data][recurring][interval]': 'month',
+mini-services/animaxia-backend/modules/search/console-routes.js:62:    'enabled', 'maxConcurrent', 'intervalMs', 'batchSize',
+mini-services/animaxia-backend/modules/search/flow.js:3: * the admission layer that sits between the HTTP search routes and Neon.
+mini-services/animaxia-backend/modules/search/flow.js:7: *     request is ENQUEUED here instead of hitting Neon directly. Only
+mini-services/animaxia-backend/modules/search/flow.js:28: *     `intervalMs` and releases at most `batchSize` queued requests per
+mini-services/animaxia-backend/modules/search/flow.js:31: *     windows: Neon observes a controlled stream, never a spike.
+mini-services/animaxia-backend/modules/search/flow.js:50: *   SEARCHFLOWWINDOWMS       default 80     — window interval ms (50–100)
+mini-services/animaxia-backend/modules/search/flow.js:59: *   _inflight (+ by_shard) / _window_interval / _window_batch_size /
+mini-services/animaxia-backend/modules/search/flow.js:87:    intervalMs: clampInt(process.env.SEARCHFLOWWINDOWMS, 80, 10, 2000),
+mini-services/animaxia-backend/modules/search/flow.js:109:const EXEC_MARGIN_MS = 2500; // reserve for the actual Neon execution
+mini-services/animaxia-backend/modules/search/flow.js:137:  processed: 0, // executed to completion (success OR query error — Neon saw it)
+mini-services/animaxia-backend/modules/search/flow.js:183:let inflight = 0; // currently executing (against Neon)
+mini-services/animaxia-backend/modules/search/flow.js:309: *  discipline — Neon never sees off-window arrivals). Entries whose request
+mini-services/animaxia-backend/modules/search/flow.js:332:  windowTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/search/flow.js:338:  }, config.intervalMs);
+mini-services/animaxia-backend/modules/search/flow.js:344:    clearInterval(windowTimer);
+mini-services/animaxia-backend/modules/search/flow.js:398:  historyTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/search/flow.js:518:    // Every dispatch happens on the next window tick (≤ intervalMs away) —
+mini-services/animaxia-backend/modules/search/flow.js:573:    intervalMs: config.intervalMs,
+mini-services/animaxia-backend/modules/search/flow.js:614:    windowIntervalMs: windowing.intervalMs,
+mini-services/animaxia-backend/modules/search/flow.js:622: * Validates and clamps every knob; the windowing timer restarts on interval
+mini-services/animaxia-backend/modules/search/flow.js:632:  if (patch.intervalMs !== undefined) {
+mini-services/animaxia-backend/modules/search/flow.js:633:    config.intervalMs = clampInt(patch.intervalMs, config.intervalMs, 10, 2000);
+mini-services/animaxia-backend/modules/search/flow.js:662:    `[search-flow] config updated${config.enabled ? '' : ' (DISABLED)'} — maxConcurrent=${config.maxConcurrent} intervalMs=${config.intervalMs} batchSize=${config.batchSize} (was: maxConcurrent=${before.maxConcurrent} intervalMs=${before.intervalMs} batchSize=${before.batchSize})`,
+mini-services/animaxia-backend/modules/search/flow.js:674:  `[search-flow] FAZA 15 Search Flow Control ready — queue ${config.enabled ? 'ENABLED' : 'disabled'} · maxConcurrent=${config.maxConcurrent} · window=${config.intervalMs}ms × batch=${config.batchSize} · cap=${config.queueCap} · maxWait=${config.maxWaitMs}ms`,
+mini-services/animaxia-backend/modules/search/opt.js:4: * dispatcher and the real Neon FTS execution.
+mini-services/animaxia-backend/modules/search/opt.js:7: *   • SEARCH BATCHING — identical concurrent requests share ONE real Neon FTS
+mini-services/animaxia-backend/modules/search/opt.js:17: *     1000–5000 ms) is served from the cache (`stats.cacheHits`) — Neon is
+mini-services/animaxia-backend/modules/search/opt.js:18: *     never touched for it. The cached value IS the result of a real Neon
+mini-services/animaxia-backend/modules/search/opt.js:24: *     (`stats.deduplicatedRequests`): 1000 identical requests → 1 real Neon
+mini-services/animaxia-backend/modules/search/opt.js:33: * cache/batch serving returns the EXACT object the real Neon FTS execution
+mini-services/animaxia-backend/modules/search/opt.js:35: * the provenance ('neon' | 'batch' | 'cache' | 'bypass'). Failures are never
+mini-services/animaxia-backend/modules/search/opt.js:42: * query = ONE Neon execution regardless of which shards the users map to.
+mini-services/animaxia-backend/modules/search/opt.js:45: * Neon reduction. The cluster queryKey additionally includes the shardHint
+mini-services/animaxia-backend/modules/search/opt.js:78: *   summary line (requests · cache hits · dedup-attach · real Neon queries)
+mini-services/animaxia-backend/modules/search/opt.js:83: * code path) and it decides whether Neon actually sees the query.
+mini-services/animaxia-backend/modules/search/opt.js:126:  'windowing', // FAZA 15 — intervalMs × batchSize controlled dispatch
+mini-services/animaxia-backend/modules/search/opt.js:130:  'fts', // Neon FTS — the 100% real full-text search (FAZA 14 semantics)
+mini-services/animaxia-backend/modules/search/opt.js:142:  ftsQueries: 0, // REAL Neon FTS executions started (the Neon-side truth)
+mini-services/animaxia-backend/modules/search/opt.js:144:  cacheHits: 0, // served from the micro-cache (Neon untouched)
+mini-services/animaxia-backend/modules/search/opt.js:146:  batchHits: 0, // requests attached to an in-flight batch (Neon untouched)
+mini-services/animaxia-backend/modules/search/opt.js:176: * The chart this feeds is the money chart: requests served vs REAL Neon
+mini-services/animaxia-backend/modules/search/opt.js:238: * and BEFORE the Neon FTS. Pure dedup/batch/cache decision; the run() closure
+mini-services/animaxia-backend/modules/search/opt.js:245: *      promise (source 'batch'), Neon untouched;
+mini-services/animaxia-backend/modules/search/opt.js:247: *      result (source 'cache'), Neon untouched;
+mini-services/animaxia-backend/modules/search/opt.js:249: *      'neon'); on success the result is cached for cacheTtlMs. Every cache
+mini-services/animaxia-backend/modules/search/opt.js:250: *      miss therefore corresponds to exactly one real Neon query (the clean
+mini-services/animaxia-backend/modules/search/opt.js:260: * @returns {Promise<{ result: any, source: 'neon'|'batch'|'cache'|'bypass',
+mini-services/animaxia-backend/modules/search/opt.js:364:  /* 5. NEW BATCH + the ONE real Neon FTS execution. Every identical request
+mini-services/animaxia-backend/modules/search/opt.js:374:    `[search-opt] BATCH CREATED — ${kind} ${describe || queryHash} (hash=${queryHash}, shard=${shardId}) → 1 real Neon FTS query starts`,
+mini-services/animaxia-backend/modules/search/opt.js:399:        `[search-opt] BATCH COMPLETED — ${batch.describe} (hash=${queryHash}) ${batch.fanout} request(s) shared 1 Neon query, took ${settledAt - batch.createdAt}ms, result cached ${config.cacheTtlMs}ms`,
+mini-services/animaxia-backend/modules/search/opt.js:417:    source: 'neon',
+mini-services/animaxia-backend/modules/search/opt.js:429:  historyTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/search/opt.js:435:        fts: ftsSamples, // REAL Neon FTS executions started
+mini-services/animaxia-backend/modules/search/opt.js:448:          `[search-opt] 1s — ${reqSamples} cereri · ${cacheHitSamples} cache hits · ${batchHitSamples} dedup-attach · ${ftsSamples} interogari Neon reale · cache ${searchCache.size} intrari · ${batchMap.size} batch-uri active`,
+mini-services/animaxia-backend/modules/search/opt.js:500: *  { active: true, deduplicatedRequests: N } + the served/Neon split. */
+mini-services/animaxia-backend/modules/search/opt.js:511:    /** The reduction factor: requests served per REAL Neon query (×N). */
+mini-services/animaxia-backend/modules/search/pipeline.js:30: *  10. neon-fts    — the REAL executor closures from search.js (runAdvancedQuery
+mini-services/animaxia-backend/modules/search/pipeline.js:308:    await Promise.all(items.slice(i, i + BATCH_ROUND).map((it) => runBatchItem(it.job).then(it.resolve, it.reject)));
+mini-services/animaxia-backend/modules/search/pipeline.js:319:  // Layer 10 — the REAL executor (Neon FTS closures from search.js).
+mini-services/animaxia-backend/modules/search/pipeline.js:364:const sweeper = setInterval(() => {
+mini-services/animaxia-backend/modules/search/pipeline.js:597:      name: 'neon-fts',
+mini-services/animaxia-backend/modules/search/rate.js:4: * queue (modules/search/flow.js) and the Neon FTS engine.
+mini-services/animaxia-backend/modules/search/rate.js:32: *     real answers; Neon still sees only the windowed stream).
+mini-services/animaxia-backend/modules/search/rate.js:51: *   SEARCHRATEPERUSERMS       default 500     — min interval between admitted
+mini-services/animaxia-backend/modules/search/rate.js:277:  historyTimer = setInterval(() => {
+mini-services/animaxia-backend/modules/search/search.js:2: * modules/search/search.js — FAZA 16-a: Neon PostgreSQL full-text search
+mini-services/animaxia-backend/modules/search/search.js:4: * `content`). Engine label: 'animaxia-neon-fts'.
+mini-services/animaxia-backend/modules/search/search.js:55: * ILIKE). Combined score: ts_rank(tsv, q) * 2 + similarity(title, q) +
+mini-services/animaxia-backend/modules/search/search.js:56: * (title ILIKE 'q%' → +0.5). Empty q + filters → filter-only query (no text
+mini-services/animaxia-backend/modules/search/search.js:71:const ENGINE = 'animaxia-neon-fts';
+mini-services/animaxia-backend/modules/search/search.js:276:  const tuple = `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}::text[],${b(9)}::text[],${b(10)}::text[],${b(11)},${b(12)},NOW())`;
+mini-services/animaxia-backend/modules/search/search.js:311: * NEON FREE PLAN — boot fast-path (goal 7/10): at restart `dirty=true` forces a
+mini-services/animaxia-backend/modules/search/search.js:313: * the request >30s (504 at REQUESTTIMEOUTMS) and wakes Neon with zero real
+mini-services/animaxia-backend/modules/search/search.js:314: * traffic. But searchdocs already lives synced IN Neon: when the content and
+mini-services/animaxia-backend/modules/search/search.js:331:      logger.info(`[search] boot fast-path: searchdocs already in sync (${docsN} docs) — full resync skipped (NEON FREE PLAN)`);
+mini-services/animaxia-backend/modules/search/search.js:536:  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${P(genre)})`);
+mini-services/animaxia-backend/modules/search/search.js:539:    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${P(actor)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:542:    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${P(studio)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:556:      ` + CASE WHEN s.title ILIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
+mini-services/animaxia-backend/modules/search/search.js:578:      trigramClauses.push(`s.title ILIKE ${ph}`);
+mini-services/animaxia-backend/modules/search/search.js:623:    if (genre) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${sub(genre)})`);
+mini-services/animaxia-backend/modules/search/search.js:625:    if (actor) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${sub(actor)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:626:    if (studio) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${sub(studio)} || '%')`);
+mini-services/animaxia-backend/modules/search/search.js:641:        ` + CASE WHEN s.title ILIKE ${qParam} || '%' THEN 0.5 ELSE 0 END`;
+mini-services/animaxia-backend/modules/search/search.js:648:      const clauses = [q, ...words].map((candidate) => `s.title ILIKE ${sub(`%${candidate}%`)}`);
+mini-services/animaxia-backend/modules/search/search.js:666:    // parameter in LIMIT cannot be type-inferred by Postgres); the q/filter
+mini-services/animaxia-backend/modules/search/search.js:768:/** GET /api/search/advanced — Neon FTS + trigram fallback + SQL filters. Public. */
+mini-services/animaxia-backend/modules/search/search.js:958:       WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
+mini-services/animaxia-backend/modules/search/search.js:1001:  const [genres, actors, years, categories, studios] = await Promise.all([
+mini-services/animaxia-backend/modules/search/search.js:1003:      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(genres) AS value FROM searchdocs) t
+mini-services/animaxia-backend/modules/search/search.js:1007:      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(actors) AS value FROM searchdocs) t
+mini-services/animaxia-backend/modules/search/search.js:1016:      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(studios) AS value FROM searchdocs) t
+mini-services/animaxia-backend/modules/search/search.js:1049: *     that never touches Neon — it measures the orchestration itself;
+mini-services/animaxia-backend/modules/search/search.js:1051: *     with limit=1, real library terms) — proving the Neon protection live.
+mini-services/animaxia-backend/modules/search/search.js:1110:      return { ok: true, mode: 'neon-fts-real', term, total: result.total, returned: result.data.length };
+mini-services/animaxia-backend/modules/search/search.js:1119:  const settled = await Promise.all(
+mini-services/animaxia-backend/modules/search/search.js:1188:    realFts: { requests: realCount, limit: 1, executor: 'neon-fts-real (runAdvancedQuery)' },
+mini-services/animaxia-backend/modules/search/search.js:1200:    const [docRow, extRow] = await Promise.all([
+mini-services/animaxia-backend/modules/search/search.js:1223:    backend: 'neon-postgresql',
+mini-services/animaxia-backend/modules/search/stress.js:14: *     the window really dispatches, the batches really share ONE real Neon
+mini-services/animaxia-backend/modules/search/stress.js:21: *                            Neon query (batch + cache absorb the other 999),
+mini-services/animaxia-backend/modules/search/stress.js:44: *     operating band, and the STRUCTURAL CAPS that bound Neon no matter the
+mini-services/animaxia-backend/modules/search/stress.js:51: *     Neon executed only the real necessary queries, no request lost (every
+mini-services/animaxia-backend/modules/search/stress.js:108:  identical: 1000, // 1000 identical searches → 1 real Neon query
+mini-services/animaxia-backend/modules/search/stress.js:224:      neonFtsQueries: parsed.neonFtsQueries ?? 0,
+mini-services/animaxia-backend/modules/search/stress.js:228:      `[search-stress] FAZA 18 last run restored from disk — ${parsed.passed === true ? 'PASSED' : 'FAILED'} · ${parsed.requests?.total ?? 0} cereri · ${parsed.neonFtsQueries ?? 0} interogări Neon reale · wall ${parsed.wallMs ?? 0}ms (${new Date(parsed.finishedAt ?? parsed.startedAt).toISOString()})`,
+mini-services/animaxia-backend/modules/search/stress.js:323:    sources: { neon: 0, batch: 0, cache: 0, bypass: 0 },
+mini-services/animaxia-backend/modules/search/stress.js:393: * sections would blur the per-section Neon attribution — e.g. the identical
+mini-services/animaxia-backend/modules/search/stress.js:473:    WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
+mini-services/animaxia-backend/modules/search/stress.js:521:     * (all share ONE query → ONE real Neon execution via the FAZA 17 layer;
+mini-services/animaxia-backend/modules/search/stress.js:538:    await Promise.all(cooldownPrewarm); // ALL settled → every user's cooldown is running
+mini-services/animaxia-backend/modules/search/stress.js:720:    await Promise.all([...burstPromises, ...rateLimitPrewarm]);
+mini-services/animaxia-backend/modules/search/stress.js:747:    await Promise.all(samplePromises);
+mini-services/animaxia-backend/modules/search/stress.js:750:     * (neon) then repeated inside the TTL (cache) — the payload must be
+mini-services/animaxia-backend/modules/search/stress.js:795:     * caps bound what Neon can ever see; the real 500-concurrent sample
+mini-services/animaxia-backend/modules/search/stress.js:805:      afterAll.windowing.intervalMs > 0
+mini-services/animaxia-backend/modules/search/stress.js:806:        ? afterAll.windowing.batchSize / (afterAll.windowing.intervalMs / 1000)
+mini-services/animaxia-backend/modules/search/stress.js:809:    const sampleNeon = sampleSection.sources.neon;
+mini-services/animaxia-backend/modules/search/stress.js:810:    const sampleReduction = sampleNeon > 0 ? Number((sampleSection.ok / sampleNeon).toFixed(2)) : 0;
+mini-services/animaxia-backend/modules/search/stress.js:839:        neonExecutions: sampleNeon,
+mini-services/animaxia-backend/modules/search/stress.js:852:        batchingReduces: sections.identical.sources.batch > 0 && sections.identical.sources.neon === 1,
+mini-services/animaxia-backend/modules/search/stress.js:854:        neonNotOverloaded:
+mini-services/animaxia-backend/modules/search/stress.js:890:    assert('identical: 1000 users, ONE real Neon query (batch+cache absorb 999)', sections.identical.ok === SEARCH_STRESS_SECTIONS.identical && sections.identical.sources.neon === 1, `ok=${sections.identical.ok} sources=${JSON.stringify(sections.identical.sources)}`);
+mini-services/animaxia-backend/modules/search/stress.js:893:    assert('different: 1000 distinct queries → 1000 real executions, 0 false dedup', sections.different.ok === SEARCH_STRESS_SECTIONS.different && sections.different.sources.neon === sections.different.ok && sections.different.distinctHashes.size === sections.different.ok, `neon=${sections.different.sources.neon} distinctHashes=${sections.different.distinctHashes.size} ok=${sections.different.ok}`);
+mini-services/animaxia-backend/modules/search/stress.js:895:    assert('mixed: batching/cache reduction observed (real execs < admitted)', sections.mixed.sources.neon < sections.mixed.ok, `neon=${sections.mixed.sources.neon} ok=${sections.mixed.ok}`);
+mini-services/animaxia-backend/modules/search/stress.js:903:    assert('semantics: cached serve returns the EXACT real payload', semanticsPayloadIdentical && semanticsA.source === 'neon' && semanticsB.source === 'cache', `A=${semanticsA.source} B=${semanticsB.source} identical=${semanticsPayloadIdentical}`);
+mini-services/animaxia-backend/modules/search/stress.js:906:    assert('10M sample: reduction observed (Neon execs < requests)', sampleNeon < sampleSection.ok && sampleNeon > 0, `neon=${sampleNeon} requests=${sampleSection.ok}`);
+mini-services/animaxia-backend/modules/search/stress.js:914:    const neonFtsQueries = afterAll.opt.ftsQueries - before.opt.ftsQueries; // REAL executions (pre-warms + burst + sample + semantics pair)
+mini-services/animaxia-backend/modules/search/stress.js:942:        neon: sumSources('neon'),
+mini-services/animaxia-backend/modules/search/stress.js:947:      neonFtsQueries,
+mini-services/animaxia-backend/modules/search/stress.js:948:      reductionFactor: neonFtsQueries > 0 ? Number((answered / neonFtsQueries).toFixed(2)) : 0,
+mini-services/animaxia-backend/modules/search/stress.js:991:      neonFtsQueries: report.neonFtsQueries,
+mini-services/animaxia-backend/modules/search/stress.js:1002:      `[search-stress] FAZA 18 run ${report.passed ? 'PASSED ✅' : 'FAILED ❌'} — ${report.requests.total} cereri · răspunse ${report.requests.answered} (ok ${report.requests.ok} + blocare onestă ${report.requests.blocked} + erori ${report.requests.errors}) · interogări Neon REALE ${report.neonFtsQueries} (reducere ${report.reductionFactor}×) · coadă highWater ${report.flow.queueHighWater}/${flowCfg.queueCap} · dropped Δ${report.flow.droppedDelta} · wall ${report.wallMs}ms${failures.length > 0 ? ` · FAILURES: ${failures.join(' | ')}` : ''}`,
+mini-services/animaxia-backend/modules/search/stress.js:1044:    neonFtsQueries: lastRun.neonFtsQueries,
+mini-services/animaxia-backend/modules/search/stress.js:1088:    neonFtsQueries: status.neonFtsQueries ?? 0,
+mini-services/animaxia-backend/modules/searchaccel/index.js:3: * jurul motorului de căutare PROTEJAT (FAZA 18 pipeline 10 straturi + Neon FTS
+mini-services/animaxia-backend/modules/searchaccel/index.js:9: * Ce rezolvă (diagnostic FAZA 29-P, măsurat pe Neon-ul real):
+mini-services/animaxia-backend/modules/searchaccel/index.js:10: *   • Conexiune pg.Pool RECE către Neon = ~1.3s (TCP+TLS+auth over WAN);
+mini-services/animaxia-backend/modules/searchaccel/index.js:40: * NEON FREE PLAN (optimizare scale-to-zero): fostele timere permanente —
+mini-services/animaxia-backend/modules/searchaccel/index.js:43: * Neon treaz non-stop (rădăcina arderii cotei). Înlocuire on-demand:
+mini-services/animaxia-backend/modules/searchaccel/index.js:66:/* NEON FREE PLAN: warming piggyback — cel mult o dată la 5 minute și DOAR
+mini-services/animaxia-backend/modules/searchaccel/index.js:229:  /* NEON FREE PLAN: după o căutare REALĂ (nu background), eventual reîncălzim
+mini-services/animaxia-backend/modules/searchaccel/index.js:235:/* ------------- keepalive + warming — NEON FREE PLAN: on-demand ------------- */
+mini-services/animaxia-backend/modules/searchaccel/index.js:238: * doar la cerere. Fostul timer de 20s (SELECT 1 permanent) ținea Neon treaz
+mini-services/animaxia-backend/modules/searchaccel/index.js:240:function pingPool() {
+mini-services/animaxia-backend/modules/searchaccel/index.js:295: * compute-ul Neon e activ oricum din cauza căutării, cost marginal zero. */
+mini-services/animaxia-backend/modules/searchaccel/index.js:320:const bucketSweeper = setInterval(() => {
+mini-services/animaxia-backend/modules/searchaccel/index.js:365: * NEON FREE PLAN: `?ping=1` = deep-probe explicit al pool-ului (măsoară RTT
+mini-services/animaxia-backend/modules/searchaccel/index.js:367: * scale-to-zero Neon). */
+mini-services/animaxia-backend/modules/searchaccel/index.js:378:    void pingPool(); // deep-probe on-demand — rezultatul apare la următorul /status
+mini-services/animaxia-backend/modules/searchaccel/index.js:384:    phase: 'FAZA 29-P (PLAN 100X) · NEON FREE PLAN',
+mini-services/animaxia-backend/modules/searchaccel/index.js:389:      purpose: 'fostul keepalive permanent (SELECT 1 la 20s) a fost eliminat — ținea Neon treaz non-stop; acum ping doar la ?ping=1',
+mini-services/animaxia-backend/modules/searchux/index.js:3: * motorul de căutare PROTEJAT (FAZA 18 pipeline 10 straturi + Neon FTS din
+mini-services/animaxia-backend/modules/searchux/index.js:245:const sweeper = setInterval(() => {
+mini-services/animaxia-backend/modules/searchux/index.js:258: * clientul DAR query-ul continuă pe Neon și saturează CPU-ul — blochează
+mini-services/animaxia-backend/modules/searchux/index.js:266: * NEON FREE PLAN (scale-to-zero): fostul timer la 10s interoga pg_stat_activity
+mini-services/animaxia-backend/modules/searchux/index.js:267: * NON-STOP (24/7), ținând compute-ul Neon permanent treaz chiar și cu zero
+mini-services/animaxia-backend/modules/searchux/index.js:287:         AND query ILIKE '%similarity(a.title, b.title)%'
+mini-services/animaxia-backend/modules/searchux/index.js:288:         AND now() - query_start > $1::interval`,
+mini-services/animaxia-backend/modules/searchux/index.js:295:          `[searchux] curator-reaper: terminated orphan similarity cross-join PID ${row.pid} (> ${REAP_AFTER_SEC}s, abandonată client-side — continua să satureze Neon)`,
+mini-services/animaxia-backend/modules/searchux/index.js:321:// NEON FREE PLAN: primul sweep la import RĂMÂNE (protejează boot-ul după un
+mini-services/animaxia-backend/modules/searchux/index.js:489:        engine: body?.engine ?? 'animaxia-neon-fts',
+mini-services/animaxia-backend/modules/searchux/index.js:563:      purpose: 'mitigare aditivă degradare curatorScan FAZA-32-B (query-uri orfane abandonate client-side care saturează Neon)',
+mini-services/animaxia-backend/modules/searchux/index.js:564:      mode: 'event-driven one-shot (NEON FREE PLAN — fost timer 10s permanent eliminat)',
+mini-services/animaxia-backend/modules/security/security.js:29:const sweepTimer = setInterval(sweepBuckets, BUCKET_SWEEP_MS);
+mini-services/animaxia-backend/modules/security/security.js:130:const bfSweepTimer = setInterval(sweepAttempts, 60000);
+mini-services/animaxia-backend/modules/security/security.js:193:      `INSERT INTO auditlogs (userid, action, ip, meta) VALUES ($1, $2, $3, $4::jsonb)`,
+mini-services/animaxia-backend/modules/sharding/migrations.js:19: * throws — on the local fallback driver (or a Neon hiccup) the statements fail
+mini-services/animaxia-backend/modules/sharding/model.js:14: *   • Shard map is GENERATED: { 0: 'neon-main', 1: 'neon-shard-1',
+mini-services/animaxia-backend/modules/sharding/model.js:15: *     2: 'neon-shard-2', … } for 0..SHARDCOUNT-1.
+mini-services/animaxia-backend/modules/sharding/model.js:33: * LOGICAL vs PHYSICAL mode: every shard N ≥ 1 may have a dedicated Neon branch
+mini-services/animaxia-backend/modules/sharding/model.js:74: * { 0: 'neon-main', 1: 'neon-shard-1', 2: 'neon-shard-2', … }.
+mini-services/animaxia-backend/modules/sharding/model.js:83:/** Branch name for a shard id: 0 → 'neon-main', N ≥ 1 → 'neon-shard-N'. */
+mini-services/animaxia-backend/modules/sharding/model.js:86:  if (!Number.isInteger(n) || n < 1) return 'neon-main';
+mini-services/animaxia-backend/modules/sharding/model.js:87:  return `neon-shard-${n}`;
+mini-services/animaxia-backend/modules/sharding/routes.js:100:  const [model, schema, pools, searchHealth, vectorHealth, searchOps, vectorOps] = await Promise.all([
+mini-services/animaxia-backend/modules/sharding/routes.js:126:  const [searchHealth, vectorHealth] = await Promise.all([
+mini-services/animaxia-backend/modules/social/activity-events.js:53:     VALUES ($1, $2, $3, $4, $5::jsonb)
+mini-services/animaxia-backend/modules/social/activity.js:32:import { assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/social/activity.js:133:    assertPostgres();
+mini-services/animaxia-backend/modules/social/activity.js:179:    assertPostgres();
+mini-services/animaxia-backend/modules/social/aisocial.js:27:import { assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/social/aisocial.js:70:    assertPostgres();
+mini-services/animaxia-backend/modules/social/aisocial.js:121:    const [myGenresRow, theirGenres] = await Promise.all([
+mini-services/animaxia-backend/modules/social/aisocial.js:126:      Promise.all(
+mini-services/animaxia-backend/modules/social/aisocial.js:208:    assertPostgres();
+mini-services/animaxia-backend/modules/social/comments.js:133:  const [topRows, replyRows, voteRows, myVoteRows] = await Promise.all([
+mini-services/animaxia-backend/modules/social/feed.js:92:  const [commentRows, likeRows, contentRows, userRows] = await Promise.all([
+mini-services/animaxia-backend/modules/social/follows.js:22:import { assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/social/follows.js:65:    assertPostgres();
+mini-services/animaxia-backend/modules/social/follows.js:97:    assertPostgres();
+mini-services/animaxia-backend/modules/social/follows.js:132:    assertPostgres();
+mini-services/animaxia-backend/modules/social/follows.js:146:    assertPostgres();
+mini-services/animaxia-backend/modules/social/follows.js:166:    assertPostgres();
+mini-services/animaxia-backend/modules/social/follows.js:190:    assertPostgres();
+mini-services/animaxia-backend/modules/social/follows.js:198:    const [statsRow, recentReviews, recentActivity, relationRow] = await Promise.all([
+mini-services/animaxia-backend/modules/social/follows.js:239:      const [mine, theirs] = await Promise.all([
+mini-services/animaxia-backend/modules/social/reviews.js:27:import { assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/social/reviews.js:100:    assertPostgres();
+mini-services/animaxia-backend/modules/social/reviews.js:131:    assertPostgres();
+mini-services/animaxia-backend/modules/social/reviews.js:203:    assertPostgres();
+mini-services/animaxia-backend/modules/social/reviews.js:222:    assertPostgres();
+mini-services/animaxia-backend/modules/social/reviews.js:255:    assertPostgres();
+mini-services/animaxia-backend/modules/social/social-migrations.js:55:    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/social/social-migrations.js:68:    state JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/social/watchparty.js:32:import { assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/social/watchparty.js:142:       WHERE status = 'active' AND updatedat < NOW() - INTERVAL '24 hours'`,
+mini-services/animaxia-backend/modules/social/watchparty.js:159:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:183:         VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+mini-services/animaxia-backend/modules/social/watchparty.js:217:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:254:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:295:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:333:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:367:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:378:      `UPDATE watchparties SET state = $2::jsonb, updatedat = NOW() WHERE id = $1`,
+mini-services/animaxia-backend/modules/social/watchparty.js:390:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:431:    assertPostgres();
+mini-services/animaxia-backend/modules/social/watchparty.js:469:    assertPostgres();
+mini-services/animaxia-backend/modules/sports/football.js:10:const BASE = process.env.FOOTBALLDATABASE_URL || 'https://api.football-data.org/v4';
+mini-services/animaxia-backend/modules/sports/football.js:25:function football(path, params = {}) {
+mini-services/animaxia-backend/modules/sports/football.js:39:      const payload = await football('/competitions');
+mini-services/animaxia-backend/modules/sports/football.js:58:      payload = await football(`/competitions/${code}/standings`);
+mini-services/animaxia-backend/modules/sports/football.js:93:      payload = await football(`/competitions/${code}/matches`, { status });
+mini-services/animaxia-backend/modules/sports/basketball.js:10:function basketball(path, params = {}) {
+mini-services/animaxia-backend/modules/sports/basketball.js:23:  const payload = await basketball('/nba/v1/teams');
+mini-services/animaxia-backend/modules/sports/basketball.js:29:  const payload = await basketball('/nba/v1/players', {
+mini-services/animaxia-backend/modules/sports/basketball.js:43:  const payload = await basketball('/nba/v1/games', params);
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:31:function peekTenantPool(tenant, { now = Date.now() } = {}) {
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:41:function incrementTenantPool(tenant, { now = Date.now() } = {}) {
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:53:let sweep = setInterval(() => {
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:74:  const { dailyUsed, minuteUsed } = peekTenantPool(tenant);
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:105:  incrementTenantPool(tenant);
+mini-services/animaxia-backend/modules/tenant/ai-quota.js:123:  const { dailyUsed, minuteUsed } = peekTenantPool(tenant);
+mini-services/animaxia-backend/modules/tenant/billing.js:246:     VALUES ($1, $2, $3, 'open', $4, $5, $6, $7::jsonb, $8) RETURNING id`,
+mini-services/animaxia-backend/modules/tenant/billing.js:293:     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+mini-services/animaxia-backend/modules/tenant/core.js:46:  cacheSweep = setInterval(() => {
+mini-services/animaxia-backend/modules/tenant/core.js:218:       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:6: * Runs at boot after ensurePlatformSchema(); safe to re-run on Neon PostgreSQL
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:78:    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:79:    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:80:    playerallowlist JSONB NOT NULL DEFAULT '[]'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:104:    lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:121: * platform migrations, so boot reports the failure loudly on Neon only).
+mini-services/animaxia-backend/modules/tenant/tenant-migrations.js:178:       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:109:     VALUES ($1, '{}'::jsonb, $2::jsonb, '["mp4","m3u8"]'::jsonb)`,
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:187:       config = COALESCE($2::jsonb, config),
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:188:       features = COALESCE($3::jsonb, features),
+mini-services/animaxia-backend/modules/tenant/tenant-routes.js:189:       playerallowlist = COALESCE($4::jsonb, playerallowlist),
+mini-services/animaxia-backend/modules/tenant/tenant-vector.js:137:         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+mini-services/animaxia-backend/modules/users/auth.js:273:       VALUES ($1, $2, $3, $4, '{}'::jsonb)
+mini-services/animaxia-backend/modules/users/auth.js:288:           VALUES ($1, $2, 'verify-email', NOW() + interval '24 hours')`,
+mini-services/animaxia-backend/modules/users/playlists.js:27:import { rows, one, parseJsonb, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+mini-services/animaxia-backend/modules/users/playlists.js:105:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:128:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:152:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:172:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:183:  if (Object.prototype.hasOwnProperty.call(body, 'title')) {
+mini-services/animaxia-backend/modules/users/playlists.js:192:  if (Object.prototype.hasOwnProperty.call(body, 'description')) {
+mini-services/animaxia-backend/modules/users/playlists.js:221:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:243:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:286:  assertPostgres();
+mini-services/animaxia-backend/modules/users/playlists.js:319:  assertPostgres();
+mini-services/animaxia-backend/modules/users/profile.js:74:    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+mini-services/animaxia-backend/modules/users/profile.js:125:  if (Object.prototype.hasOwnProperty.call(body, 'username')) {
+mini-services/animaxia-backend/modules/users/profile.js:133:  if (Object.prototype.hasOwnProperty.call(body, 'avatar')) {
+mini-services/animaxia-backend/modules/users/profile.js:161:    sets.push(`preferences = $${params.length}::jsonb`);
+mini-services/animaxia-backend/modules/users/profile.js:240:     ON CONFLICT (userid, contentid) DO NOTHING RETURNING id`,
+mini-services/animaxia-backend/modules/users/profile.js:348:    `UPDATE users SET preferences = $2::jsonb WHERE id = $1 RETURNING *`,
+mini-services/animaxia-backend/modules/workers/tasks/thumbnail.mjs:12: * FAZA 16-a: the SVG text is stored in the Neon `thumbnailcache` table
+mini-services/animaxia-backend/modules/workers/tasks/thumbnail.mjs:14: * fallback only (used when the postgres driver is unavailable). Files are
+mini-services/animaxia-backend/modules/workers/tasks/thumbnail.mjs:154:    // FAZA 16-a: SVG text is stored in the Neon `thumbnailcache` table
+mini-services/animaxia-backend/modules/workers/workers.js:244:const pool = new WorkerPool(Math.min(4, os.cpus().length || 1));
+mini-services/animaxia-backend/modules/workers/workers.js:248:/* NEON FREE PLAN (scale-to-zero): auto-refresh-ul periodic (default 30 min)
+mini-services/animaxia-backend/modules/workers/workers.js:249: * era un job permanent care ținea compute-ul Neon treaz non-stop și ardea
+mini-services/animaxia-backend/modules/workers/workers.js:253:const REFRESH_INTERVAL_MS = parseInt(process.env.WORKERSREFRESHMS || '0', 10) || 0;
+mini-services/animaxia-backend/modules/workers/workers.js:256:  intervalMs: REFRESH_INTERVAL_MS,
+mini-services/animaxia-backend/modules/workers/workers.js:258:  nextRunAt: REFRESH_INTERVAL_MS > 0 ? new Date(Date.now() + REFRESH_INTERVAL_MS).toISOString() : null,
+mini-services/animaxia-backend/modules/workers/workers.js:260:  enabled: REFRESH_INTERVAL_MS > 0,
+mini-services/animaxia-backend/modules/workers/workers.js:264:if (REFRESH_INTERVAL_MS > 0) {
+mini-services/animaxia-backend/modules/workers/workers.js:265:  const timer = setInterval(() => {
+mini-services/animaxia-backend/modules/workers/workers.js:270:    scheduleState.nextRunAt = new Date(now.getTime() + REFRESH_INTERVAL_MS).toISOString();
+mini-services/animaxia-backend/modules/workers/workers.js:273:  }, REFRESH_INTERVAL_MS);
+mini-services/animaxia-backend/modules/workers/workers.js:278:// OPRIT (NEON FREE PLAN): fiecare restart îl re-rula pe DB fără utilizatori.
+mini-services/animaxia-backend/modules/workers/workers.js:288:/* FAZA 16-a: SVG thumbnails now live in the Neon `thumbnailcache` table.
+mini-services/animaxia-backend/modules/workers/workers.js:291:async function migrateThumbnailFilesToNeon() {
+mini-services/animaxia-backend/modules/workers/workers.js:309:      logger.info(`[workers] Migrated ${migrated} SVG thumbnail file(s) from disk into Neon thumbnailcache`);
+mini-services/animaxia-backend/modules/workers/workers.js:318:  migrateThumbnailFilesToNeon().catch(() => {});
+mini-services/animaxia-backend/modules/workers/workers.js:428: * FAZA 16-a: reads from the Neon `thumbnailcache` table first; falls back to
+mini-services/animaxia-backend/modules/workers/workers.js:437:  // Neon first.
+mini-services/animaxia-backend/modules/local/sqlite.js:40:export function localAll(sql, params = []) {
+mini-services/animaxia-backend/modules/local/sqlite.js:41:  return localDb.prepare(sql).all(...params);
+mini-services/animaxia-backend/modules/local/content.js:3:const columns = localDb.prepare("PRAGMA table_info(Content)").all();
+mini-services/animaxia-backend/q16a-check.mjs:1:import pg from 'pg';
+mini-services/animaxia-backend/q16a-check.mjs:9:const pool = new pg.Pool({ connectionString: env.DATABASEURL, max: 2 });
+mini-services/animaxia-backend/q16a-check.mjs:10:const [ext, tables, count] = await Promise.all([
+mini-services/animaxia-backend/rateLimit.js:20:const cleanupTimer = setInterval(cleanup, Math.max(WINDOW_MS, 30000));
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:21: *      200ms Neon-friendly pause between batches of 2000,
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:31:import pg from 'pg';
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:104:function makeClient(connStr, label) {
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:105:  const c = new pg.Client({
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:141:      const sources = (await primary.query(`SELECT ${SOURCE_COLS} FROM ar10m.content_sources WHERE id = ANY($1::int[])`, [sourceIds])).rows;
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:170:      (await target.query('SELECT COUNT(*)::int AS n FROM ar10m.content WHERE id = ANY($1::int[])', [ids])).rows[0]?.n ?? 0,
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:177:    await primary.query('DELETE FROM ar10m.content WHERE shard_id = $1 AND id = ANY($2::int[])', [logicalShard, ids]);
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:219:    const primary = makeClient(PRIMARY_CONN, 'primary');
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:233:  const primary = makeClient(PRIMARY_CONN, 'primary');
+mini-services/animaxia-backend/scripts/ar10m-rebalance.mjs:242:    const target = makeClient(t.conn, envName(t.slot));
+mini-services/animaxia-backend/scripts/ar10m-setup.mjs:11:import pg from 'pg';
+mini-services/animaxia-backend/scripts/ar10m-setup.mjs:36:const pool = new pg.Pool({
+mini-services/animaxia-backend/scripts/ar10m-setup.mjs:135:    'INSERT INTO ar10m.content_sources (source_type, source_url, source_hash) VALUES ($1,$2,$3) ON CONFLICT (source_hash) DO UPDATE SET source_url = EXCLUDED.source_url RETURNING id',
+mini-services/animaxia-backend/server.js:12:import { initDb, listContent, getContentById, getContentByExternalId, upsertContent, deleteContent, countContent, countsByType, driverInfo, poolStats, closeDb, closeShardPools, listShardPools, lastDbActivityAt, query as dbQuery } from './db.js'; // closeShardPools + listShardPools added in FAZA 13 (sharding); lastDbActivityAt added for NEON FREE PLAN optimization; dbQuery added AR10M (/api/health/db manual probe)
+mini-services/animaxia-backend/server.js:44:import searchUxRouter, { scheduleCuratorReap } from './modules/searchux/index.js'; // FAZA 33 (PLAN 100X · WS3): strat UX căutare — suggest/trending/facets/track (consumă doar API-uri protejate prin loopback); scheduleCuratorReap: NEON FREE PLAN event-driven reaper
+mini-services/animaxia-backend/server.js:77:/* FAZA 12 (miner): ingest + indexing service — persistent job queue in Neon
+mini-services/animaxia-backend/server.js:85: * (logical sharding by default — dedicated Neon branch pools activate via
+mini-services/animaxia-backend/server.js:162:    ? { warning: 'PostgreSQL credentials rejected — serving from local fallback store' }
+mini-services/animaxia-backend/server.js:294:/* NEON FREE PLAN (scale-to-zero): curator-watch — DOAR cererile care pot lansa
+mini-services/animaxia-backend/server.js:297: * ținând Neon treaz permanent. Acum: zero trafic DB de fundal fără utilizatori. */
+mini-services/animaxia-backend/server.js:380: * ar10m.content_sources), shard-router 15 Neon, search-gateway real,
+mini-services/animaxia-backend/server.js:381: * buget Neon cu mod economic, thumbnails pe tabletă. Pool-urile shard se
+mini-services/animaxia-backend/server.js:388:/* ── AR10M (STRICT) — /api/health are ZERO acces PostgreSQL ──
+mini-services/animaxia-backend/server.js:391: * să interogheze PostgreSQL." Implementare STRICTĂ:
+mini-services/animaxia-backend/server.js:393: *      nu declanșează NICIODATĂ vreo interogare Neon, nici măcar fire-and-forget.
+mini-services/animaxia-backend/server.js:412:    healthStats.inflight = Promise.all([countContent(), countsByType()])
+mini-services/animaxia-backend/server.js:439:  if (Date.now() - lastDbActivityAt() > HEALTH_DB_ACTIVE_WINDOW_MS) return; // DB idle → nu trezim Neon
+mini-services/animaxia-backend/server.js:450:    const stats = healthDbStatsFor(); // AR10M: strict zero-DB — cache din memorie, NICIODATĂ interogare Neon
+mini-services/animaxia-backend/server.js:465:        probe: 'memory-only', // AR10M: /api/health nu interoghează PostgreSQL
+mini-services/animaxia-backend/server.js:562:/* NEON FREE PLAN — cache catalog 60 min: rutele DB-backed de content primesc
+mini-services/animaxia-backend/server.js:566: * homepage-ul (/api/all) atinge Neon doar la primul vizitator după invalidare. */
+mini-services/animaxia-backend/services/search-cluster/index.js:3: * cluster — Neon FTS over the SHARDED `searchdocs` index.
+mini-services/animaxia-backend/services/search-cluster/index.js:11: *     shard's dedicated Neon branch pool (data placement per branch is a
+mini-services/animaxia-backend/services/search-cluster/index.js:19: * per-word ILIKE, similarity() > 0.1 guard), combined score
+mini-services/animaxia-backend/services/search-cluster/index.js:20: * `ts_rank(tsv, q) * 2 + similarity(title, q) + (title ILIKE 'q%' → +0.5)`,
+mini-services/animaxia-backend/services/search-cluster/index.js:23: * exact search.js EXISTS(unnest(...) ILIKE ...) semantics), ORDER BY per sort
+mini-services/animaxia-backend/services/search-cluster/index.js:45: * ENGINE LABEL: 'animaxia-neon-fts' — the FAZA 16 engine label is KEPT (the
+mini-services/animaxia-backend/services/search-cluster/index.js:63:const ENGINE = 'animaxia-neon-fts'; // FAZA 16 engine label — KEPT
+mini-services/animaxia-backend/services/search-cluster/index.js:152:    return ensureShardPool(shardId).ownPool ? 'branch' : 'main';
+mini-services/animaxia-backend/services/search-cluster/index.js:192:  // (array containment via EXISTS(unnest(...) ILIKE ...) exactly like legacy).
+mini-services/animaxia-backend/services/search-cluster/index.js:195:  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${P(genre)})`);
+mini-services/animaxia-backend/services/search-cluster/index.js:198:    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${P(actor)} || '%')`);
+mini-services/animaxia-backend/services/search-cluster/index.js:201:    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${P(studio)} || '%')`);
+mini-services/animaxia-backend/services/search-cluster/index.js:217:      ` + CASE WHEN s.title ILIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
+mini-services/animaxia-backend/services/search-cluster/index.js:233:  //    (identical clause construction to search.js: per-word ILIKE + % + sim).
+mini-services/animaxia-backend/services/search-cluster/index.js:238:      trigramClauses.push(`s.title ILIKE ${P(`%${candidate}%`)}`);
+mini-services/animaxia-backend/services/search-cluster/index.js:558:        return `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}::text[],${b(9)}::text[],${b(10)}::text[],${b(11)},${b(12)},NOW())`;
+mini-services/animaxia-backend/services/search-cluster/index.js:596:  const nodes = await Promise.all(
+mini-services/animaxia-backend/services/vector-cluster/index.js:11: *     dedicated Neon branch pool;
+mini-services/animaxia-backend/services/vector-cluster/index.js:148:    return ensureShardPool(shardId).ownPool ? 'branch' : 'main';
+mini-services/animaxia-backend/services/vector-cluster/index.js:360:         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+mini-services/animaxia-backend/services/vector-cluster/index.js:399:  const nodes = await Promise.all(
+mini-services/animaxia-backend/tests/bench-ar10m.mjs:15: *      (Neon-friendly). Checkpoint + resume via data/ar10m-bench-state.json.
+mini-services/animaxia-backend/tests/bench-ar10m.mjs:37:import pg from 'pg';
+mini-services/animaxia-backend/tests/bench-ar10m.mjs:134:const client = new pg.Pool({
+mini-services/animaxia-backend/tests/bench-ar10m.mjs:203:function buildPrefixPool() {
+mini-services/animaxia-backend/tests/bench-ar10m.mjs:220:  const prefixes = buildPrefixPool();
+mini-services/animaxia-backend/tests/bench-ar10m.mjs:251:  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+mini-services/animaxia-backend/tests/burst-worker.mjs:28:const results = await Promise.all(
+mini-services/animaxia-backend/tests/infra-faza22.mjs:14: *   S6 Neon multi-region (Terraform + script dry-run + read-router)
+mini-services/animaxia-backend/tests/infra-faza22.mjs:134:  await Promise.all(Array.from({ length: 50 }, () => new Promise((res) => {
+mini-services/animaxia-backend/tests/infra-faza22.mjs:170:  ok('S4-5 motorul real FTS servit prin gateway (engine=animaxia-neon-fts)', !!s1 && s1.engine === 'animaxia-neon-fts');
+mini-services/animaxia-backend/tests/infra-faza22.mjs:229:  const burst = await Promise.all(Array.from({ length: 250 }, (_, i) =>
+mini-services/animaxia-backend/tests/infra-faza22.mjs:276:console.log('\n── S6. Neon multi-region (Terraform + dry-run + read-router) ──');
+mini-services/animaxia-backend/tests/infra-faza22.mjs:278:  const tf = read('animaxia-cloud/domain/neon/terraform/neon-multiregion.tf');
+mini-services/animaxia-backend/tests/infra-faza22.mjs:279:  ok('S6-1 provider Neon + branch read-replica + endpoint read_only',
+mini-services/animaxia-backend/tests/infra-faza22.mjs:280:    /kislerdm\/neon/.test(tf) && /neon_branch/.test(tf) && /neon_endpoint/.test(tf) && /read_only/.test(tf));
+mini-services/animaxia-backend/tests/infra-faza22.mjs:281:  const router = safe(() => JSON.parse(read('animaxia-cloud/domain/neon/read-router.config.json')));
+mini-services/animaxia-backend/tests/infra-faza22.mjs:289:    dry = execSync(`env -u NEON_API_KEY bash ${ROOT}animaxia-cloud/domain/neon/scripts/neon-multiregion.sh --dry-run 2>&1`,
+mini-services/animaxia-backend/tests/infra-faza22.mjs:293:  ok('S6-4 neon-multiregion.sh --dry-run fără cheie: rulează, exit 0', dryOk);
+mini-services/animaxia-backend/tests/infra-faza22.mjs:294:  ok('S6-5 dry-run: plan onest (fără replicare nativă cross-region) + endpointuri Neon',
+mini-services/animaxia-backend/tests/infra-faza22.mjs:295:    dry.includes('dry-run') && /api\.neon\.tech/.test(dry) && /LOGICAL REPLICATION|logical replication/i.test(dry));
+mini-services/animaxia-backend/tests/infra-faza22.mjs:296:  const readme = read('animaxia-cloud/domain/neon/README.md');
+mini-services/animaxia-backend/tests/infra-faza22.mjs:297:  ok('S6-6 README onest despre limitele Neon', /cross-region/i.test(readme) && /logic/i.test(readme));
+mini-services/animaxia-backend/tests/infra-faza22.mjs:371:    JSON.stringify(stages) === JSON.stringify(['anti-spam', 'rate-limit', 'cooldown', 'queue', 'priority', 'windowing', 'dedup', 'batching', 'cache', 'neon-fts']));
+mini-services/animaxia-backend/tests/infra-faza22.mjs:372:  ok('S9-2 motorul real: engine=animaxia-neon-fts + pg_trgm activ',
+mini-services/animaxia-backend/tests/infra-faza22.mjs:373:    !!st && st.engine === 'animaxia-neon-fts' && st.extensions?.pg_trgm === true);
+mini-services/animaxia-backend/tests/infra-faza22.mjs:378:  ok('S9-4 FAZA 20 huburi reale: ok + source=neon', !!hub && hub.ok === true && hub.source === 'neon');
+mini-services/animaxia-backend/tests/opt-burst-worker.mjs:18: * Neon query.
+mini-services/animaxia-backend/tests/opt-burst-worker.mjs:54:      source: body?.opt?.source ?? null, // 'neon' | 'batch' | 'cache' | 'bypass'
+mini-services/animaxia-backend/tests/opt-burst-worker.mjs:72:  const chunk = await Promise.all(
+mini-services/animaxia-backend/tests/qa19-2-setup.mjs:3: * admin directly in Neon (same pattern as smoke-searchfull.mjs), attaches one
+mini-services/animaxia-backend/tests/qa19-2-setup.mjs:26:  const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:6: * whole FAZA-21 surface (100% real Neon data, zero mocks):
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:19: * role='admin' via the real Neon DB (pg client + DATABASEURL from .env —
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:31:import pg from 'pg';
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:51:async function call(method, path, { token, body } = {}) {
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:71:const get = (path, token) => call('GET', path, { token });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:72:const post = (path, body, token) => call('POST', path, { body, token });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:113:    const client = new pg.Client({ connectionString: databaseUrl, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:208:const patched = await call('PATCH', `/api/playlists/${plId}`, { token: tokenA, body: { title: 'Maraton FAZA 21 — redenumit' } });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:230:const rm1 = await call('DELETE', `/api/playlists/${plId}/items/${pick1.id}`, { token: tokenA });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:261:const delPl = await call('DELETE', `/api/playlists/${plId}`, { token: tokenA });
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:321:const vttFile = await call('GET', `/api/player/subtitles/${subId1}.vtt`);
+mini-services/animaxia-backend/tests/smoke-faza21.mjs:361:const delSub = await call('DELETE', `/api/player/subtitles/${subId1}`, { token: tokenAdm });
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:6: * whole /api/hub surface (9 routes, 100% real Neon data):
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:66:  'A1 (1) GET /api/hub/browse → 200 ok, source neon',
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:67:  a1.res.status === 200 && a1.json?.ok === true && a1.json?.source === 'neon' && Array.isArray(a1.json?.data),
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:74:  'A2 (2) GET /api/hub/stats → 200 ok, source neon, totalItems number',
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:75:  a2.res.status === 200 && a2.json?.ok === true && a2.json?.source === 'neon' && Number.isInteger(a2.json?.totalItems),
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:90:  'A4 (4) GET /api/hub/years → 200 ok, source neon, data array',
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:91:  a4.res.status === 200 && a4.json?.ok === true && a4.json?.source === 'neon' && Array.isArray(a4.json?.data),
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:98:  'A5 (5) GET /api/hub/genres → 200 ok, source neon, data array',
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:99:  a5.res.status === 200 && a5.json?.ok === true && a5.json?.source === 'neon' && Array.isArray(a5.json?.data),
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:106:  'A6 (6) GET /api/hub/actors → 200 ok, source neon (honest — list may be small)',
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:107:  a6.res.status === 200 && a6.json?.ok === true && a6.json?.source === 'neon' && Array.isArray(a6.json?.data),
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:114:  'A7 (7) GET /api/hub/studios → 200 ok, source neon (honest — list may be small)',
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:115:  a7.res.status === 200 && a7.json?.ok === true && a7.json?.source === 'neon' && Array.isArray(a7.json?.data),
+mini-services/animaxia-backend/tests/smoke-hubs.mjs:363:    && a9.json?.real?.source === 'neon',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:410:  'S3-10 (26) animaxia_neon_connected 1 + animaxia_redis_connected 1 (sănătate infrastructură globală)',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:411:  /animaxia_neon_connected 1/.test(collText) && /animaxia_redis_connected 1/.test(collText),
+mini-services/animaxia-backend/tests/smoke-observability.mjs:484:  ['animaxia-neon-down', 'critical'],
+mini-services/animaxia-backend/tests/smoke-observability.mjs:527:const s5e = await post(`${OBS_ORIGIN}/api/alerts/_simulate/animaxia-neon-down`, {
+mini-services/animaxia-backend/tests/smoke-observability.mjs:528:  neonConnected: 0,
+mini-services/animaxia-backend/tests/smoke-observability.mjs:533:  'S5-5 (41) _simulate animaxia-neon-down cu snapshot sintetic → detectează firing ÎN RĂSPUNS',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:539:const neonRuleAfter = (s5f.json?.rules ?? []).find((r) => r.id === 'animaxia-neon-down');
+mini-services/animaxia-backend/tests/smoke-observability.mjs:542:  neonRuleAfter?.state === 'inactive',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:543:  `state=${neonRuleAfter?.state}`,
+mini-services/animaxia-backend/tests/smoke-observability.mjs:696:  'neon',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:722:  'S7-3 (61) Gauge-uri de sănătatetate ok pe platforma live (uptime/backend/neon/redis/gateway)',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:723:  ['uptime', 'backend', 'neon', 'redis', 'gateway'].every((id) => summary.gauges.find((g) => g.id === id)?.status === 'ok'),
+mini-services/animaxia-backend/tests/smoke-observability.mjs:742:  'S7-6 (64) neon/redis/gateway — detaliu infrastructură globală (shards, mode, regiuni)',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:743:  typeof summary.neon?.shardsHealthy === 'number' &&
+mini-services/animaxia-backend/tests/smoke-observability.mjs:787:  'S8-2 (70) FAZA 18 intactă: engine real animaxia-neon-fts + pg_trgm',
+mini-services/animaxia-backend/tests/smoke-observability.mjs:788:  r8a.json?.engine === 'animaxia-neon-fts' && r8a.json?.extensions?.pg_trgm === true,
+mini-services/animaxia-backend/tests/smoke-observability.mjs:795:  'S8-3 (71) FAZA 20 intactă: hub stats + browse 200 cu date reale Neon',
+mini-services/animaxia-backend/tests/smoke-perso.mjs:103:    const client = new pg.Client({ connectionString: process.env.DATABASEURL, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-perso.mjs:116:     VALUES ($1, 'movie', $2, $3::jsonb, NULL) RETURNING id`,
+mini-services/animaxia-backend/tests/smoke-perso.mjs:367:      `INSERT INTO watchhistory (userid, contentid, progress, watchedat) VALUES ($1,$2,2700, NOW() - INTERVAL '5 days')
+mini-services/animaxia-backend/tests/smoke-perso.mjs:368:       ON CONFLICT (userid, contentid) DO UPDATE SET progress = 2700, watchedat = NOW() - INTERVAL '5 days'`,
+mini-services/animaxia-backend/tests/smoke-perso.mjs:377:      `INSERT INTO watchhistory (userid, contentid, progress, watchedat) VALUES ($1,$2,120, NOW() - INTERVAL '6 days')
+mini-services/animaxia-backend/tests/smoke-perso.mjs:378:       ON CONFLICT (userid, contentid) DO UPDATE SET progress = 120, watchedat = NOW() - INTERVAL '6 days'`,
+mini-services/animaxia-backend/tests/smoke-perso.mjs:514:      await db.query(`DELETE FROM watchhistory WHERE userid = ANY($1::int[])`, [qaUsers]);
+mini-services/animaxia-backend/tests/smoke-playerhub.mjs:8: * /api/playerhub — 18 routes, real Neon data):
+mini-services/animaxia-backend/tests/smoke-playerhub.mjs:208:/** Register a throwaway QA user and promote it to admin directly in Neon
+mini-services/animaxia-backend/tests/smoke-playerhub.mjs:226:    const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-searchaccel.mjs:59:    (st.body?.config?.warmIntervalMs ?? 0) <= 45_000,
+mini-services/animaxia-backend/tests/smoke-searchaccel.mjs:60:    `warmIntervalMs=${st.body?.config?.warmIntervalMs}`,
+mini-services/animaxia-backend/tests/smoke-searchaccel.mjs:72:    'lookup miss: engine = motorul protejat Neon FTS',
+mini-services/animaxia-backend/tests/smoke-searchaccel.mjs:73:    miss.body?.engine === 'animaxia-neon-fts',
+mini-services/animaxia-backend/tests/smoke-searchaccel.mjs:120:  /* 6. NEON FREE PLAN: keepalive-ul permanent ELIMINAT — pings=0 în fundal
+mini-services/animaxia-backend/tests/smoke-searchaccel.mjs:121:   * (fostul timer SELECT 1 la 20s ținea Neon treaz non-stop; acum ping doar
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:8: * lanes + windowed dispatch) sitting between /api/search/* and Neon:
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:12: *                             (engine animaxia-neon-fts, real data) and gain
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:19: *                             queue high-water proves smoothing, Neon healthy
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:138:    'windowing pinned contract (intervalMs/batchSize)',
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:141:        Number.isInteger(w.intervalMs) &&
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:142:        w.intervalMs >= 10 &&
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:143:        w.intervalMs <= 2000 &&
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:181:      body?.engine === 'animaxia-neon-fts' &&
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:260:  const results = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:265:  const real = ok.filter((r) => r.body?.engine === 'animaxia-neon-fts' && Array.isArray(r.body?.data));
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:272:    `burst ${n}: ALL real (engine animaxia-neon-fts + data)`,
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:306:    // size — Neon observed a controlled stream, not an off-window spike.
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:333:  const results = await Promise.all(jobs);
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:364:  const results = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:397:  const [busyResult] = await Promise.all([underLoad, ...load]);
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:439:    'animaxia_search_window_interval',
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:466:    body: JSON.stringify({ intervalMs: 60 }),
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:475:      body: JSON.stringify({ intervalMs: 60 }),
+mini-services/animaxia-backend/tests/smoke-searchflow.mjs:483:  console.log('\nK. Neon health after the bursts');
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:18: *                            (identical 1000 → 1 Neon query, different 1000 →
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:22: *                            A=neon/B=cache payload identical, 10M sample
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:30: *                            Neon query — the integrated pipeline proven on
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:156:/** Register a throwaway QA user and promote it to admin directly in Neon
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:174:    const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:256:    'identice: 1000 → EXACT 1 interogare Neon reală (batch + cache absorb 999)',
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:257:    s.identical.ok === 1000 && s.identical.sources.neon === 1,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:258:    `ok=${s.identical.ok} neon=${s.identical.sources.neon} batch=${s.identical.sources.batch} cache=${s.identical.sources.cache}`,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:262:    s.different.ok === 1000 && s.different.sources.neon === 1000 && s.different.distinctQueries === 1000,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:263:    `neon=${s.different.sources.neon} distinct=${s.different.distinctQueries}`,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:267:    s.mixed.total === 5000 && s.mixed.answered === 5000 && s.mixed.sources.neon < s.mixed.ok,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:268:    `neon=${s.mixed.sources.neon} ok=${s.mixed.ok} breakdown=${JSON.stringify(s.mixed.breakdown)}`,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:296:    'semantică: A=neon, B=cache, payload EXACT identic (FAZA 14 neschimbată)',
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:297:    run.semantics.freshSource === 'neon' && run.semantics.repeatSource === 'cache' && run.semantics.payloadIdentical === true,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:304:      run.projection10M.realSample.neonExecutions < 500 &&
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:305:      run.projection10M.realSample.neonExecutions > 0,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:306:    `neon=${run.projection10M.realSample.neonExecutions} reduction=${run.projection10M.realSample.reductionFactor}×`,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:314:    'reducerea totală raportată (răspunsuri / interogări Neon reale)',
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:316:    `neonFtsQueries=${run.neonFtsQueries} reduction=${run.reductionFactor}× wall=${Math.round(run.wallMs / 1000)}s`,
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:353:    alive.status === 200 && Array.isArray(alive.body?.data) && alive.body?.engine === 'animaxia-neon-fts',
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:391: *  integrated pipeline → all 200 + real, EXACTLY 1 real Neon query. */
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:399:  const results = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:403:  const ok200 = flat.filter((r) => r.status === 200 && r.hasData !== false && r.engine === 'animaxia-neon-fts');
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:417:    'EXACT 1 interogare Neon reală pentru tot burst-ul HTTP (Δfts === 1)',
+mini-services/animaxia-backend/tests/smoke-searchfull.mjs:477:    'animaxia_search_window_interval',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:16: *                            block (source 'neon' on a fresh query)
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:19: *                            100% real, EXACTLY 1 real Neon query
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:22: *                            100% real, EXACTLY 1 real Neon query, queue
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:28: *                            real, EXACTLY 1 real Neon query (reduction
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:33: *                            NEW real execution (opt.source 'neon')
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:161:/** Register a throwaway QA user and promote it to admin directly in Neon
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:179:    const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:239:    'dedup pinned contract (active: true + deduplicatedRequests + the Neon split)',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:293:    'fresh search → 200 + 100% REAL (engine animaxia-neon-fts + data) + opt.source "neon"',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:296:        first.body?.engine === 'animaxia-neon-fts' &&
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:298:        first.body?.opt?.source === 'neon' &&
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:320:  const results = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:330:  const allReal = flat.every((r) => r.engine === 'animaxia-neon-fts' && r.hasData);
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:370:    'EXACTLY 1 real Neon query for 100 identical requests (fts Δ1, dedup Δ99)',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:375:    'source distribution: 1 neon + 99 shared (batch/cache), zero bypass',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:376:    (r.sources.neon ?? 0) + (r.sources.batch ?? 0) + (r.sources.cache ?? 0) === 100 && (r.sources.bypass ?? 0) === 0 && (r.sources.neon ?? 0) === 1,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:396:    'EXACTLY 1 real Neon query for 1000 identical requests (reduction 1000×)',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:402:    r.flat.every((x) => x.engine === 'animaxia-neon-fts' && x.hasData),
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:403:    `nonReal=${r.flat.filter((x) => x.engine !== 'animaxia-neon-fts' || !x.hasData).length}`,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:436:  const tunedFlow = await postJson('/api/search/flow/settings', { intervalMs: 50, batchSize: 100 }, authHeader);
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:449:    // layer must collapse to ONE real Neon query.
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:457:      'EXACTLY 1 real Neon query for 5000 identical requests (reduction 5000×)',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:486:      { intervalMs: flowBefore.intervalMs, batchSize: flowBefore.batchSize },
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:491:      `runtime knobs RESTORED (window ${flowBefore.intervalMs}ms × ${flowBefore.batchSize}, ttl ${optBefore.cacheTtlMs}ms)`,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:506:    'fresh query → real execution (source "neon") + result cached',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:507:    first.status === 200 && first.body?.opt?.source === 'neon',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:516:      second.body?.engine === 'animaxia-neon-fts' &&
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:531:    `after TTL (${ttl}ms + margin) → honest miss + NEW real execution (source "neon", same hash)`,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:532:    third.status === 200 && third.body?.opt?.source === 'neon' && third.body?.opt?.queryHash === first.body?.opt?.queryHash,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:541:  const distinct = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:551:    distinct.every((d) => d.status === 200 && d.body?.opt?.source === 'neon') && dFts === 30 && hashes.size === 30,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:560:  const probes = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:575:    'EXACTLY 1 real Neon probe for 30 identical typeaheads (fts Δ1)',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:586:  const sameShard = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:597:    '30 identical requests with the SAME X-Animaxia-Shard → all 200 real + EXACTLY 1 Neon query',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:598:    sameShard.every((s) => s.status === 200 && s.body?.engine === 'animaxia-neon-fts') && dFts === 1,
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:710:        bypassed.body?.engine === 'animaxia-neon-fts' &&
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:721:    're-enabled layer serves with optimization provenance again (neon/cache/batch)',
+mini-services/animaxia-backend/tests/smoke-searchopt.mjs:722:    back.status === 200 && ['neon', 'cache', 'batch'].includes(back.body?.opt?.source),
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:15: *                             (engine animaxia-neon-fts, real data) and
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:37: *                             burst event recorded, Neon healthy after
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:163:    Boolean(body?.flowControl?.queueEnabled === true && body?.windowing?.intervalMs > 0),
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:199:      body?.engine === 'animaxia-neon-fts' &&
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:229:  const pair = await Promise.all([
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:266:    other.status === 200 && other.body?.engine === 'animaxia-neon-fts',
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:278:  record('first search → 200 REAL', first.status === 200 && first.body?.engine === 'animaxia-neon-fts', `status=${first.status}`);
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:304:    again.status === 200 && again.body?.engine === 'animaxia-neon-fts',
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:314:  const flood = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:350:    recovered.status === 200 && recovered.body?.engine === 'animaxia-neon-fts',
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:381:  const flood = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:419:  const workerResults = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:426:  const real = ok.filter((r) => r.engine === 'animaxia-neon-fts' && r.hasData === true);
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:433:    `burst 1000: ALL real (engine animaxia-neon-fts + data)`,
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:468:  record(`burst 1000: wall time < 60s (Neon saw a controlled stream)`, wallMs < 60000, `wall=${wallMs}ms`);
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:507:  const smallResults = await Promise.all(
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:539:/** Register a throwaway QA user and promote it to admin directly in Neon
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:557:    const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:673:  console.log('\nK. FAZA 15 regression + Neon health');
+mini-services/animaxia-backend/tests/smoke-searchrate.mjs:689:    '/api/health → ok + db.connected (Neon healthy after everything)',
+mini-services/animaxia-backend/tests/smoke-searchux.mjs:60:  ok('S1.4 reaper ops prezent (mitigare curatorScan, event-driven NEON FREE PLAN)', typeof body?.reaper?.reapAfterSec === 'number' && /event-driven/.test(String(body?.reaper?.mode)) && typeof body?.reaper?.runs === 'number');
+mini-services/animaxia-backend/tests/smoke-searchux.mjs:158:  ok('S5.5 FAZA 18 motor FTS integru (engine=animaxia-neon-fts)', adv.body?.engine === 'animaxia-neon-fts', `engine=${adv.body?.engine}`);
+mini-services/animaxia-backend/tests/smoke-sharding.mjs:151:record('C1 cluster query → 200', s1.res.status === 200 && s1.json?.engine === 'animaxia-neon-fts', `status=${s1.res.status}`);
+mini-services/animaxia-backend/tests/stability-faza24.mjs:8: * touching any protected logic (FAZA 18/20/21/23, Neon FTS, AR10M, FAZA 13,
+mini-services/animaxia-backend/tests/stability-faza24.mjs:189:  'S1-8 (8) Neon: stare reală din /api/health (driver + conectat + cluster)',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:190:  ov?.neon?.connected === true && typeof ov?.neon?.driver === 'string' && ov?.neon?.clusterHealthy === true,
+mini-services/animaxia-backend/tests/stability-faza24.mjs:191:  `driver=${ov?.neon?.driver} connected=${ov?.neon?.connected}`,
+mini-services/animaxia-backend/tests/stability-faza24.mjs:688:  'S6-7 (52) Failover backend/AI/Neon: stare în plan de control + evenimente, health-ul real rămâne raportat separat',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:693:const neonOv = (await get(`${STAB_ORIGIN}/api/metrics/overview`)).json?.overview?.neon;
+mini-services/animaxia-backend/tests/stability-faza24.mjs:695:  'S6-8 (53) Failover Neon: stare reală observată (driver + conectat) — failover-ul DB există în platformă (sondă 60s)',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:696:  neonOv?.connected === true && typeof neonOv?.driver === 'string',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:697:  `driver=${neonOv?.driver}`,
+mini-services/animaxia-backend/tests/stability-faza24.mjs:772:const badTarget = await post(`${STAB_ORIGIN}/api/deploy/rolling`, { target: 'neon', version: 'v1.0.0' });
+mini-services/animaxia-backend/tests/stability-faza24.mjs:774:  'S6-13 (58) Gardă de concurență: al doilea rollout → 409; țintă necunoscută (neon) → 400 onest',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:776:  `activ=${dupActive.res.status} al-doilea=${dupBlocked.res.status} țintă-neon=${badTarget.res.status}`,
+mini-services/animaxia-backend/tests/stability-faza24.mjs:821:const under = await Promise.all(Object.values(paths).map((p) => evalShape(p, 400)));
+mini-services/animaxia-backend/tests/stability-faza24.mjs:870:const recovered = await Promise.all(Object.values(paths).map((p) => evalShape(p, 100)));
+mini-services/animaxia-backend/tests/stability-faza24.mjs:892:  const sum = [...t.text.matchAll(/^animaxia_gateway_requests_total\{[^}]*\}\s+([0-9.eE+]+)$/gm)].reduce(
+mini-services/animaxia-backend/tests/stability-faza24.mjs:916:await Promise.all(
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1016:await Promise.all(Array.from({ length: WORKERS }, (_, i) => waveBWorker(i)));
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1062:  await Promise.all(
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1111:  'S9-2 (80) Motorul de căutare REAL intact: animaxia-neon-fts + pg_trgm',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1112:  searchStatus?.engine === 'animaxia-neon-fts' && searchStatus?.extensions?.pg_trgm === true,
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1119:  'S9-3 (81) FAZA 20 intactă: huburi reale 200 (stats + browse cu date Neon)',
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1205:  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1225:  await Promise.all(
+mini-services/animaxia-backend/tests/stability-faza24.mjs:1239:    await Promise.all(
+mini-services/animaxia-backend/tests/stress-pipeline.mjs:241:    typeof b.page === 'number' && typeof b.limit === 'number' && b.engine === 'animaxia-neon-fts' &&
+mini-services/animaxia-backend/tests/stress-pipeline.mjs:281:  typeof s.docs === 'number' && s.engine === 'animaxia-neon-fts' && s.backend === 'neon-postgresql' &&
+mini-services/animaxia-backend/tests/stress-pipeline.mjs:290:      JSON.stringify(['anti-spam', 'rate-limit', 'cooldown', 'queue', 'priority', 'windowing', 'dedup', 'batching', 'cache', 'neon-fts']),
+mini-services/animaxia-backend/package-lock.json:709:        "postgres-array": "~2.0.0",
+mini-services/animaxia-backend/package-lock.json:710:        "postgres-bytea": "~1.0.0",
+mini-services/animaxia-backend/package-lock.json:711:        "postgres-date": "~1.0.4",
+mini-services/animaxia-backend/package-lock.json:712:        "postgres-interval": "^1.1.0"
+mini-services/animaxia-backend/package-lock.json:727:    "node_modules/postgres-array": {
+mini-services/animaxia-backend/package-lock.json:729:      "resolved": "https://registry.npmjs.org/postgres-array/-/postgres-array-2.0.0.tgz",
+mini-services/animaxia-backend/package-lock.json:736:    "node_modules/postgres-bytea": {
+mini-services/animaxia-backend/package-lock.json:738:      "resolved": "https://registry.npmjs.org/postgres-bytea/-/postgres-bytea-1.0.1.tgz",
+mini-services/animaxia-backend/package-lock.json:745:    "node_modules/postgres-date": {
+mini-services/animaxia-backend/package-lock.json:747:      "resolved": "https://registry.npmjs.org/postgres-date/-/postgres-date-1.0.7.tgz",
+mini-services/animaxia-backend/package-lock.json:754:    "node_modules/postgres-interval": {
+mini-services/animaxia-backend/package-lock.json:756:      "resolved": "https://registry.npmjs.org/postgres-interval/-/postgres-interval-1.2.0.tgz",

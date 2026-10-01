@@ -1,0 +1,816 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * profile-view.tsx — #/profile: account header with avatar upload (≤512 KB
+     5→ * data-URL), usage stats, and the Overview / Watchlist / History /
+     6→ * Preferences tabs. Auth-gated: initializing shows a full-page skeleton,
+     7→ * signed-out visitors get a sign-in prompt. Deep link: #/profile?tab=…
+     8→ */
+     9→
+    10→import { useRef, useState } from 'react';
+    11→import {
+    12→  ArrowRight,
+    13→  Bookmark,
+    14→  BookmarkMinus,
+    15→  Bot,
+    16→  CalendarDays,
+    17→  Camera,
+    18→  Clock,
+    19→  Crown,
+    20→  History as HistoryIcon,
+    21→  Loader2,
+    22→  Lock,
+    23→  MessageSquare,
+    24→  Play,
+    25→  Rss,
+    26→  X,
+    27→} from 'lucide-react';
+    28→import { toast } from 'sonner';
+    29→import { useAuth } from '@/components/animaxia/auth-provider';
+    30→import { dbToItem } from '@/lib/animaxia/api';
+    31→import { useApi } from '@/lib/animaxia/hooks';
+    32→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    33→import { platform } from '@/lib/animaxia/platform';
+    34→import type { HistoryEntry, PlatformUser, Preferences } from '@/lib/animaxia/platform';
+    35→import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+    36→import { Button } from '@/components/ui/button';
+    37→import { Input } from '@/components/ui/input';
+    38→import { Label } from '@/components/ui/label';
+    39→import { Skeleton } from '@/components/ui/skeleton';
+    40→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    41→import { cn } from '@/lib/utils';
+    42→import { ContentCard } from '../content-card';
+    43→import { Container, Section } from '../section';
+    44→import { EmptyState, ErrorState, LoadingCards, TypeBadge } from '../states';
+    45→
+    46→/* ------------------------------ local helpers ------------------------------ */
+    47→
+    48→const AVATAR_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+    49→const AVATAR_MAX_BYTES = 512 * 1024;
+    50→const PREFERENCE_TYPES = ['anime', 'movie', 'tv', 'sports', 'news', 'mined'];
+    51→const PROFILE_TABS = ['overview', 'watchlist', 'history', 'preferences'] as const;
+    52→type ProfileTab = (typeof PROFILE_TABS)[number];
+    53→
+    54→function cap(value: string): string {
+    55→  return value.charAt(0).toUpperCase() + value.slice(1);
+    56→}
+    57→
+    58→function isAvatarSrc(avatar: string | null | undefined): avatar is string {
+    59→  return Boolean(avatar && (avatar.startsWith('data:') || avatar.startsWith('http')));
+    60→}
+    61→
+    62→function formatDate(iso: string | null | undefined): string {
+    63→  if (!iso) return '—';
+    64→  const date = new Date(iso);
+    65→  if (Number.isNaN(date.getTime())) return '—';
+    66→  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    67→}
+    68→
+    69→function relativeTime(iso: string | null | undefined): string {
+    70→  if (!iso) return '—';
+    71→  const time = new Date(iso).getTime();
+    72→  if (Number.isNaN(time)) return '—';
+    73→  const diff = Math.max(0, Date.now() - time);
+    74→  const mins = Math.floor(diff / 60_000);
+    75→  if (mins < 1) return 'just now';
+    76→  if (mins < 60) return `${mins}m ago`;
+    77→  const hours = Math.floor(mins / 60);
+    78→  if (hours < 24) return `${hours}h ago`;
+    79→  const days = Math.floor(hours / 24);
+    80→  if (days < 30) return `${days}d ago`;
+    81→  const months = Math.floor(days / 30);
+    82→  if (months < 12) return `${months}mo ago`;
+    83→  return `${Math.floor(months / 12)}y ago`;
+    84→}
+    85→
+    86→function formatSeconds(total: number): string {
+    87→  const mins = Math.floor(total / 60);
+    88→  const secs = total % 60;
+    89→  return `${mins}:${String(secs).padStart(2, '0')}`;
+    90→}
+    91→
+    92→function normalizePrefs(p: Preferences | null | undefined): Required<Preferences> {
+    93→  return { types: p?.types ?? [], genres: p?.genres ?? [], franchises: p?.franchises ?? [] };
+    94→}
+    95→
+    96→function errorMessage(err: unknown, fallback: string): string {
+    97→  return err instanceof Error ? err.message : fallback;
+    98→}
+    99→
+   100→/* ------------------------------ avatar header ------------------------------ */
+   101→
+   102→function AvatarHeader({ user, isAdmin }: { user: PlatformUser; isAdmin: boolean }) {
+   103→  const { setUser } = useAuth();
+   104→  const fileRef = useRef<HTMLInputElement>(null);
+   105→  const [uploading, setUploading] = useState(false);
+   106→
+   107→  async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+   108→    const file = e.target.files?.[0];
+   109→    e.target.value = ''; // allow re-selecting the same file immediately
+   110→    if (!file || uploading) return;
+   111→    if (!AVATAR_MIME_TYPES.includes(file.type)) {
+   112→      toast.error('Imagine nesuportată — folosește PNG, JPEG, GIF sau WebP.');
+   113→      return;
+   114→    }
+   115→    if (file.size > AVATAR_MAX_BYTES) {
+   116→      toast.error('Imagine prea mare — dimensiunea maximă este 512 KB.');
+   117→      return;
+   118→    }
+   119→    const dataUrl = await new Promise<string | null>((resolve) => {
+   120→      const reader = new FileReader();
+   121→      reader.onload = () => resolve(String(reader.result));
+   122→      reader.onerror = () => resolve(null);
+   123→      reader.readAsDataURL(file);
+   124→    });
+   125→    if (!dataUrl) {
+   126→      toast.error('Nu am putut citi fișierul — încearcă altă imagine.');
+   127→      return;
+   128→    }
+   129→    setUploading(true);
+   130→    try {
+   131→      const res = await platform.uploadAvatar(dataUrl);
+   132→      setUser(res.user);
+   133→      toast.success('Avatar actualizat');
+   134→    } catch (err) {
+   135→      toast.error(errorMessage(err, 'Încărcarea avatarului a eșuat'));
+   136→    } finally {
+   137→      setUploading(false);
+   138→    }
+   139→  }
+   140→
+   141→  return (
+   142→    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
+   143→      <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:gap-8">
+   144→        <div className="relative w-fit shrink-0">
+   145→          <Avatar className="h-20 w-20 border-2 border-white/15 shadow-lg shadow-black/40">
+   146→            {isAvatarSrc(user.avatar) ? <AvatarImage src={user.avatar} alt={`Avatarul lui ${user.username}`} /> : null}
+   147→            <AvatarFallback className="bg-gradient-to-br from-rose-500 to-fuchsia-600 text-2xl font-black text-white">
+   148→              {user.username.slice(0, 2).toUpperCase()}
+   149→            </AvatarFallback>
+   150→          </Avatar>
+   151→          <button
+   152→            type="button"
+   153→            onClick={() => fileRef.current?.click()}
+   154→            disabled={uploading}
+   155→            aria-label="Încarcă un avatar nou"
+   156→            title="Încarcă un avatar nou (PNG, JPEG, GIF sau WebP — max 512 KB)"
+   157→            className="absolute -bottom-1 -right-1 grid h-9 w-9 place-items-center rounded-full border border-white/20 bg-[#12121c] text-zinc-200 shadow-lg transition hover:border-rose-500/50 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60 disabled:opacity-60"
+   158→          >
+   159→            {uploading ? (
+   160→              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+   161→            ) : (
+   162→              <Camera className="h-4 w-4" aria-hidden />
+   163→            )}
+   164→          </button>
+   165→          <input
+   166→            ref={fileRef}
+   167→            type="file"
+   168→            accept="image/png,image/jpeg,image/gif,image/webp"
+   169→            onChange={(e) => void onFileChange(e)}
+   170→            className="hidden"
+   171→            tabIndex={-1}
+   172→            aria-hidden
+   173→          />
+   174→        </div>
+   175→
+   176→        <div className="min-w-0 flex-1 space-y-2">
+   177→          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+   178→            <h1 className="text-2xl font-black tracking-tight text-white">{user.username}</h1>
+   179→            {user.plan !== 'free' ? (
+   180→              <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-xs font-bold text-amber-300">
+   181→                <Crown className="h-3 w-3" aria-hidden />
+   182→                {cap(user.plan)}
+   183→              </span>
+   184→            ) : (
+   185→              <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-0.5 text-xs font-bold text-zinc-400">
+   186→                FREE
+   187→              </span>
+   188→            )}
+   189→            {isAdmin && (
+   190→              <span className="rounded-full bg-rose-500/20 px-2.5 py-0.5 text-xs font-bold text-rose-300">ADMIN</span>
+   191→            )}
+   192→          </div>
+   193→          <p className="truncate text-sm text-zinc-400">{user.email}</p>
+   194→          <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+   195→            <span className="inline-flex items-center gap-1.5">
+   196→              <CalendarDays className="h-3.5 w-3.5" aria-hidden />
+   197→              Membru din {formatDate(user.createdat)}
+   198→            </span>
+   199→            <span className="inline-flex items-center gap-1.5">
+   200→              <Clock className="h-3.5 w-3.5" aria-hidden />
+   201→              Ultima conectare {relativeTime(user.lastloginat)}
+   202→            </span>
+   203→          </p>
+   204→        </div>
+   205→      </div>
+   206→    </div>
+   207→  );
+   208→}
+   209→
+   210→/* --------------------------------- stats ---------------------------------- */
+   211→
+   212→function StatCard({
+   213→  icon: Icon,
+   214→  label,
+   215→  value,
+   216→  loading,
+   217→}: {
+   218→  icon: React.ComponentType<{ className?: string }>;
+   219→  label: string;
+   220→  value: number | undefined;
+   221→  loading: boolean;
+   222→}) {
+   223→  return (
+   224→    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 sm:p-5">
+   225→      {loading ? (
+   226→        <div className="space-y-2.5" aria-busy="true">
+   227→          <Skeleton className="h-5 w-5 rounded-md" />
+   228→          <Skeleton className="h-7 w-16" />
+   229→          <Skeleton className="h-3.5 w-20" />
+   230→        </div>
+   231→      ) : (
+   232→        <div className="flex items-start gap-3">
+   233→          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-rose-500/10 text-rose-300">
+   234→            <Icon className="h-4.5 w-4.5" aria-hidden />
+   235→          </span>
+   236→          <div className="min-w-0">
+   237→            <p className="text-xl font-black leading-tight text-white sm:text-2xl">{value ?? 0}</p>
+   238→            <p className="mt-0.5 text-xs font-medium text-zinc-500">{label}</p>
+   239→          </div>
+   240→        </div>
+   241→      )}
+   242→    </div>
+   243→  );
+   244→}
+   245→
+   246→/* ------------------------------ history rows ------------------------------- */
+   247→
+   248→function HistoryRow({ entry }: { entry: HistoryEntry }) {
+   249→  const content = entry.content;
+   250→  return (
+   251→    <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 transition hover:border-rose-500/30 sm:gap-4 sm:p-4">
+   252→      {content.thumbnail ? (
+   253→        <img
+   254→          src={content.thumbnail}
+   255→          alt=""
+   256→          loading="lazy"
+   257→          className="h-24 w-16 shrink-0 rounded-lg border border-white/10 object-cover"
+   258→        />
+   259→      ) : (
+   260→        <div className="grid h-24 w-16 shrink-0 place-items-center rounded-lg border border-white/10 bg-gradient-to-br from-white/[0.08] to-white/[0.02] text-zinc-600">
+   261→          <Play className="h-5 w-5" aria-hidden />
+   262→        </div>
+   263→      )}
+   264→      <div className="min-w-0 flex-1">
+   265→        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+   266→          <button
+   267→            type="button"
+   268→            onClick={() => navigate(`/content/${content.id}`)}
+   269→            className="truncate text-left text-sm font-bold text-zinc-100 transition hover:text-rose-300 sm:text-base"
+   270→          >
+   271→            {content.title}
+   272→          </button>
+   273→          <TypeBadge type={content.type} />
+   274→        </div>
+   275→        <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500">
+   276→          <span className="inline-flex items-center gap-1">
+   277→            <Clock className="h-3.5 w-3.5" aria-hidden />
+   278→            {formatSeconds(entry.progress)} vizionate
+   279→          </span>
+   280→          <span>{relativeTime(entry.watchedat)}</span>
+   281→        </p>
+   282→      </div>
+   283→      <Button
+   284→        size="sm"
+   285→        variant="outline"
+   286→        onClick={() => navigate(`/player/${content.id}`)}
+   287→        aria-label={`Reia ${content.title}`}
+   288→        className="h-9 shrink-0 border-rose-500/30 bg-rose-500/10 font-semibold text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
+   289→      >
+   290→        <Play className="h-3.5 w-3.5 fill-rose-300" aria-hidden />
+   291→        Reia
+   292→      </Button>
+   293→    </div>
+   294→  );
+   295→}
+   296→
+   297→/* ------------------------------- overview tab ------------------------------ */
+   298→
+   299→const QUICK_LINKS: {
+   300→  icon: React.ComponentType<{ className?: string }>;
+   301→  title: string;
+   302→  description: string;
+   303→  href: string;
+   304→  accent: string;
+   305→}[] = [
+   306→  {
+   307→    icon: Crown,
+   308→    title: 'Premium',
+   309→    description: 'Compară planurile, fă upgrade și administrează-ți abonamentul.',
+   310→    href: '/premium',
+   311→    accent: 'bg-amber-500/10 text-amber-300',
+   312→  },
+   313→  {
+   314→    icon: Rss,
+   315→    title: 'Feed de activitate',
+   316→    description: 'Ce vizionează, ce apreciază și ce spune comunitatea.',
+   317→    href: '/feed',
+   318→    accent: 'bg-fuchsia-500/10 text-fuchsia-300',
+   319→  },
+   320→  {
+   321→    icon: Bot,
+   322→    title: 'Hub AI',
+   323→    description: 'Recomandări reglate pe preferințele de mai jos.',
+   324→    href: '/ai',
+   325→    accent: 'bg-rose-500/10 text-rose-300',
+   326→  },
+   327→];
+   328→
+   329→function OverviewTab() {
+   330→  const recent = useApi('profile-history-5', () => platform.history(5));
+   331→
+   332→  return (
+   333→    <div className="space-y-8">
+   334→      <div className="grid gap-4 sm:grid-cols-3">
+   335→        {QUICK_LINKS.map((link) => {
+   336→          const Icon = link.icon;
+   337→          return (
+   338→            <button
+   339→              key={link.href}
+   340→              type="button"
+   341→              onClick={() => navigate(link.href)}
+   342→              className="group flex items-center gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-left transition hover:border-rose-500/40 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   343→            >
+   344→              <span className={cn('grid h-11 w-11 shrink-0 place-items-center rounded-xl', link.accent)}>
+   345→                <Icon className="h-5 w-5" aria-hidden />
+   346→              </span>
+   347→              <span className="min-w-0 flex-1">
+   348→                <span className="flex items-center gap-1.5 text-sm font-bold text-white">
+   349→                  {link.title}
+   350→                  <ArrowRight
+   351→                    className="h-3.5 w-3.5 text-zinc-500 transition group-hover:translate-x-0.5 group-hover:text-rose-300"
+   352→                    aria-hidden
+   353→                  />
+   354→                </span>
+   355→                <span className="mt-0.5 block text-xs leading-relaxed text-zinc-400">{link.description}</span>
+   356→              </span>
+   357→            </button>
+   358→          );
+   359→        })}
+   360→      </div>
+   361→
+   362→      <Section title="Vizionate recent" subtitle="Continuă exact de unde ai rămas.">
+   363→        {recent.loading ? (
+   364→          <div className="space-y-3" aria-busy="true" aria-label="Se încarcă istoricul de vizionare">
+   365→            {[0, 1, 2].map((i) => (
+   366→              <Skeleton key={i} className="h-[120px] rounded-xl" />
+   367→            ))}
+   368→          </div>
+   369→        ) : recent.error ? (
+   370→          <ErrorState message={recent.error} onRetry={() => void recent.refetch()} />
+   371→        ) : (recent.data?.data ?? []).length === 0 ? (
+   372→          <EmptyState
+   373→            icon={<HistoryIcon className="h-6 w-6" aria-hidden />}
+   374→            title="Încă nimic vizionat"
+   375→            message="Redă ceva și progresul tău va apărea aici."
+   376→            action={
+   377→              <Button
+   378→                onClick={() => navigate('/home')}
+   379→                className="bg-rose-600 font-bold hover:bg-rose-500"
+   380→              >
+   381→                Răsfoiește titluri
+   382→              </Button>
+   383→            }
+   384→          />
+   385→        ) : (
+   386→          <div className="space-y-3">
+   387→            {(recent.data?.data ?? []).map((entry) => (
+   388→              <HistoryRow key={`${entry.content.id}-${entry.watchedat}`} entry={entry} />
+   389→            ))}
+   390→          </div>
+   391→        )}
+   392→      </Section>
+   393→    </div>
+   394→  );
+   395→}
+   396→
+   397→/* ------------------------------ watchlist tab ------------------------------ */
+   398→
+   399→function WatchlistTab() {
+   400→  const watchlist = useApi('profile-watchlist', () => platform.watchlist());
+   401→  const [removingId, setRemovingId] = useState<number | null>(null);
+   402→
+   403→  async function remove(contentId: number, title: string) {
+   404→    setRemovingId(contentId);
+   405→    try {
+   406→      await platform.removeWatchlist(contentId);
+   407→      toast.success(`„${title}” a fost eliminat din Lista Mea`);
+   408→      await watchlist.refetch();
+   409→    } catch (err) {
+   410→      toast.error(errorMessage(err, 'Nu am putut elimina titlul'));
+   411→    } finally {
+   412→      setRemovingId(null);
+   413→    }
+   414→  }
+   415→
+   416→  if (watchlist.loading) return <LoadingCards count={6} />;
+   417→  if (watchlist.error) return <ErrorState message={watchlist.error} onRetry={() => void watchlist.refetch()} />;
+   418→
+   419→  const entries = watchlist.data?.data ?? [];
+   420→  if (entries.length === 0) {
+   421→    return (
+   422→      <EmptyState
+   423→        icon={<BookmarkMinus className="h-6 w-6" aria-hidden />}
+   424→        title="Lista Mea e goală"
+   425→        message="Salvează filmele, serialele și animele pe care vrei să le vizionezi următoarele."
+   426→        action={
+   427→          <Button onClick={() => navigate('/home')} className="bg-rose-600 font-bold hover:bg-rose-500">
+   428→            Răsfoiește titluri
+   429→          </Button>
+   430→        }
+   431→      />
+   432→    );
+   433→  }
+   434→
+   435→  return (
+   436→    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+   437→      {entries.map((entry) => {
+   438→        const item = dbToItem(entry.content);
+   439→        return (
+   440→          <div key={item.key} className="group/card relative">
+   441→            <ContentCard item={item} />
+   442→            <button
+   443→              type="button"
+   444→              onClick={() => void remove(entry.content.id, entry.content.title)}
+   445→              disabled={removingId === entry.content.id}
+   446→              aria-label={`Remove ${entry.content.title} from watchlist`}
+   447→              title={`Remove ${entry.content.title} from watchlist`}
+   448→              className="absolute right-2 top-2 z-10 grid h-9 w-9 place-items-center rounded-full border border-white/10 bg-black/70 text-rose-300 backdrop-blur-sm transition hover:border-rose-500/50 hover:bg-rose-600 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60 disabled:opacity-60 sm:opacity-0 sm:group-hover/card:opacity-100"
+   449→            >
+   450→              {removingId === entry.content.id ? (
+   451→                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+   452→              ) : (
+   453→                <BookmarkMinus className="h-4 w-4" aria-hidden />
+   454→              )}
+   455→            </button>
+   456→          </div>
+   457→        );
+   458→      })}
+   459→    </div>
+   460→  );
+   461→}
+   462→
+   463→/* ------------------------------- history tab ------------------------------- */
+   464→
+   465→function HistoryTab() {
+   466→  const history = useApi('profile-history-30', () => platform.history(30));
+   467→
+   468→  if (history.loading) {
+   469→    return (
+   470→      <div className="space-y-3" aria-busy="true" aria-label="Se încarcă istoricul de vizionare">
+   471→        {[0, 1, 2, 3, 4].map((i) => (
+   472→          <Skeleton key={i} className="h-[120px] rounded-xl" />
+   473→        ))}
+   474→      </div>
+   475→    );
+   476→  }
+   477→  if (history.error) return <ErrorState message={history.error} onRetry={() => void history.refetch()} />;
+   478→
+   479→  const entries = history.data?.data ?? [];
+   480→  if (entries.length === 0) {
+   481→    return (
+   482→      <EmptyState
+   483→        icon={<HistoryIcon className="h-6 w-6" aria-hidden />}
+   484→        title="Încă niciun istoric de vizionare"
+   485→        message="Tot ce redai ajunge aici, cu progresul tău."
+   486→        action={
+   487→          <Button onClick={() => navigate('/home')} className="bg-rose-600 font-bold hover:bg-rose-500">
+   488→            Răsfoiește titluri
+   489→          </Button>
+   490→        }
+   491→      />
+   492→    );
+   493→  }
+   494→
+   495→  return (
+   496→    <div className="space-y-3">
+   497→      {entries.map((entry) => (
+   498→        <HistoryRow key={`${entry.content.id}-${entry.watchedat}`} entry={entry} />
+   499→      ))}
+   500→    </div>
+   501→  );
+   502→}
+   503→
+   504→/* ----------------------------- preferences tab ----------------------------- */
+   505→
+   506→function ChipInput({
+   507→  id,
+   508→  label,
+   509→  placeholder,
+   510→  values,
+   511→  onAdd,
+   512→  onRemove,
+   513→}: {
+   514→  id: string;
+   515→  label: string;
+   516→  placeholder: string;
+   517→  values: string[];
+   518→  onAdd: (value: string) => void;
+   519→  onRemove: (value: string) => void;
+   520→}) {
+   521→  const [text, setText] = useState('');
+   522→
+   523→  function submit(e: React.FormEvent) {
+   524→    e.preventDefault();
+   525→    const value = text.trim();
+   526→    if (!value) return;
+   527→    onAdd(value);
+   528→    setText('');
+   529→  }
+   530→
+   531→  return (
+   532→    <div className="space-y-2.5">
+   533→      <Label htmlFor={id} className="text-sm font-semibold text-zinc-300">
+   534→        {label}
+   535→      </Label>
+   536→      <form onSubmit={submit} className="flex gap-2">
+   537→        <Input
+   538→          id={id}
+   539→          value={text}
+   540→          onChange={(e) => setText(e.target.value)}
+   541→          placeholder={placeholder}
+   542→          aria-label={`Add ${label.toLowerCase()} value`}
+   543→          className="h-11 flex-1 border-white/10 bg-white/5 text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-rose-500/50"
+   544→        />
+   545→        <Button
+   546→          type="submit"
+   547→          variant="outline"
+   548→          className="h-11 border-rose-500/30 bg-rose-500/10 px-5 font-semibold text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
+   549→        >
+   550→          Add
+   551→        </Button>
+   552→      </form>
+   553→      {values.length > 0 ? (
+   554→        <div className="flex flex-wrap gap-2">
+   555→          {values.map((value) => (
+   556→            <span
+   557→              key={value}
+   558→              className="inline-flex h-8 items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] pl-3 pr-1.5 text-xs font-medium text-zinc-200"
+   559→            >
+   560→              {value}
+   561→              <button
+   562→                type="button"
+   563→                onClick={() => onRemove(value)}
+   564→                aria-label={`Remove ${value}`}
+   565→                className="grid h-5 w-5 place-items-center rounded-full text-zinc-500 transition hover:bg-rose-500/20 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   566→              >
+   567→                <X className="h-3 w-3" aria-hidden />
+   568→              </button>
+   569→            </span>
+   570→          ))}
+   571→        </div>
+   572→      ) : (
+   573→        <p className="text-xs text-zinc-500">Nothing yet — add a few to sharpen your recommendations.</p>
+   574→      )}
+   575→    </div>
+   576→  );
+   577→}
+   578→
+   579→function PreferencesTab({ user }: { user: PlatformUser }) {
+   580→  const [baseline, setBaseline] = useState<Required<Preferences>>(() => normalizePrefs(user.preferences));
+   581→  const [types, setTypes] = useState<string[]>(baseline.types);
+   582→  const [genres, setGenres] = useState<string[]>(baseline.genres);
+   583→  const [franchises, setFranchises] = useState<string[]>(baseline.franchises);
+   584→  const [saving, setSaving] = useState(false);
+   585→
+   586→  const dirty =
+   587→    types.join('\u0000') !== baseline.types.join('\u0000') ||
+   588→    genres.join('\u0000') !== baseline.genres.join('\u0000') ||
+   589→    franchises.join('\u0000') !== baseline.franchises.join('\u0000');
+   590→
+   591→  function toggleType(type: string) {
+   592→    setTypes((cur) => (cur.includes(type) ? cur.filter((t) => t !== type) : [...cur, type]));
+   593→  }
+   594→
+   595→  function addValue(value: string, list: string[], setList: (next: string[]) => void, kind: string) {
+   596→    if (list.some((v) => v.toLowerCase() === value.toLowerCase())) return; // dedupe (case-insensitive)
+   597→    if (list.length >= 20) {
+   598→      toast.error(`You can save up to 20 ${kind}.`);
+   599→      return;
+   600→    }
+   601→    setList([...list, value]);
+   602→  }
+   603→
+   604→  async function save() {
+   605→    if (saving || !dirty) return;
+   606→    setSaving(true);
+   607→    try {
+   608→      const res = await platform.putPreferences({ types, genres, franchises });
+   609→      const saved = normalizePrefs(res.preferences);
+   610→      setTypes(saved.types);
+   611→      setGenres(saved.genres);
+   612→      setFranchises(saved.franchises);
+   613→      setBaseline(saved);
+   614→      toast.success('Preferințe salvate');
+   615→    } catch (err) {
+   616→      toast.error(errorMessage(err, 'Nu am putut salva preferințele'));
+   617→    } finally {
+   618→      setSaving(false);
+   619→    }
+   620→  }
+   621→
+   622→  return (
+   623→    <div className="max-w-2xl space-y-8">
+   624→      <p className="text-sm leading-relaxed text-zinc-400">
+   625→        Used by AI recommendations and your personal feed. The more you tell Animaxia, the better it gets at
+   626→        surfacing titles you&apos;ll actually finish.
+   627→      </p>
+   628→
+   629→      {/* Content types */}
+   630→      <div className="space-y-2.5">
+   631→        <p className="text-sm font-semibold text-zinc-300">Content types</p>
+   632→        <div className="flex flex-wrap gap-2">
+   633→          {PREFERENCE_TYPES.map((type) => {
+   634→            const active = types.includes(type);
+   635→            return (
+   636→              <button
+   637→                key={type}
+   638→                type="button"
+   639→                onClick={() => toggleType(type)}
+   640→                aria-pressed={active}
+   641→                className={cn(
+   642→                  'inline-flex h-10 items-center gap-1.5 rounded-full border px-4 text-sm font-semibold capitalize transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60',
+   643→                  active
+   644→                    ? 'border-rose-500/50 bg-rose-500/15 text-rose-300'
+   645→                    : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:border-white/20 hover:text-zinc-200',
+   646→                )}
+   647→              >
+   648→                {type}
+   649→              </button>
+   650→            );
+   651→          })}
+   652→        </div>
+   653→      </div>
+   654→
+   655→      {/* Genres */}
+   656→      <ChipInput
+   657→        id="pref-genres"
+   658→        label="Genuri"
+   659→        placeholder="ex. Sci-Fi, Shounen, Thriller…"
+   660→        values={genres}
+   661→        onAdd={(value) => addValue(value, genres, setGenres, 'genres')}
+   662→        onRemove={(value) => setGenres((cur) => cur.filter((g) => g !== value))}
+   663→      />
+   664→
+   665→      {/* Franchises */}
+   666→      <ChipInput
+   667→        id="pref-franchises"
+   668→        label="Francize"
+   669→        placeholder="ex. Naruto, Marvel, Lord of the Rings…"
+   670→        values={franchises}
+   671→        onAdd={(value) => addValue(value, franchises, setFranchises, 'franchises')}
+   672→        onRemove={(value) => setFranchises((cur) => cur.filter((f) => f !== value))}
+   673→      />
+   674→
+   675→      <div className="flex flex-wrap items-center gap-3 pt-1">
+   676→        <Button
+   677→          onClick={() => void save()}
+   678→          disabled={saving || !dirty}
+   679→          className="relative h-11 bg-rose-600 px-6 font-bold hover:bg-rose-500"
+   680→        >
+   681→          {saving ? <Loader2 className="animate-spin" aria-hidden /> : <Bookmark aria-hidden />}
+   682→          {saving ? 'Se salvează…' : 'Salvează preferințele'}
+   683→          {dirty && !saving && (
+   684→            <span
+   685→              className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-rose-400 ring-2 ring-[#0a0a10]"
+   686→              aria-hidden
+   687→            />
+   688→          )}
+   689→        </Button>
+   690→        {dirty && <p className="text-xs font-medium text-rose-300">Modificări nesalvate</p>}
+   691→      </div>
+   692→    </div>
+   693→  );
+   694→}
+   695→
+   696→/* ---------------------------------- view ---------------------------------- */
+   697→
+   698→export function ProfileView({ route }: { route: AppRoute }) {
+   699→  const { user, initializing, isAdmin } = useAuth();
+   700→  const requestedTab = route.query.get('tab');
+   701→  const [tab, setTab] = useState<ProfileTab>(
+   702→    PROFILE_TABS.includes(requestedTab as ProfileTab) ? (requestedTab as ProfileTab) : 'overview',
+   703→  );
+   704→
+   705→  const profile = useApi('profile-me', () => platform.profile(), { enabled: Boolean(user) });
+   706→
+   707→  if (initializing) {
+   708→    return (
+   709→      <Container className="space-y-8 py-8 sm:py-10" aria-busy="true" aria-label="Se încarcă profilul">
+   710→        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
+   711→          <div className="flex flex-col gap-6 sm:flex-row sm:items-center">
+   712→            <Skeleton className="h-20 w-20 rounded-full" />
+   713→            <div className="flex-1 space-y-3">
+   714→              <Skeleton className="h-7 w-48" />
+   715→              <Skeleton className="h-4 w-64" />
+   716→              <Skeleton className="h-4 w-40" />
+   717→            </div>
+   718→          </div>
+   719→        </div>
+   720→        <div className="grid grid-cols-3 gap-3 sm:gap-4">
+   721→          <Skeleton className="h-24 rounded-2xl sm:h-28" />
+   722→          <Skeleton className="h-24 rounded-2xl sm:h-28" />
+   723→          <Skeleton className="h-24 rounded-2xl sm:h-28" />
+   724→        </div>
+   725→        <Skeleton className="h-11 w-full max-w-md rounded-lg" />
+   726→        <LoadingCards count={6} />
+   727→      </Container>
+   728→    );
+   729→  }
+   730→
+   731→  if (!user) {
+   732→    return (
+   733→      <Container className="flex min-h-[60vh] items-center justify-center py-10">
+   734→        <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-white/[0.03] p-8 text-center">
+   735→          <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-500/10 text-rose-400">
+   736→            <Lock className="h-7 w-7" aria-hidden />
+   737→          </span>
+   738→          <h1 className="mt-4 text-xl font-black tracking-tight text-white">Conectează-te pentru a-ți vedea profilul</h1>
+   739→          <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+   740→            Avatarul, lista, istoricul și preferințele tale locuiesc aici.
+   741→          </p>
+   742→          <Button
+   743→            onClick={() => navigate('/auth')}
+   744→            className="mt-6 h-11 w-full bg-rose-600 font-bold hover:bg-rose-500"
+   745→          >
+   746→            Conectare
+   747→          </Button>
+   748→        </div>
+   749→      </Container>
+   750→    );
+   751→  }
+   752→
+   753→  const stats = profile.data?.stats;
+   754→
+   755→  return (
+   756→    <Container className="space-y-8 py-8 sm:py-10">
+   757→      <AvatarHeader user={user} isAdmin={isAdmin} />
+   758→
+   759→      {/* Stats */}
+   760→      {profile.error ? (
+   761→        <ErrorState message={profile.error} onRetry={() => void profile.refetch()} compact />
+   762→      ) : (
+   763→        <div className="grid grid-cols-3 gap-3 sm:gap-4">
+   764→          <StatCard icon={Bookmark} label="Titluri în Listă" value={stats?.watchlist} loading={profile.loading} />
+   765→          <StatCard icon={HistoryIcon} label="Intrări în istoric" value={stats?.history} loading={profile.loading} />
+   766→          <StatCard icon={MessageSquare} label="Comentarii postate" value={stats?.comments} loading={profile.loading} />
+   767→        </div>
+   768→      )}
+   769→
+   770→      <Tabs value={tab} onValueChange={(value) => setTab(value as ProfileTab)} className="gap-6">
+   771→        <TabsList className="grid h-11 w-full max-w-xl grid-cols-4 bg-white/5 p-1 sm:w-fit sm:grid-cols-4">
+   772→          <TabsTrigger
+   773→            value="overview"
+   774→            className="h-9 text-xs font-semibold data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:text-sm"
+   775→          >
+   776→            Prezentare generală
+   777→          </TabsTrigger>
+   778→          <TabsTrigger
+   779→            value="watchlist"
+   780→            className="h-9 text-xs font-semibold data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:text-sm"
+   781→          >
+   782→            Lista Mea
+   783→          </TabsTrigger>
+   784→          <TabsTrigger
+   785→            value="history"
+   786→            className="h-9 text-xs font-semibold data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:text-sm"
+   787→          >
+   788→            Istoric
+   789→          </TabsTrigger>
+   790→          <TabsTrigger
+   791→            value="preferences"
+   792→            className="h-9 text-xs font-semibold data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:text-sm"
+   793→          >
+   794→            Preferințe
+   795→          </TabsTrigger>
+   796→        </TabsList>
+   797→
+   798→        <TabsContent value="overview">
+   799→          <OverviewTab />
+   800→        </TabsContent>
+   801→        <TabsContent value="watchlist">
+   802→          <WatchlistTab />
+   803→        </TabsContent>
+   804→        <TabsContent value="history">
+   805→          <HistoryTab />
+   806→        </TabsContent>
+   807→        <TabsContent value="preferences">
+   808→          <PreferencesTab user={user} />
+   809→        </TabsContent>
+   810→      </Tabs>
+   811→    </Container>
+   812→  );
+   813→}
+   814→
+   815→export default ProfileView;
+   816→

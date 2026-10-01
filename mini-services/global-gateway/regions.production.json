@@ -1,0 +1,5 @@
+{
+  "eu": ["https://eu-api.animaxia.com"],
+  "us": ["https://us-api.animaxia.com"],
+  "asia": ["https://asia-api.animaxia.com"]
+}

@@ -1,0 +1,95 @@
+$ bun --hot index.ts
+[watchdog 2026-09-18T22:27:08.458Z] animaxia-watchdog activ pe :4020 — supraveghez 3 servicii la fiecare 10s
+[watchdog 2026-09-18T22:27:18.461Z] FAIL realtime (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T22:27:28.460Z] FAIL realtime (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T22:27:38.460Z] FAIL realtime (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T22:27:38.461Z] RESTART realtime — pice de 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-realtime
+[watchdog 2026-09-18T22:28:09.700Z] animaxia-watchdog activ pe :4020 — supraveghez 3 servicii la fiecare 10s
+[watchdog 2026-09-18T22:34:28.466Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T22:34:29.714Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T22:34:38.465Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T22:34:39.714Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:00:19.726Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:00:28.468Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:00:29.725Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:00:38.467Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:00:39.727Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:00:39.727Z] RESTART backend — picat după 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-18T23:01:08.467Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:09.725Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:18.467Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:19.725Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:28.466Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:28.466Z] RESTART backend — pice de 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-18T23:01:29.725Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:29.725Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:02:09.727Z)
+[watchdog 2026-09-18T23:01:38.467Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:39.725Z] FAIL backend (4/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:39.725Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:02:09.727Z)
+[watchdog 2026-09-18T23:01:48.468Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:49.725Z] FAIL backend (5/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:49.725Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:02:09.727Z)
+[watchdog 2026-09-18T23:01:58.468Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:58.468Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:02:58.466Z)
+[watchdog 2026-09-18T23:01:59.725Z] FAIL backend (6/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:01:59.725Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:02:09.727Z)
+[watchdog 2026-09-18T23:02:08.468Z] FAIL backend (4/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:02:08.468Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:02:58.466Z)
+[watchdog 2026-09-18T23:20:08.470Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:09.730Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:18.468Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:19.730Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:28.468Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:28.469Z] RESTART backend — pice de 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-18T23:20:29.730Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:29.730Z] RESTART backend — picat după 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-18T23:20:38.470Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:39.730Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:48.468Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:49.729Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:58.469Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:58.469Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:21:58.469Z)
+[watchdog 2026-09-18T23:20:59.730Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:20:59.730Z] (backend în cooldown de respawn — aștept până 2026-09-18T23:21:59.730Z)
+[watchdog 2026-09-18T23:32:08.469Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:32:09.735Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:32:18.469Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:32:19.734Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:32:28.469Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:32:28.470Z] RESTART backend — pice de 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-18T23:32:29.735Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-18T23:32:29.735Z] RESTART backend — picat după 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+$ bun --hot index.ts
+[watchdog 2026-09-20T20:16:14.252Z] animaxia-watchdog activ pe :4020 — supraveghez 3 servicii la fiecare 10s
+[watchdog 2026-09-20T20:16:14.256Z] FAIL realtime (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:18:14.256Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:18:24.255Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:22:34.254Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:22:44.255Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:22:54.255Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:22:54.256Z] RESTART backend — picat după 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-20T20:23:34.255Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:23:44.254Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:39:14.260Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:39:24.260Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:39:34.258Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T20:39:34.259Z] RESTART backend — picat după 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-20T20:39:44.260Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T21:00:44.268Z] FAIL web (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T21:00:54.269Z] FAIL web (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T21:01:04.264Z] FAIL web (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-20T21:01:04.264Z] RESTART web — picat după 3 verificări consecutive; respawn în /home/z/my-project
+[watchdog 2026-09-20T21:01:18.263Z] FAIL web (1/3): The operation timed out.
+[watchdog 2026-09-20T21:01:28.264Z] FAIL web (2/3): The operation timed out.
+$ bun --hot index.ts
+[watchdog 2026-09-21T06:06:58.259Z] animaxia-watchdog activ pe :4020 — supraveghez 4 servicii la fiecare 10s
+[watchdog 2026-09-21T19:08:01.339Z] animaxia-watchdog activ pe :4020 — supraveghez 4 servicii la fiecare 10s
+[watchdog 2026-09-21T19:12:01.342Z] FAIL backend (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-21T19:12:11.342Z] FAIL backend (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-21T19:12:21.342Z] FAIL backend (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-21T19:12:21.343Z] RESTART backend — picat după 3 verificări consecutive; respawn în /home/z/my-project/mini-services/animaxia-backend
+[watchdog 2026-09-21T19:48:51.346Z] FAIL web (1/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-21T19:49:01.345Z] FAIL web (2/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-21T19:49:11.343Z] FAIL web (3/3): Unable to connect. Is the computer able to access the url?
+[watchdog 2026-09-21T19:49:11.343Z] RESTART web — picat după 3 verificări consecutive; respawn în /home/z/my-project
+[watchdog 2026-09-21T19:49:25.344Z] FAIL web (1/3): The operation timed out.

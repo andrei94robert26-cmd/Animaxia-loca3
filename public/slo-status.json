@@ -1,0 +1,9 @@
+{
+  "phase": "FAZA 30 (PLAN 100X)",
+  "slo": { "target": 0.999, "windowSec": 86400, "intervalSec": 30 },
+  "availability": 1.00000,
+  "errorBudget": { "used": 0.0000, "status": "ok" },
+  "samples": { "window": 1, "failed": 0, "total": 1 },
+  "soakStartedAt": "2026-09-25T05:46:30Z",
+  "updatedAt": "2026-09-25T05:46:30Z"
+}

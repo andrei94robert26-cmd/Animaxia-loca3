@@ -45,21 +45,21 @@ export const TENANT_METERED_PRICES = {
 
 const DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS tenants (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     slug TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     plan TEXT NOT NULL DEFAULT 'free',
     stripecustomerid TEXT,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants (status)`,
   `CREATE TABLE IF NOT EXISTS tenantusers (
     tenantid INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role TEXT NOT NULL DEFAULT 'member',
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (tenantid, userid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tenantusers_user ON tenantusers (userid)`,
@@ -71,29 +71,29 @@ const DDL_STATEMENTS = [
     vectorcollections INTEGER NOT NULL DEFAULT 1,
     storagegb INTEGER NOT NULL DEFAULT 1,
     overageallowed BOOLEAN NOT NULL DEFAULT TRUE,
-    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS tenantconfig (
     tenantid INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
-    config JSONB NOT NULL DEFAULT '{}'::jsonb,
-    features JSONB NOT NULL DEFAULT '{}'::jsonb,
-    playerallowlist JSONB NOT NULL DEFAULT '[]'::jsonb,
-    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    config TEXT NOT NULL DEFAULT '{}',
+    features TEXT NOT NULL DEFAULT '{}',
+    playerallowlist TEXT NOT NULL DEFAULT '[]',
+    updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS tenantusageevents (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenantid INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     userid INTEGER,
     metric TEXT NOT NULL,
     quantity REAL NOT NULL DEFAULT 1,
     unit TEXT NOT NULL DEFAULT 'count',
-    meta JSONB,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    meta TEXT,
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tenantusageevents_tenant ON tenantusageevents (tenantid, createdat DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_tenantusageevents_metric ON tenantusageevents (metric)`,
   `CREATE TABLE IF NOT EXISTS tenantinvoices (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenantid INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     periodstart TIMESTAMPTZ NOT NULL,
     periodend TIMESTAMPTZ NOT NULL,
@@ -101,16 +101,14 @@ const DDL_STATEMENTS = [
     baseusd REAL NOT NULL DEFAULT 0,
     usageusd REAL NOT NULL DEFAULT 0,
     totalusd REAL NOT NULL DEFAULT 0,
-    lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+    lines TEXT NOT NULL DEFAULT '[]',
     stripeinvoiceid TEXT,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tenantinvoices_tenant ON tenantinvoices (tenantid, createdat DESC)`,
   // Additive columns on existing shared tables — default keeps all
   // pre-FAZA-11 rows in the implicit 'global' tenant.
-  `ALTER TABLE vectorembeddings ADD COLUMN IF NOT EXISTS tenantid TEXT NOT NULL DEFAULT 'global'`,
   `CREATE INDEX IF NOT EXISTS idx_vectorembeddings_tenant ON vectorembeddings (tenantid, kind)`,
-  `ALTER TABLE refreshtokens ADD COLUMN IF NOT EXISTS tenantid TEXT`,
   `CREATE INDEX IF NOT EXISTS idx_refreshtokens_tenant ON refreshtokens (tenantid)`,
 ];
 
@@ -175,7 +173,7 @@ async function seedTenants() {
     );
     await rows(
       `INSERT INTO tenantconfig (tenantid, config, features, playerallowlist)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (tenantid) DO NOTHING`,
       [tid, JSON.stringify(s.config), JSON.stringify(s.features), s.playerallowlist],
     );

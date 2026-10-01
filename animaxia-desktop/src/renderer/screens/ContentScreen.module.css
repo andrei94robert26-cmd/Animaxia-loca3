@@ -1,0 +1,62 @@
+/* ContentScreen.module.css — backdrop hero + details layout. */
+
+.backdrop {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  max-height: 400px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-soft);
+  background: var(--skeleton);
+  overflow: hidden;
+}
+
+.backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.backdropShade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 35%, rgba(10, 10, 16, 0.92) 100%);
+}
+
+.title {
+  margin: 18px 0 8px;
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.15;
+  color: var(--text);
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.overview {
+  margin: 14px 0 0;
+  max-width: 760px;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 6px;
+}
+
+.actionError {
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  margin: 4px 0 0;
+}

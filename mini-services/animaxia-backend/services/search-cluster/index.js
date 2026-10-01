@@ -16,11 +16,11 @@
  * runAdvancedQuery (modules/search/search.js, FAZA 16/17): text match
  * `tsv @@ websearch_to_tsquery('simple', $q)` with a trigram fallback per node
  * when the FTS pass returns 0 hits and fuzzy !== 'false' (title % q OR
- * per-word ILIKE, similarity() > 0.1 guard), combined score
- * `ts_rank(tsv, q) * 2 + similarity(title, q) + (title ILIKE 'q%' → +0.5)`,
+ * per-word LIKE, similarity() > 0.1 guard), combined score
+ * `ts_rank(tsv, q) * 2 + similarity(title, q) + (title LIKE 'q%' → +0.5)`,
  * empty q + filters → filter-only (no text score), SQL-side filters
  * (type/genre/year/actor/studio/category/minRating — array filters use the
- * exact search.js EXISTS(unnest(...) ILIKE ...) semantics), ORDER BY per sort
+ * exact search.js EXISTS(unnest(...) LIKE ...) semantics), ORDER BY per sort
  * (score/year/rating/title + contentid tie-breaks), LIMIT/OFFSET per node,
  * plus the per-node `AND shardid = $n` scope. Merge: concat → dedupe by
  * contentid → re-sort by the sort criterion → slice to limit; total = SUM of
@@ -189,16 +189,16 @@ async function runNodeQuery(shardId, input) {
   };
 
   // Field filters — identical fragments to search.js runAdvancedQuery
-  // (array containment via EXISTS(unnest(...) ILIKE ...) exactly like legacy).
+  // (array containment via EXISTS(unnest(...) LIKE ...) exactly like legacy).
   const filters = [];
   if (type) filters.push(`s.type = ${P(type)}`);
-  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${P(genre)})`);
+  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g LIKE ${P(genre)})`);
   if (year != null) filters.push(`s.year = ${P(year)}`);
   if (actor) {
-    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${P(actor)} || '%')`);
+    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a LIKE '%' || ${P(actor)} || '%')`);
   }
   if (studio) {
-    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${P(studio)} || '%')`);
+    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st LIKE '%' || ${P(studio)} || '%')`);
   }
   if (category) filters.push(`s.category = ${P(category)}`);
   if (minRating != null) filters.push(`s.rating >= ${P(minRating)}`);
@@ -214,7 +214,7 @@ async function runNodeQuery(shardId, input) {
     scoreExpr =
       `ts_rank(s.tsv, websearch_to_tsquery('simple', ${qp})) * 2` +
       ` + similarity(s.title, ${qp})` +
-      ` + CASE WHEN s.title ILIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
+      ` + CASE WHEN s.title LIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
     textMatch = `s.tsv @@ websearch_to_tsquery('simple', ${qp})`;
   }
 
@@ -224,25 +224,25 @@ async function runNodeQuery(shardId, input) {
   let matchSql = textMatch;
   let countRes = await queryOnShard(
     shardId,
-    `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+    `SELECT COUNT(*) AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
     params,
   );
   let countRow = countRes.rows?.[0] ?? { total: 0, maxscore: 0 };
 
   // 2. Trigram fuzzy fallback per node when the FTS pass matched nothing
-  //    (identical clause construction to search.js: per-word ILIKE + % + sim).
+  //    (identical clause construction to search.js: per-word LIKE + % + sim).
   if (q && fuzzyEnabled && Number(countRow?.total ?? 0) === 0) {
     const words = q.split(/\s+/).filter(Boolean);
     const trigramClauses = [];
     for (const candidate of [q, ...words]) {
-      trigramClauses.push(`s.title ILIKE ${P(`%${candidate}%`)}`);
+      trigramClauses.push(`s.title LIKE ${P(`%${candidate}%`)}`);
     }
     const qSim = P(q);
     trigramClauses.push(`(s.title % ${qSim} OR similarity(s.title, ${qSim}) > 0.1)`);
     matchSql = `(${trigramClauses.join(' OR ')})`;
     countRes = await queryOnShard(
       shardId,
-      `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+      `SELECT COUNT(*) AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
       params,
     );
     countRow = countRes.rows?.[0] ?? { total: 0, maxscore: 0 };
@@ -555,7 +555,7 @@ async function indexBatch(docs) {
           shardid,
         );
         const b = (k) => `$${base + k}`;
-        return `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}::text[],${b(9)}::text[],${b(10)}::text[],${b(11)},${b(12)},NOW())`;
+        return `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}[],${b(9)}[],${b(10)}[],${b(11)},${b(12)},CURRENT_TIMESTAMP)`;
       });
       // Same 12-param upsert SQL as search.js syncIndex (13-2), shard-routed.
       await queryOnShard(
@@ -575,7 +575,7 @@ async function indexBatch(docs) {
            studios = EXCLUDED.studios,
            category = EXCLUDED.category,
            shardid = EXCLUDED.shardid,
-           syncedat = NOW()`,
+           syncedat = CURRENT_TIMESTAMP`,
         values,
       );
       indexed += slice.length;
@@ -598,7 +598,7 @@ async function health() {
       const startedAt = Date.now();
       try {
         await queryOnShard(shardId, 'SELECT 1 AS ok');
-        const cnt = await queryOnShard(shardId, 'SELECT COUNT(*)::int AS n FROM searchdocs WHERE shardid = $1', [shardId]);
+        const cnt = await queryOnShard(shardId, 'SELECT COUNT(*) AS n FROM searchdocs WHERE shardid = $1', [shardId]);
         return {
           shardid: shardId,
           branch: shardBranchName(shardId),

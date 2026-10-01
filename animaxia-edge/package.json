@@ -1,0 +1,28 @@
+{
+  "name": "animaxia-edge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Animaxia Edge — Cloudflare Workers edge layer: gateway (routing/WAF/rate-limit/cache), search, AI, auth, player, analytics and cron workers. Zero runtime dependencies.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "bun run scripts/lint.mjs",
+    "test:smoke": "bun tests/smoke-edge.mjs",
+    "test:e2e": "bun tests/e2e-edge.mjs",
+    "test": "bun run typecheck && bun run test:smoke && bun run test:e2e",
+    "dev:gateway": "wrangler dev --config worker/wrangler.toml --local",
+    "deploy:gateway": "wrangler deploy --config worker/wrangler.toml",
+    "deploy:search": "wrangler deploy --config search/wrangler.toml",
+    "deploy:ai": "wrangler deploy --config ai/wrangler.toml",
+    "deploy:auth": "wrangler deploy --config auth/wrangler.toml",
+    "deploy:player": "wrangler deploy --config player/wrangler.toml",
+    "deploy:analytics": "wrangler deploy --config analytics/wrangler.toml",
+    "deploy:cron": "wrangler deploy --config cron/wrangler.toml",
+    "deploy:all": "bash deploy/deploy-all.sh",
+    "build:check": "tsc --noEmit && bun tests/smoke-edge.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250906.0",
+    "typescript": "^5.6.0"
+  }
+}

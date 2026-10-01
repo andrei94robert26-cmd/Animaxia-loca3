@@ -27,7 +27,7 @@
  */
 
 import express from 'express';
-import { rows, one, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+import { rows, one, isoOrNull, num } from '../platform/sql.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
 import { auditLog, clientIpOf } from '../security/security.js';
 
@@ -275,7 +275,6 @@ router.get("/opensubtitles/:fileId.vtt", wrap(async (req, res) => {
 
 /** GET /content/:id/subtitles — PUBLIC local + OpenSubtitles tracks. */
 router.get('/content/:id/subtitles', wrap(async (req, res) => {
-  assertPostgres();
   const contentId = parseId(req.params.id);
   if (Number.isNaN(contentId)) return res.status(400).json({ error: 'Invalid content id' });
 
@@ -331,7 +330,6 @@ router.get('/content/:id/subtitles', wrap(async (req, res) => {
 /** GET /list — ADMIN: every track with its content title + honest stats
  *  (cue count derived in SQL from '-->' occurrences; no bodies returned). */
 router.get('/list', requireAuth, requireAdmin, wrap(async (req, res) => {
-  assertPostgres();
   const data = await rows(
     `SELECT s.id, s.contentid, s.lang, s.label, s.createdat, c.title AS contenttitle,
             length(s.vtt) AS bytes,
@@ -363,7 +361,6 @@ router.get('/:idVtt', wrap(async (req, res) => {
   if (!/^\d+\.vtt$/.test(raw)) {
     return res.status(400).json({ error: "Expected a subtitle file path like 12.vtt" });
   }
-  assertPostgres();
   const id = parseId(raw.slice(0, -4));
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid subtitle id' });
 
@@ -378,7 +375,6 @@ router.get('/:idVtt', wrap(async (req, res) => {
 
 /** POST / — ADMIN upsert of a track (unique per content+lang+label). */
 router.post('/', requireAuth, requireAdmin, wrap(async (req, res) => {
-  assertPostgres();
   const body = req.body || {};
 
   const contentId = Number(body.contentId);
@@ -426,7 +422,6 @@ router.post('/', requireAuth, requireAdmin, wrap(async (req, res) => {
 
 /** DELETE /:id — ADMIN: remove a track. */
 router.delete('/:id', requireAuth, requireAdmin, wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid subtitle id' });
 

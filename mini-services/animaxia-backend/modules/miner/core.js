@@ -98,7 +98,7 @@ export async function scheduleJob(type, tenantid, payload = {}, { createdBy = nu
   const slug = safeTenantid(tenantid);
   await rows(
     `INSERT INTO miner_jobs (id, type, status, tenantid, payload, createdby)
-     VALUES ($1, $2, 'queued', $3, $4::jsonb, $5)`,
+     VALUES ($1, $2, 'queued', $3, $4, $5)`,
     [id, type, slug, JSON.stringify(payload || {}), createdBy ? Number(createdBy) : null],
   );
   try {
@@ -113,15 +113,15 @@ export async function scheduleJob(type, tenantid, payload = {}, { createdBy = nu
 async function claimNextJob(forceId = null) {
   const claim = forceId
     ? await one(
-        `UPDATE miner_jobs SET status = 'running', startedat = NOW(), attempts = attempts + 1
+        `UPDATE miner_jobs SET status = 'running', startedat = CURRENT_TIMESTAMP, attempts = attempts + 1
          WHERE id = $1 AND status <> 'running' RETURNING *`,
         [String(forceId)],
       )
     : await one(
-        `UPDATE miner_jobs SET status = 'running', startedat = NOW(), attempts = attempts + 1
+        `UPDATE miner_jobs SET status = 'running', startedat = CURRENT_TIMESTAMP, attempts = attempts + 1
          WHERE id = (
            SELECT id FROM miner_jobs WHERE status = 'queued'
-           ORDER BY queuedat ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+           ORDER BY queuedat ASC LIMIT 1
          ) RETURNING *`,
       );
   return claim || null;
@@ -360,7 +360,7 @@ async function executeJob(job) {
     const result = await executeJobType(job);
     const durationMs = Date.now() - startedAt;
     await rows(
-      `UPDATE miner_jobs SET status = 'done', result = $2::jsonb, error = NULL, finishedat = NOW() WHERE id = $1`,
+      `UPDATE miner_jobs SET status = 'done', result = $2, error = NULL, finishedat = CURRENT_TIMESTAMP WHERE id = $1`,
       [job.id, JSON.stringify(result)],
     );
     try {
@@ -395,7 +395,7 @@ async function executeJob(job) {
   } catch (err) {
     const durationMs = Date.now() - startedAt;
     await rows(
-      `UPDATE miner_jobs SET status = 'failed', error = $2, finishedat = NOW() WHERE id = $1`,
+      `UPDATE miner_jobs SET status = 'failed', error = $2, finishedat = CURRENT_TIMESTAMP WHERE id = $1`,
       [job.id, String(err?.message || err).slice(0, 1000)],
     ).catch(() => {});
     try {
@@ -421,11 +421,11 @@ export async function recordSource(provider, externalid, contentid, tenantid, me
   const slug = safeTenantid(tenantid);
   await rows(
     `INSERT INTO miner_sources (provider, externalid, contentid, tenantid, meta, lastsync)
-     VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
      ON CONFLICT (provider, externalid, tenantid) DO UPDATE SET
        contentid = EXCLUDED.contentid,
        meta = EXCLUDED.meta,
-       lastsync = NOW()`,
+       lastsync = CURRENT_TIMESTAMP`,
     [String(provider), String(externalid), Number(contentid), slug, JSON.stringify(meta ?? {})],
   );
   return { provider, externalid, contentid: Number(contentid), tenantid: slug };
@@ -439,11 +439,11 @@ export async function upsertManifest(contentid, manifesturl, host, tenantid, sta
   const slug = safeTenantid(tenantid);
   await rows(
     `INSERT INTO miner_manifests (contentid, manifesturl, host, tenantid, status, lastchecked)
-     VALUES ($1, $2, $3, $4, $5, NOW())
+     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
      ON CONFLICT (contentid, manifesturl, tenantid) DO UPDATE SET
        host = EXCLUDED.host,
        status = EXCLUDED.status,
-       lastchecked = NOW()`,
+       lastchecked = CURRENT_TIMESTAMP`,
     [Number(contentid), String(manifesturl), host ? String(host) : null, slug, String(status)],
   );
   return { contentid: Number(contentid), manifesturl, host, tenantid: slug, status };
@@ -514,12 +514,12 @@ export async function getJob(jobId) {
 export async function minerStats() {
   const jobsByStatus = {};
   try {
-    const st = await rows(`SELECT status, COUNT(*)::int AS count FROM miner_jobs GROUP BY status`);
+    const st = await rows(`SELECT status, COUNT(*) AS count FROM miner_jobs GROUP BY status`);
     for (const r of st || []) jobsByStatus[r.status] = num(r.count);
   } catch { /* degraded */ }
   const jobsByType = {};
   try {
-    const ty = await rows(`SELECT type, COUNT(*)::int AS count FROM miner_jobs GROUP BY type`);
+    const ty = await rows(`SELECT type, COUNT(*) AS count FROM miner_jobs GROUP BY type`);
     for (const r of ty || []) jobsByType[r.type] = num(r.count);
   } catch { /* degraded */ }
 
@@ -527,15 +527,15 @@ export async function minerStats() {
   try {
     tenants = await rows(
       `SELECT m.tenantid AS tenant,
-              COUNT(*)::int AS sources,
-              COUNT(*) FILTER (WHERE m.lastsync > NOW() - interval '1 day')::int AS synced24h
+              COUNT(*) AS sources,
+              COUNT(*) FILTER (WHERE m.lastsync > datetime('now','-1 days')) AS synced24h
        FROM miner_sources m GROUP BY m.tenantid ORDER BY sources DESC LIMIT 20`,
     );
   } catch { /* degraded */ }
 
   let manifests = { total: 0, tenants: 0 };
   try {
-    const m = await one(`SELECT COUNT(*)::int AS total, COUNT(DISTINCT tenantid)::int AS tenants FROM miner_manifests`);
+    const m = await one(`SELECT COUNT(*) AS total, COUNT(DISTINCT tenantid) AS tenants FROM miner_manifests`);
     manifests = { total: num(m?.total), tenants: num(m?.tenants) };
   } catch { /* degraded */ }
 
@@ -560,7 +560,7 @@ export async function minerStats() {
 export async function recoverInterruptedJobs() {
   try {
     const r = await rows(
-      `UPDATE miner_jobs SET status = 'failed', error = 'interrupted by restart', finishedat = NOW()
+      `UPDATE miner_jobs SET status = 'failed', error = 'interrupted by restart', finishedat = CURRENT_TIMESTAMP
        WHERE status = 'running' RETURNING id`,
     );
     const count = (r || []).length;

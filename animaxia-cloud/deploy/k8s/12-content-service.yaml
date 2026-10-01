@@ -1,0 +1,143 @@
+# =============================================================================
+# Animaxia Cloud — content-service (:4002)
+# Content catalog + provider integrations (TMDB, TVmaze, Jikan, football-data, Ergast F1, RSS news), URL miner, advanced cache, thumbnails (persisted on animaxia-data PVC).
+# Gateway prefixes: /api/all, /api/content, /api/miner, /api/admin, /api/anime, /api/movies, /api/tv, /api/sports, /api/news, /api/cache
+# Deployment + ClusterIP Service + HorizontalPodAutoscaler.
+# Mounts the shared "animaxia-data" PVC (see 04-pvc.yaml) at /app/data.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: content-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: content-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: content
+spec:
+  # HPA owns replica count once autoscaling is running; this is the initial value
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: content-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: content-service
+        app.kubernetes.io/part-of: animaxia-cloud
+        app.kubernetes.io/component: content
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4002"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      # shared data volume (RWO — see 04-pvc.yaml for multi-AZ notes)
+      volumes:
+        - name: animaxia-data
+          persistentVolumeClaim:
+            claimName: animaxia-data
+      containers:
+        - name: content-service
+          image: ghcr.io/animaxia/content-service:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 4002
+              protocol: TCP
+            - name: metrics
+              containerPort: 4002
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: animaxia-config
+            - secretRef:
+                name: animaxia-secrets
+          env:
+            - name: PORT
+              value: "4002"
+            - name: SERVICENAME
+              value: "content-service"
+            - name: LOCALDATADIR
+              value: "/app/data"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: animaxia-data
+              mountPath: /app/data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: content-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: content-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: content
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: content-service
+  ports:
+    - name: http
+      port: 4002
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: content-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: content-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: content
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: content-service
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # avoid flapping; queue-service especially dislikes replica churn
+      stabilizationWindowSeconds: 300

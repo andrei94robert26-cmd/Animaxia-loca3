@@ -1,0 +1,46 @@
+{{/* HorizontalPodAutoscaler per enabled service (when autoscaling.enabled).
+     CPU target: services.<key>.targetCPU → autoscaling.defaultTargetCPU.
+     Optional memory target: services.<key>.targetMemory (gateway default 80). */}}
+{{- if .Values.autoscaling.enabled }}
+{{- range $key, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $svcName := include "animaxia.serviceName" (dict "root" $ "key" $key "service" $svc) }}
+{{- $min := $svc.minReplicas | default ($svc.replicas | default 1) }}
+{{- $max := $svc.maxReplicas | default (add1 $min) }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $svcName }}
+  namespace: {{ include "animaxia.namespace" $ }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" $ "serviceName" $svcName "component" $key) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $svcName }}
+  minReplicas: {{ $min }}
+  maxReplicas: {{ $max }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $svc.targetCPU | default $.Values.autoscaling.defaultTargetCPU }}
+    {{- with $svc.targetMemory }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+  behavior:
+    scaleDown:
+      # avoid flapping; queue-service especially dislikes replica churn
+      stabilizationWindowSeconds: 300
+{{- end }}
+{{- end }}
+{{- end }}

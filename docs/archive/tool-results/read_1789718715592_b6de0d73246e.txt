@@ -1,0 +1,1397 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * social-view.tsx — Social hub (#/social). Five tabs (Feed / People / Reviews
+     5→ * / Parties / AI) plus the watch-party room (#/social/party/:id, rendered by
+     6→ * PartyRoom). The hub keeps ONE socket connection while mounted: live
+     7→ * activity events stream into the Feed tab and the presence count chips into
+     8→ * the header.
+     9→ */
+    10→
+    11→import { useEffect, useMemo, useRef, useState } from 'react';
+    12→import {
+    13→  ChevronDown,
+    14→  CircleStop,
+    15→  Clapperboard,
+    16→  Crown,
+    17→  Loader2,
+    18→  LogIn,
+    19→  LogOut,
+    20→  MessageCircle,
+    21→  Radio,
+    22→  Search,
+    23→  Sparkles,
+    24→  Star,
+    25→  UserPlus,
+    26→  Users,
+    27→} from 'lucide-react';
+    28→import { toast } from 'sonner';
+    29→import { api } from '@/lib/animaxia/api';
+    30→import { useApi } from '@/lib/animaxia/hooks';
+    31→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    32→import {
+    33→  createSocialSocket,
+    34→  social,
+    35→  type ActivityEvent,
+    36→  type ActivityType,
+    37→  type PartyCard,
+    38→  type SocialAiHome,
+    39→  type SocialUserCard,
+    40→  type SocialUserProfile,
+    41→} from '@/lib/animaxia/social';
+    42→import type { DbContent } from '@/lib/animaxia/types';
+    43→import { useAuth } from '@/components/animaxia/auth-provider';
+    44→import { Button } from '@/components/ui/button';
+    45→import { Card, CardContent } from '@/components/ui/card';
+    46→import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    47→import { Input } from '@/components/ui/input';
+    48→import { Skeleton } from '@/components/ui/skeleton';
+    49→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    50→import { cn } from '@/lib/utils';
+    51→import { Container, PageHeader, Section } from '../section';
+    52→import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+    53→import { PartyRoom } from '../social/party-room';
+    54→import { ContentMiniCard, PlanBadge, RatingPill, SignInPrompt, UserAvatar, timeAgo } from '../social/social-ui';
+    55→
+    56→/* ------------------------------ local helpers ------------------------------ */
+    57→
+    58→type SocialTab = 'feed' | 'people' | 'reviews' | 'parties' | 'ai';
+    59→
+    60→const TABS: { value: SocialTab; label: string }[] = [
+    61→  { value: 'feed', label: 'Feed' },
+    62→  { value: 'people', label: 'People' },
+    63→  { value: 'reviews', label: 'Reviews' },
+    64→  { value: 'parties', label: 'Parties' },
+    65→  { value: 'ai', label: 'AI' },
+    66→];
+    67→
+    68→const ACTIVITY_META: Record<ActivityType, { icon: React.ComponentType<{ className?: string }>; chip: string; verb: string }> = {
+    69→  review: {
+    70→    icon: Star,
+    71→    chip: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    72→    verb: 'reviewed',
+    73→  },
+    74→  comment: {
+    75→    icon: MessageCircle,
+    76→    chip: 'border-teal-500/30 bg-teal-500/10 text-teal-300',
+    77→    verb: 'commented on',
+    78→  },
+    79→  follow: {
+    80→    icon: UserPlus,
+    81→    chip: 'border-violet-500/30 bg-violet-500/10 text-violet-300',
+    82→    verb: 'started following',
+    83→  },
+    84→  'party:create': {
+    85→    icon: Users,
+    86→    chip: 'border-rose-500/30 bg-rose-500/10 text-rose-300',
+    87→    verb: 'started a watch party for',
+    88→  },
+    89→  'party:join': {
+    90→    icon: LogIn,
+    91→    chip: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+    92→    verb: 'joined',
+    93→  },
+    94→  'party:ended': {
+    95→    icon: CircleStop,
+    96→    chip: 'border-white/15 bg-white/5 text-zinc-400',
+    97→    verb: 'ended a watch party',
+    98→  },
+    99→};
+   100→
+   101→function activityTarget(event: ActivityEvent): string | null {
+   102→  const meta = event.metadata || {};
+   103→  if (event.type === 'follow' && typeof meta.username === 'string') return meta.username;
+   104→  return null;
+   105→}
+   106→
+   107→/* ---------------------------------- view ---------------------------------- */
+   108→
+   109→export function SocialView({ route }: { route: AppRoute }) {
+   110→  if (route.params[0] === 'party') {
+   111→    const partyId = Number(route.params[1]);
+   112→    return <PartyRoom key={partyId} partyId={partyId} />;
+   113→  }
+   114→  return <SocialHub route={route} />;
+   115→}
+   116→
+   117→function SocialHub({ route }: { route: AppRoute }) {
+   118→  const { user } = useAuth();
+   119→  const initialTab = route.query.get('tab');
+   120→  const [tab, setTab] = useState<SocialTab>(
+   121→    TABS.some((t) => t.value === initialTab) ? (initialTab as SocialTab) : 'feed',
+   122→  );
+   123→
+   124→  /* ONE socket while the hub is mounted (anon ok): presence + live ticker. */
+   125→  const [online, setOnline] = useState<number | null>(null);
+   126→  const [liveEvents, setLiveEvents] = useState<ActivityEvent[]>([]);
+   127→
+   128→  useEffect(() => {
+   129→    const socket = createSocialSocket();
+   130→    socket.on('hello', (d: { online?: number }) => {
+   131→      if (typeof d.online === 'number') setOnline(d.online);
+   132→    });
+   133→    socket.on('presence:online', (d: { online: number }) => setOnline(d.online));
+   134→    socket.on('social:activity', (event: ActivityEvent) => {
+   135→      if (!event || typeof event !== 'object' || event.id == null) return;
+   136→      setLiveEvents((prev) => (prev.some((e) => e.id === event.id) ? prev : [event, ...prev].slice(0, 30)));
+   137→    });
+   138→    return () => {
+   139→      socket.removeAllListeners();
+   140→      socket.disconnect();
+   141→    };
+   142→  }, []);
+   143→
+   144→  return (
+   145→    <Container className="space-y-8 py-8 sm:py-10">
+   146→      <PageHeader title="Social" subtitle="Follow people, review titles, join watch parties — live.">
+   147→        <div className="flex flex-wrap items-center gap-2 pt-1">
+   148→          {online != null && (
+   149→            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+   150→              <span className="relative flex h-1.5 w-1.5">
+   151→                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+   152→                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+   153→              </span>
+   154→              {online} online
+   155→            </span>
+   156→          )}
+   157→          {!user && (
+   158→            <Button
+   159→              type="button"
+   160→              size="sm"
+   161→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   162→              onClick={() => navigate('/auth')}
+   163→            >
+   164→              <LogIn aria-hidden /> Sign in
+   165→            </Button>
+   166→          )}
+   167→        </div>
+   168→      </PageHeader>
+   169→
+   170→      <Tabs value={tab} onValueChange={(v) => setTab(v as SocialTab)}>
+   171→        <TabsList className="h-10 w-full justify-start gap-1 overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   172→          {TABS.map((t) => (
+   173→            <TabsTrigger
+   174→              key={t.value}
+   175→              value={t.value}
+   176→              className="shrink-0 whitespace-nowrap rounded-lg px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:px-5"
+   177→            >
+   178→              {t.label}
+   179→            </TabsTrigger>
+   180→          ))}
+   181→        </TabsList>
+   182→
+   183→        <TabsContent value="feed" className="pt-6">
+   184→          <FeedTab liveEvents={liveEvents} />
+   185→        </TabsContent>
+   186→        <TabsContent value="people" className="pt-6">
+   187→          <PeopleTab />
+   188→        </TabsContent>
+   189→        <TabsContent value="reviews" className="pt-6">
+   190→          <ReviewsTab />
+   191→        </TabsContent>
+   192→        <TabsContent value="parties" className="pt-6">
+   193→          <PartiesTab />
+   194→        </TabsContent>
+   195→        <TabsContent value="ai" className="pt-6">
+   196→          <AiTab />
+   197→        </TabsContent>
+   198→      </Tabs>
+   199→    </Container>
+   200→  );
+   201→}
+   202→
+   203→/* --------------------------------- feed tab -------------------------------- */
+   204→
+   205→function FeedTab({ liveEvents }: { liveEvents: ActivityEvent[] }) {
+   206→  const { user } = useAuth();
+   207→  const feed = useApi(`social-feed-v2-${user ? `u${user.id}` : 'anon'}`, () =>
+   208→    user ? social.feed() : social.publicFeed(),
+   209→  );
+   210→
+   211→  /* Cursor pagination — same accumulate-locally pattern as feed-view. */
+   212→  const [moreItems, setMoreItems] = useState<ActivityEvent[]>([]);
+   213→  const [moreCursor, setMoreCursor] = useState<string | null | undefined>(undefined);
+   214→  const [loadingMore, setLoadingMore] = useState(false);
+   215→  const [moreError, setMoreError] = useState<string | null>(null);
+   216→
+   217→  useEffect(() => {
+   218→    setMoreItems([]);
+   219→    setMoreCursor(undefined);
+   220→    setMoreError(null);
+   221→  }, [feed.data]);
+   222→
+   223→  const items = useMemo(() => [...(feed.data?.data ?? []), ...moreItems], [feed.data, moreItems]);
+   224→  const activeCursor = moreCursor !== undefined ? moreCursor : (feed.data?.nextCursor ?? null);
+   225→
+   226→  async function loadMore() {
+   227→    if (!activeCursor || loadingMore) return;
+   228→    setLoadingMore(true);
+   229→    setMoreError(null);
+   230→    try {
+   231→      const res = user ? await social.feed(activeCursor) : await social.publicFeed(activeCursor);
+   232→      setMoreItems((prev) => [...prev, ...res.data]);
+   233→      setMoreCursor(res.nextCursor);
+   234→    } catch (e) {
+   235→      setMoreError(e instanceof Error ? e.message : 'Could not load more activity');
+   236→    } finally {
+   237→      setLoadingMore(false);
+   238→    }
+   239→  }
+   240→
+   241→  if (feed.loading && !feed.data) return <FeedSkeleton />;
+   242→  if (feed.error && !feed.data) return <ErrorState message={feed.error} onRetry={feed.refetch} />;
+   243→
+   244→  /* Live events on top, deduped against everything already listed. */
+   245→  const listedIds = new Set(items.map((e) => e.id));
+   246→  const fresh = liveEvents.filter((e) => !listedIds.has(e.id));
+   247→
+   248→  return (
+   249→    <div className="mx-auto max-w-3xl space-y-4">
+   250→      {fresh.length > 0 && (
+   251→        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-rose-300">
+   252→          <Radio className="h-3.5 w-3.5 animate-pulse" aria-hidden /> Live
+   253→        </p>
+   254→      )}
+   255→      {fresh.map((event) => (
+   256→        <ActivityCard key={`live-${event.id}`} event={event} live />
+   257→      ))}
+   258→      {fresh.length > 0 && items.length > 0 && <div className="h-px bg-white/10" role="separator" />}
+   259→
+   260→      {items.length === 0 && fresh.length === 0 ? (
+   261→        <EmptyState
+   262→          icon={<Clapperboard className="h-6 w-6" aria-hidden />}
+   263→          title="Nothing here yet"
+   264→          message="Reviews, follows and watch parties all show up here as they happen. Be the first — follow someone or start a party."
+   265→          action={
+   266→            <Button variant="outline" className="border-white/15 bg-white/5 hover:bg-white/10" onClick={() => navigate('/home')}>
+   267→              Browse the library
+   268→            </Button>
+   269→          }
+   270→        />
+   271→      ) : (
+   272→        <ol className="space-y-3" aria-label="Social activity">
+   273→          {items.map((event, i) => (
+   274→            <li key={`${event.type}-${event.id}-${i}`}>
+   275→              <ActivityCard event={event} />
+   276→            </li>
+   277→          ))}
+   278→        </ol>
+   279→      )}
+   280→
+   281→      {activeCursor && (
+   282→        <div className="space-y-2 pt-1">
+   283→          {moreError && (
+   284→            <p className="text-center text-xs text-rose-300" role="alert">
+   285→              {moreError}
+   286→            </p>
+   287→          )}
+   288→          <Button
+   289→            type="button"
+   290→            variant="outline"
+   291→            onClick={() => void loadMore()}
+   292→            disabled={loadingMore}
+   293→            className="w-full border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   294→          >
+   295→            {loadingMore ? <Loader2 className="animate-spin" aria-hidden /> : <ChevronDown aria-hidden />}
+   296→            {loadingMore ? 'Loading…' : 'Load more'}
+   297→          </Button>
+   298→        </div>
+   299→      )}
+   300→    </div>
+   301→  );
+   302→}
+   303→
+   304→function ActivityCard({ event, live }: { event: ActivityEvent; live?: boolean }) {
+   305→  const meta = ACTIVITY_META[event.type] ?? ACTIVITY_META.comment;
+   306→  const Icon = meta.icon;
+   307→  const target = activityTarget(event);
+   308→
+   309→  return (
+   310→    <article
+   311→      className={cn(
+   312→        'flex gap-4 rounded-xl border bg-white/[0.03] p-4 transition-colors hover:border-white/20',
+   313→        live ? 'border-rose-500/30' : 'border-white/10',
+   314→      )}
+   315→    >
+   316→      <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl border', meta.chip)} aria-hidden>
+   317→        <Icon className="h-5 w-5" />
+   318→      </span>
+   319→      <div className="min-w-0 flex-1 space-y-2">
+   320→        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+   321→          <p className="min-w-0 text-sm text-zinc-400">
+   322→            {live && (
+   323→              <span className="mr-1.5 inline-flex items-center gap-1 rounded-full bg-rose-600 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-white">
+   324→                Live
+   325→              </span>
+   326→            )}
+   327→            <span className="font-semibold text-zinc-100">{event.user?.username}</span> {meta.verb}
+   328→            {target ? <span className="font-semibold text-zinc-100"> {target}</span> : null}
+   329→          </p>
+   330→          <time className="shrink-0 text-[11px] text-zinc-500" dateTime={event.createdat}>
+   331→            {timeAgo(event.createdat)}
+   332→          </time>
+   333→        </div>
+   334→        {event.content ? <ContentMiniCard content={event.content} /> : null}
+   335→        {event.preview ? <p className="line-clamp-2 break-words text-sm text-zinc-400">{event.preview}</p> : null}
+   336→      </div>
+   337→    </article>
+   338→  );
+   339→}
+   340→
+   341→function FeedSkeleton() {
+   342→  return (
+   343→    <div className="mx-auto max-w-3xl space-y-3" aria-busy="true" aria-label="Loading social feed">
+   344→      {Array.from({ length: 5 }).map((_, i) => (
+   345→        <div key={i} className="flex gap-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+   346→          <Skeleton className="h-10 w-10 shrink-0 rounded-xl" />
+   347→          <div className="flex-1 space-y-2">
+   348→            <Skeleton className="h-4 w-44" />
+   349→            <Skeleton className="h-3 w-20" />
+   350→            <Skeleton className="h-16 w-full rounded-lg" />
+   351→          </div>
+   352→        </div>
+   353→      ))}
+   354→    </div>
+   355→  );
+   356→}
+   357→
+   358→/* -------------------------------- people tab ------------------------------- */
+   359→
+   360→function PeopleTab() {
+   361→  const { user } = useAuth();
+   362→  const [query, setQuery] = useState('');
+   363→  const [debouncedQ, setDebouncedQ] = useState('');
+   364→  const [profileId, setProfileId] = useState<number | null>(null);
+   365→
+   366→  /* Debounced search (400 ms). */
+   367→  useEffect(() => {
+   368→    const timer = setTimeout(() => setDebouncedQ(query.trim()), 400);
+   369→    return () => clearTimeout(timer);
+   370→  }, [query]);
+   371→
+   372→  const people = useApi(
+   373→    `social-people-${debouncedQ.toLowerCase()}`,
+   374→    () => social.people(debouncedQ || undefined, 12),
+   375→    { enabled: !!user },
+   376→  );
+   377→  const following = useApi(`social-following-${user?.id ?? 'anon'}`, () => social.following(), { enabled: !!user });
+   378→
+   379→  /* Optimistic follow overrides shared by every list below. */
+   380→  const [overrides, setOverrides] = useState<Record<number, boolean>>({});
+   381→  const [busy, setBusy] = useState<Record<number, boolean>>({});
+   382→
+   383→  function isFollowing(u: SocialUserCard): boolean {
+   384→    return overrides[u.id] ?? u.isfollowing ?? false;
+   385→  }
+   386→
+   387→  async function toggleFollow(u: SocialUserCard) {
+   388→    if (!user) {
+   389→      toast('Sign in to follow people');
+   390→      navigate('/auth');
+   391→      return;
+   392→    }
+   393→    if (busy[u.id]) return;
+   394→    const next = !isFollowing(u);
+   395→    setOverrides((prev) => ({ ...prev, [u.id]: next }));
+   396→    setBusy((prev) => ({ ...prev, [u.id]: true }));
+   397→    try {
+   398→      await (next ? social.follow(u.id) : social.unfollow(u.id));
+   399→    } catch (err) {
+   400→      setOverrides((prev) => ({ ...prev, [u.id]: !next }));
+   401→      toast.error(err instanceof Error ? err.message : 'Could not update follows');
+   402→    } finally {
+   403→      setBusy((prev) => ({ ...prev, [u.id]: false }));
+   404→    }
+   405→  }
+   406→
+   407→  if (!user) {
+   408→    return (
+   409→      <SignInPrompt
+   410→        title="Sign in to find people"
+   411→        message="Follow reviewers with your taste — the People tab ranks the community so you can build your feed."
+   412→      />
+   413→    );
+   414→  }
+   415→
+   416→  return (
+   417→    <div className="space-y-8">
+   418→      <div className="mx-auto max-w-2xl">
+   419→        <div className="relative">
+   420→          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden />
+   421→          <label htmlFor="people-search" className="sr-only">
+   422→            Search people
+   423→          </label>
+   424→          <Input
+   425→            id="people-search"
+   426→            value={query}
+   427→            onChange={(e) => setQuery(e.target.value)}
+   428→            placeholder="Search people by username…"
+   429→            autoComplete="off"
+   430→            className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   431→          />
+   432→        </div>
+   433→      </div>
+   434→
+   435→      <Section
+   436→        title={debouncedQ ? `Results for “${debouncedQ}”` : 'Suggested people'}
+   437→        subtitle="Most active members of the community."
+   438→      >
+   439→        {people.loading && !people.data ? (
+   440→          <PeopleGridSkeleton />
+   441→        ) : people.error ? (
+   442→          <ErrorState message={people.error} onRetry={people.refetch} />
+   443→        ) : (people.data?.data ?? []).length === 0 ? (
+   444→          <EmptyState
+   445→            icon={<Users className="h-6 w-6" aria-hidden />}
+   446→            title={debouncedQ ? 'No one matches that search' : 'No people yet'}
+   447→            message={debouncedQ ? 'Try a different username.' : 'The community will show up here as people join.'}
+   448→          />
+   449→        ) : (
+   450→          <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="Suggested people">
+   451→            {(people.data?.data ?? []).map((u) => (
+   452→              <li key={u.id}>
+   453→                <PersonCard person={u} following={isFollowing(u)} busy={!!busy[u.id]} onToggle={() => void toggleFollow(u)} onOpen={() => setProfileId(u.id)} />
+   454→              </li>
+   455→            ))}
+   456→          </ul>
+   457→        )}
+   458→      </Section>
+   459→
+   460→      <Section title="You follow" subtitle="People whose activity fills your Feed tab.">
+   461→        {following.loading && !following.data ? (
+   462→          <div className="space-y-2" aria-busy="true">
+   463→            <Skeleton className="h-16 w-full rounded-xl" />
+   464→            <Skeleton className="h-16 w-full rounded-xl" />
+   465→          </div>
+   466→        ) : following.error ? (
+   467→          <ErrorState message={following.error} onRetry={following.refetch} compact />
+   468→        ) : (following.data?.data ?? []).length === 0 ? (
+   469→          <EmptyState
+   470→            icon={<UserPlus className="h-6 w-6" aria-hidden />}
+   471→            title="You don't follow anyone yet"
+   472→            message="Follow a few people above and their reviews, comments and parties will light up your feed."
+   473→          />
+   474→        ) : (
+   475→          <ul className="grid gap-3 sm:grid-cols-2" aria-label="People you follow">
+   476→            {(following.data?.data ?? []).map((u) => (
+   477→              <li key={u.id}>
+   478→                <PersonCard
+   479→                  person={u}
+   480→                  following={isFollowing(u)}
+   481→                  busy={!!busy[u.id]}
+   482→                  onToggle={() => void toggleFollow(u)}
+   483→                  onOpen={() => setProfileId(u.id)}
+   484→                />
+   485→              </li>
+   486→            ))}
+   487→          </ul>
+   488→        )}
+   489→      </Section>
+   490→
+   491→      <ProfileDialog
+   492→        userId={profileId}
+   493→        onClose={() => setProfileId(null)}
+   494→        isFollowing={(u) => isFollowing(u)}
+   495→        busy={(id) => !!busy[id]}
+   496→        onToggle={(u) => void toggleFollow(u)}
+   497→      />
+   498→    </div>
+   499→  );
+   500→}
+   501→
+   502→function PersonCard({
+   503→  person,
+   504→  following,
+   505→  busy,
+   506→  onToggle,
+   507→  onOpen,
+   508→}: {
+   509→  person: SocialUserCard;
+   510→  following: boolean;
+   511→  busy: boolean;
+   512→  onToggle: () => void;
+   513→  onOpen: () => void;
+   514→}) {
+   515→  return (
+   516→    <Card className="group border-white/10 bg-white/[0.03] transition-colors hover:border-white/20">
+   517→      <CardContent className="flex items-center gap-3 p-4">
+   518→        <button
+   519→          type="button"
+   520→          onClick={onOpen}
+   521→          aria-label={`Open ${person.username}'s profile`}
+   522→          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   523→        >
+   524→          <UserAvatar username={person.username} avatar={person.avatar} className="h-11 w-11 shrink-0" />
+   525→          <span className="min-w-0 flex-1">
+   526→            <span className="flex items-center gap-1.5">
+   527→              <span className="truncate text-sm font-bold text-zinc-100">{person.username}</span>
+   528→              <PlanBadge plan={person.plan} />
+   529→            </span>
+   530→            <span className="mt-0.5 block text-xs text-zinc-500">
+   531→              {person.followers} {person.followers === 1 ? 'follower' : 'followers'} · {person.reviews}{' '}
+   532→              {person.reviews === 1 ? 'review' : 'reviews'}
+   533→            </span>
+   534→          </span>
+   535→        </button>
+   536→        <Button
+   537→          type="button"
+   538→          size="sm"
+   539→          variant="outline"
+   540→          onClick={onToggle}
+   541→          disabled={busy}
+   542→          aria-pressed={following}
+   543→          className={cn(
+   544→            'shrink-0 font-semibold',
+   545→            following
+   546→              ? 'border-white/15 bg-white/5 text-zinc-300 hover:bg-white/10'
+   547→              : 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
+   548→          )}
+   549→        >
+   550→          {busy ? (
+   551→            <Loader2 className="animate-spin" aria-hidden />
+   552→          ) : following ? (
+   553→            <>
+   554→              <LogOut aria-hidden /> Unfollow
+   555→            </>
+   556→          ) : (
+   557→            <>
+   558→              <UserPlus aria-hidden /> Follow
+   559→            </>
+   560→          )}
+   561→        </Button>
+   562→      </CardContent>
+   563→    </Card>
+   564→  );
+   565→}
+   566→
+   567→function PeopleGridSkeleton() {
+   568→  return (
+   569→    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true" aria-label="Loading people">
+   570→      {Array.from({ length: 6 }).map((_, i) => (
+   571→        <Skeleton key={i} className="h-[76px] rounded-xl" />
+   572→      ))}
+   573→    </div>
+   574→  );
+   575→}
+   576→
+   577→/* ------------------------------ profile dialog ----------------------------- */
+   578→
+   579→function ProfileDialog({
+   580→  userId,
+   581→  onClose,
+   582→  isFollowing,
+   583→  busy,
+   584→  onToggle,
+   585→}: {
+   586→  userId: number | null;
+   587→  onClose: () => void;
+   588→  isFollowing: (u: SocialUserCard) => boolean;
+   589→  busy: (id: number) => boolean;
+   590→  onToggle: (u: SocialUserCard) => void;
+   591→}) {
+   592→  const profile = useApi(`social-profile-${userId ?? 0}`, () => social.userProfile(userId as number), {
+   593→    enabled: userId != null,
+   594→  });
+   595→
+   596→  const data: SocialUserProfile | null = userId != null ? profile.data : null;
+   597→  const person: SocialUserCard | null = data
+   598→    ? {
+   599→        id: data.user.id,
+   600→        username: data.user.username,
+   601→        avatar: data.user.avatar,
+   602→        plan: data.user.plan,
+   603→        followers: data.stats.followers,
+   604→        following: data.stats.following,
+   605→        reviews: data.stats.reviews,
+   606→        isfollowing: data.relation?.isfollowing ?? false,
+   607→      }
+   608→    : null;
+   609→
+   610→  return (
+   611→    <Dialog open={userId != null} onOpenChange={(open) => !open && onClose()}>
+   612→      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto border-white/10 bg-[#12121c] text-zinc-100 custom-scrollbar">
+   613→        {userId == null ? null : !data ? (
+   614→          profile.error ? (
+   615→            <div>
+   616→              <DialogTitle className="sr-only">Member profile</DialogTitle>
+   617→              <ErrorState message={profile.error} onRetry={profile.refetch} compact />
+   618→            </div>
+   619→          ) : (
+   620→            <div className="space-y-4" aria-busy="true" aria-label="Loading profile">
+   621→              <DialogTitle className="sr-only">Member profile</DialogTitle>
+   622→              <div className="flex items-center gap-3">
+   623→                <Skeleton className="h-14 w-14 rounded-full" />
+   624→                <div className="space-y-2">
+   625→                  <Skeleton className="h-5 w-36" />
+   626→                  <Skeleton className="h-3 w-24" />
+   627→                </div>
+   628→              </div>
+   629→              <Skeleton className="h-20 w-full rounded-xl" />
+   630→              <Skeleton className="h-32 w-full rounded-xl" />
+   631→            </div>
+   632→          )
+   633→        ) : !person ? null : (
+   634→          <>
+   635→            <DialogHeader>
+   636→              <div className="flex items-center gap-3">
+   637→                <UserAvatar username={data.user.username} avatar={data.user.avatar} className="h-14 w-14" />
+   638→                <div className="min-w-0 flex-1">
+   639→                  <DialogTitle className="flex flex-wrap items-center gap-2 truncate text-lg font-black text-white">
+   640→                    {data.user.username}
+   641→                    <PlanBadge plan={data.user.plan} />
+   642→                  </DialogTitle>
+   643→                  <DialogDescription className="mt-0.5">
+   644→                    Joined {new Date(data.user.createdat).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+   645→                    {data.relation?.followsme ? ' · follows you' : ''}
+   646→                  </DialogDescription>
+   647→                </div>
+   648→                <Button
+   649→                  type="button"
+   650→                  size="sm"
+   651→                  variant="outline"
+   652→                  onClick={() => onToggle(person)}
+   653→                  disabled={busy(person.id)}
+   654→                  aria-pressed={isFollowing(person)}
+   655→                  className={cn(
+   656→                    'shrink-0 font-semibold',
+   657→                    isFollowing(person)
+   658→                      ? 'border-white/15 bg-white/5 text-zinc-300 hover:bg-white/10'
+   659→                      : 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
+   660→                  )}
+   661→                >
+   662→                  {busy(person.id) ? (
+   663→                    <Loader2 className="animate-spin" aria-hidden />
+   664→                  ) : isFollowing(person) ? (
+   665→                    <>
+   666→                      <LogOut aria-hidden /> Unfollow
+   667→                    </>
+   668→                  ) : (
+   669→                    <>
+   670→                      <UserPlus aria-hidden /> Follow
+   671→                    </>
+   672→                  )}
+   673→                </Button>
+   674→              </div>
+   675→            </DialogHeader>
+   676→
+   677→            <div className="space-y-5">
+   678→              {/* Stats row */}
+   679→              <dl className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+   680→                {[
+   681→                  { label: 'Followers', value: data.stats.followers },
+   682→                  { label: 'Following', value: data.stats.following },
+   683→                  { label: 'Reviews', value: data.stats.reviews },
+   684→                  { label: 'Comments', value: data.stats.comments },
+   685→                  { label: 'Parties', value: data.stats.partiesHosted },
+   686→                ].map((s) => (
+   687→                  <div key={s.label} className="rounded-xl border border-white/10 bg-white/[0.03] p-2.5 text-center">
+   688→                    <dd className="text-base font-black text-zinc-100">{s.value}</dd>
+   689→                    <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{s.label}</dt>
+   690→                  </div>
+   691→                ))}
+   692→              </dl>
+   693→
+   694→              {/* Taste overlap */}
+   695→              {data.taste && (data.taste.score > 0 || data.taste.sharedGenres.length > 0) && (
+   696→                <div className="rounded-xl border border-rose-500/20 bg-rose-500/[0.06] p-4">
+   697→                  <p className="flex flex-wrap items-center gap-2 text-sm font-bold text-zinc-100">
+   698→                    <Sparkles className="h-4 w-4 text-rose-400" aria-hidden />
+   699→                    Taste overlap
+   700→                    <span className="rounded-full border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-bold text-rose-300">
+   701→                      {Math.round(data.taste.score * 100)}% match
+   702→                    </span>
+   703→                  </p>
+   704→                  {data.taste.sharedGenres.length > 0 && (
+   705→                    <div className="mt-2 flex flex-wrap gap-1.5">
+   706→                      {data.taste.sharedGenres.slice(0, 8).map((g) => (
+   707→                        <span
+   708→                          key={g}
+   709→                          className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-medium text-zinc-300"
+   710→                        >
+   711→                          {g}
+   712→                        </span>
+   713→                      ))}
+   714→                    </div>
+   715→                  )}
+   716→                </div>
+   717→              )}
+   718→
+   719→              {/* Recent reviews */}
+   720→              <Section title="Recent reviews">
+   721→                {data.recentReviews.length === 0 ? (
+   722→                  <p className="text-sm text-zinc-500">No reviews yet.</p>
+   723→                ) : (
+   724→                  <ul className="space-y-3">
+   725→                    {data.recentReviews.slice(0, 4).map((r) => (
+   726→                      <li key={r.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+   727→                        <div className="flex flex-wrap items-center gap-2">
+   728→                          <RatingPill rating={r.rating} />
+   729→                          {r.title ? <span className="text-sm font-semibold text-zinc-100">{r.title}</span> : null}
+   730→                          <span className="ml-auto text-[11px] text-zinc-500">{timeAgo(r.createdat)}</span>
+   731→                        </div>
+   732→                        <p className="mt-1.5 line-clamp-2 text-sm text-zinc-400">{r.body}</p>
+   733→                        <div className="mt-2">
+   734→                          <ContentMiniCard content={r.content} compact />
+   735→                        </div>
+   736→                      </li>
+   737→                    ))}
+   738→                  </ul>
+   739→                )}
+   740→              </Section>
+   741→
+   742→              {/* Recent activity */}
+   743→              <Section title="Recent activity">
+   744→                {data.recentActivity.length === 0 ? (
+   745→                  <p className="text-sm text-zinc-500">No recent activity.</p>
+   746→                ) : (
+   747→                  <ul className="space-y-1.5">
+   748→                    {data.recentActivity.slice(0, 5).map((a) => {
+   749→                      const meta = ACTIVITY_META[(a.type as ActivityType) ?? 'comment'] ?? ACTIVITY_META.comment;
+   750→                      const Icon = meta.icon;
+   751→                      return (
+   752→                        <li key={a.id} className="flex items-center gap-2.5 text-sm text-zinc-400">
+   753→                          <span className={cn('grid h-7 w-7 shrink-0 place-items-center rounded-lg border', meta.chip)} aria-hidden>
+   754→                            <Icon className="h-3.5 w-3.5" />
+   755→                          </span>
+   756→                          <span className="min-w-0 flex-1 truncate">
+   757→                            {meta.verb} {a.content ? <span className="font-semibold text-zinc-200">{a.content.title}</span> : null}
+   758→                          </span>
+   759→                          <span className="shrink-0 text-[11px] text-zinc-500">{timeAgo(a.createdat)}</span>
+   760→                        </li>
+   761→                      );
+   762→                    })}
+   763→                  </ul>
+   764→                )}
+   765→              </Section>
+   766→            </div>
+   767→          </>
+   768→        )}
+   769→      </DialogContent>
+   770→    </Dialog>
+   771→  );
+   772→}
+   773→
+   774→/* ------------------------------- reviews tab ------------------------------- */
+   775→
+   776→function ReviewsTab() {
+   777→  const { user } = useAuth();
+   778→  const reviews = useApi('social-recent-reviews', () => social.recentReviews(20));
+   779→
+   780→  /* Optimistic like toggles keyed by review id. */
+   781→  const [likes, setLikes] = useState<Record<number, { likes: number; liked: boolean }>>({});
+   782→  const [busy, setBusy] = useState<Record<number, boolean>>({});
+   783→
+   784→  async function toggleLike(id: number) {
+   785→    if (!user) {
+   786→      toast('Sign in to like reviews');
+   787→      navigate('/auth');
+   788→      return;
+   789→    }
+   790→    if (busy[id]) return;
+   791→    const current =
+   792→      likes[id] ??
+   793→      (() => {
+   794→        const r = reviews.data?.data.find((x) => x.id === id);
+   795→        return r ? { likes: r.likes, liked: r.liked } : null;
+   796→      })();
+   797→    if (!current) return;
+   798→    const next = { likes: current.liked ? current.likes - 1 : current.likes + 1, liked: !current.liked };
+   799→    setLikes((prev) => ({ ...prev, [id]: next }));
+   800→    setBusy((prev) => ({ ...prev, [id]: true }));
+   801→    try {
+   802→      const res = await social.likeReview(id);
+   803→      setLikes((prev) => ({ ...prev, [id]: { likes: res.likes, liked: res.liked } }));
+   804→    } catch (err) {
+   805→      setLikes((prev) => ({ ...prev, [id]: current }));
+   806→      toast.error(err instanceof Error ? err.message : 'Could not like the review');
+   807→    } finally {
+   808→      setBusy((prev) => ({ ...prev, [id]: false }));
+   809→    }
+   810→  }
+   811→
+   812→  if (reviews.loading && !reviews.data) {
+   813→    return (
+   814→      <div className="mx-auto max-w-3xl space-y-3" aria-busy="true" aria-label="Loading reviews">
+   815→        {Array.from({ length: 4 }).map((_, i) => (
+   816→          <Skeleton key={i} className="h-36 w-full rounded-xl" />
+   817→        ))}
+   818→      </div>
+   819→    );
+   820→  }
+   821→  if (reviews.error && !reviews.data) return <ErrorState message={reviews.error} onRetry={reviews.refetch} />;
+   822→
+   823→  const list = reviews.data?.data ?? [];
+   824→
+   825→  return (
+   826→    <div className="mx-auto max-w-3xl space-y-4">
+   827→      {list.length === 0 ? (
+   828→        <EmptyState
+   829→          icon={<Star className="h-6 w-6" aria-hidden />}
+   830→          title="No reviews yet"
+   831→          message="Open any title and share your verdict — the community's freshest reviews show up here."
+   832→          action={
+   833→            <Button variant="outline" className="border-white/15 bg-white/5 hover:bg-white/10" onClick={() => navigate('/home')}>
+   834→              Find something to review
+   835→            </Button>
+   836→          }
+   837→        />
+   838→      ) : (
+   839→        <ol className="space-y-3" aria-label="Recent community reviews">
+   840→          {list.map((r) => {
+   841→            const likeState = likes[r.id] ?? { likes: r.likes, liked: r.liked };
+   842→            return (
+   843→              <li key={r.id}>
+   844→                <article className="rounded-xl border border-white/10 bg-white/[0.03] p-4 transition-colors hover:border-white/20">
+   845→                  <div className="flex items-center gap-2.5">
+   846→                    <UserAvatar username={r.user.username} avatar={r.user.avatar} className="h-8 w-8" />
+   847→                    <div className="min-w-0 flex-1">
+   848→                      <p className="truncate text-sm font-bold text-zinc-100">{r.user.username}</p>
+   849→                      <p className="text-[11px] text-zinc-500">{timeAgo(r.createdat)}</p>
+   850→                    </div>
+   851→                    <RatingPill rating={r.rating} />
+   852→                  </div>
+   853→                  {r.title ? <p className="mt-2.5 text-sm font-semibold text-zinc-100">{r.title}</p> : null}
+   854→                  <p className="mt-1 line-clamp-3 break-words text-sm text-zinc-400">{r.body}</p>
+   855→                  <div className="mt-2.5">
+   856→                    <ContentMiniCard content={r.content} compact />
+   857→                  </div>
+   858→                  <div className="mt-2.5 flex items-center justify-between gap-3">
+   859→                    <Button
+   860→                      type="button"
+   861→                      variant="ghost"
+   862→                      size="sm"
+   863→                      onClick={() => void toggleLike(r.id)}
+   864→                      disabled={!!busy[r.id]}
+   865→                      aria-pressed={likeState.liked}
+   866→                      className={cn(
+   867→                        'gap-1.5 text-zinc-400 hover:bg-white/5 hover:text-white',
+   868→                        likeState.liked && 'text-rose-300 hover:text-rose-200',
+   869→                      )}
+   870→                    >
+   871→                      {busy[r.id] ? (
+   872→                        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+   873→                      ) : (
+   874→                        <Star className={cn('h-4 w-4', likeState.liked && 'fill-rose-400')} aria-hidden />
+   875→                      )}
+   876→                      {likeState.likes} {likeState.likes === 1 ? 'like' : 'likes'}
+   877→                    </Button>
+   878→                  </div>
+   879→                </article>
+   880→              </li>
+   881→            );
+   882→          })}
+   883→        </ol>
+   884→      )}
+   885→    </div>
+   886→  );
+   887→}
+   888→
+   889→/* ------------------------------- parties tab ------------------------------- */
+   890→
+   891→function PartiesTab() {
+   892→  const { user } = useAuth();
+   893→  const parties = useApi('social-parties', () => social.parties(20));
+   894→
+   895→  /* Auto-refresh every 30 s. */
+   896→  const partiesRef = useRef(parties.refetch);
+   897→  partiesRef.current = parties.refetch;
+   898→  useEffect(() => {
+   899→    const timer = setInterval(() => {
+   900→      partiesRef.current().catch(() => {});
+   901→    }, 30_000);
+   902→    return () => clearInterval(timer);
+   903→  }, []);
+   904→
+   905→  /* Join by code. */
+   906→  const [code, setCode] = useState('');
+   907→  const [joiningCode, setJoiningCode] = useState(false);
+   908→
+   909→  async function joinByCode() {
+   910→    const clean = code.trim().toUpperCase();
+   911→    if (clean.length !== 6 || joiningCode) return;
+   912→    if (!user) {
+   913→      toast('Sign in to join watch parties');
+   914→      navigate('/auth');
+   915→      return;
+   916→    }
+   917→    setJoiningCode(true);
+   918→    try {
+   919→      const res = await social.joinByCode(clean);
+   920→      navigate(`/social/party/${res.party.id}`);
+   921→    } catch (err) {
+   922→      toast.error(err instanceof Error ? err.message : 'Could not join with that code');
+   923→    } finally {
+   924→      setJoiningCode(false);
+   925→    }
+   926→  }
+   927→
+   928→  /* Join an active party. */
+   929→  const [joiningId, setJoiningId] = useState<number | null>(null);
+   930→
+   931→  async function joinParty(p: PartyCard) {
+   932→    if (!user) {
+   933→      toast('Sign in to join watch parties');
+   934→      navigate('/auth');
+   935→      return;
+   936→    }
+   937→    if (joiningId != null) return;
+   938→    setJoiningId(p.id);
+   939→    try {
+   940→      await social.partyJoin(p.id);
+   941→      navigate(`/social/party/${p.id}`);
+   942→    } catch (err) {
+   943→      toast.error(err instanceof Error ? err.message : 'Could not join the party');
+   944→    } finally {
+   945→      setJoiningId(null);
+   946→    }
+   947→  }
+   948→
+   949→  /* Start-a-party dialog. */
+   950→  const [startOpen, setStartOpen] = useState(false);
+   951→
+   952→  return (
+   953→    <div className="mx-auto max-w-3xl space-y-6">
+   954→      <div className="grid gap-3 sm:grid-cols-2">
+   955→        {/* Join by code */}
+   956→        <Card className="border-white/10 bg-white/[0.03]">
+   957→          <CardContent className="p-4">
+   958→            <p className="text-sm font-bold text-zinc-100">Join by code</p>
+   959→            <p className="mt-0.5 text-xs text-zinc-500">Got an invite code? Hop straight in.</p>
+   960→            <form
+   961→              className="mt-3 flex gap-2"
+   962→              onSubmit={(e) => {
+   963→                e.preventDefault();
+   964→                void joinByCode();
+   965→              }}
+   966→            >
+   967→              <label htmlFor="party-code" className="sr-only">
+   968→                Invite code
+   969→              </label>
+   970→              <Input
+   971→                id="party-code"
+   972→                value={code}
+   973→                onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
+   974→                placeholder="XXXXXX"
+   975→                autoComplete="off"
+   976→                maxLength={6}
+   977→                className="h-10 rounded-xl border-white/10 bg-black/40 font-mono text-sm font-bold tracking-[0.25em] text-zinc-100 placeholder:tracking-[0.25em] placeholder:text-zinc-600"
+   978→              />
+   979→              <Button
+   980→                type="submit"
+   981→                disabled={code.trim().length !== 6 || joiningCode}
+   982→                className="h-10 shrink-0 bg-rose-600 font-bold text-white hover:bg-rose-500"
+   983→              >
+   984→                {joiningCode ? <Loader2 className="animate-spin" aria-hidden /> : <LogIn aria-hidden />}
+   985→                Join
+   986→              </Button>
+   987→            </form>
+   988→          </CardContent>
+   989→        </Card>
+   990→
+   991→        {/* Start a party */}
+   992→        <Card className="border-white/10 bg-white/[0.03]">
+   993→          <CardContent className="flex h-full flex-col p-4">
+   994→            <p className="text-sm font-bold text-zinc-100">Start a watch party</p>
+   995→            <p className="mt-0.5 flex-1 text-xs text-zinc-500">
+   996→              Pick any library title, invite friends with the code, and watch in sync — you control the playback.
+   997→            </p>
+   998→            <Button
+   999→              type="button"
+  1000→              onClick={() => setStartOpen(true)}
+  1001→              className="mt-3 w-full bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1002→            >
+  1003→              <Users aria-hidden /> New watch party
+  1004→            </Button>
+  1005→          </CardContent>
+  1006→        </Card>
+  1007→      </div>
+  1008→
+  1009→      <Section title="Active parties" subtitle="Live rooms you can join right now.">
+  1010→        {parties.loading && !parties.data ? (
+  1011→          <div className="space-y-3" aria-busy="true" aria-label="Loading parties">
+  1012→            {Array.from({ length: 3 }).map((_, i) => (
+  1013→              <Skeleton key={i} className="h-24 w-full rounded-xl" />
+  1014→            ))}
+  1015→          </div>
+  1016→        ) : parties.error && !parties.data ? (
+  1017→          <ErrorState message={parties.error} onRetry={parties.refetch} />
+  1018→        ) : (parties.data?.data ?? []).length === 0 ? (
+  1019→          <EmptyState
+  1020→            icon={<Users className="h-6 w-6" aria-hidden />}
+  1021→            title="No active watch parties"
+  1022→            message="Start one above — pick a title, share the invite code and watch together in sync."
+  1023→          />
+  1024→        ) : (
+  1025→          <ul className="space-y-3" aria-label="Active watch parties">
+  1026→            {(parties.data?.data ?? []).map((p) => (
+  1027→              <li key={p.id}>
+  1028→                <article className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 transition-colors hover:border-white/20 sm:gap-4 sm:p-4">
+  1029→                  <span className="h-[72px] w-12 shrink-0 overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
+  1030→                    {p.content.thumbnail ? (
+  1031→                      <img src={p.content.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+  1032→                    ) : (
+  1033→                      <BrandPlaceholder title={p.content.title} />
+  1034→                    )}
+  1035→                  </span>
+  1036→                  <div className="min-w-0 flex-1">
+  1037→                    <div className="flex flex-wrap items-center gap-2">
+  1038→                      <p className="min-w-0 truncate text-sm font-bold text-zinc-100">{p.title}</p>
+  1039→                      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-300">
+  1040→                        <span className="relative flex h-1.5 w-1.5">
+  1041→                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
+  1042→                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-rose-400" />
+  1043→                        </span>
+  1044→                        Live
+  1045→                      </span>
+  1046→                    </div>
+  1047→                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+  1048→                      <span className="inline-flex items-center gap-1.5">
+  1049→                        <Crown className="h-3.5 w-3.5 text-amber-400" aria-hidden />
+  1050→                        <span className="font-semibold text-zinc-300">{p.host.username}</span>
+  1051→                      </span>
+  1052→                      <span className="inline-flex items-center gap-1">
+  1053→                        <Users className="h-3.5 w-3.5" aria-hidden /> {p.members}
+  1054→                      </span>
+  1055→                      <TypeBadge type={p.content.type} />
+  1056→                      <span>{timeAgo(p.createdat)}</span>
+  1057→                    </div>
+  1058→                  </div>
+  1059→                  <Button
+  1060→                    type="button"
+  1061→                    size="sm"
+  1062→                    onClick={() => void joinParty(p)}
+  1063→                    disabled={joiningId === p.id}
+  1064→                    className="shrink-0 bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1065→                  >
+  1066→                    {joiningId === p.id ? <Loader2 className="animate-spin" aria-hidden /> : <LogIn aria-hidden />}
+  1067→                    Join
+  1068→                  </Button>
+  1069→                </article>
+  1070→              </li>
+  1071→            ))}
+  1072→          </ul>
+  1073→        )}
+  1074→      </Section>
+  1075→
+  1076→      <StartPartyDialog open={startOpen} onOpenChange={setStartOpen} />
+  1077→    </div>
+  1078→  );
+  1079→}
+  1080→
+  1081→/* ---------------------------- start party dialog ---------------------------- */
+  1082→
+  1083→function StartPartyDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  1084→  const { user } = useAuth();
+  1085→  const [query, setQuery] = useState('');
+  1086→  const [debouncedQ, setDebouncedQ] = useState('');
+  1087→  const [results, setResults] = useState<DbContent[]>([]);
+  1088→  const [searching, setSearching] = useState(false);
+  1089→  const [creatingId, setCreatingId] = useState<number | null>(null);
+  1090→
+  1091→  useEffect(() => {
+  1092→    const timer = setTimeout(() => setDebouncedQ(query.trim()), 400);
+  1093→    return () => clearTimeout(timer);
+  1094→  }, [query]);
+  1095→
+  1096→  useEffect(() => {
+  1097→    if (!open) return;
+  1098→    let cancelled = false;
+  1099→    if (debouncedQ.length === 0) {
+  1100→      setResults([]);
+  1101→      return;
+  1102→    }
+  1103→    setSearching(true);
+  1104→    api
+  1105→      .all({ search: debouncedQ, limit: 12 })
+  1106→      .then((res) => {
+  1107→        if (!cancelled) setResults(res.data);
+  1108→      })
+  1109→      .catch(() => {
+  1110→        if (!cancelled) setResults([]);
+  1111→      })
+  1112→      .finally(() => {
+  1113→        if (!cancelled) setSearching(false);
+  1114→      });
+  1115→    return () => {
+  1116→      cancelled = true;
+  1117→    };
+  1118→  }, [debouncedQ, open]);
+  1119→
+  1120→  async function createParty(content: DbContent) {
+  1121→    if (!user || creatingId != null) return;
+  1122→    setCreatingId(content.id);
+  1123→    try {
+  1124→      const res = await social.createParty({ contentId: content.id });
+  1125→      toast.success('Watch party started — share your invite code');
+  1126→      onOpenChange(false);
+  1127→      navigate(`/social/party/${res.party.id}`);
+  1128→    } catch (err) {
+  1129→      toast.error(err instanceof Error ? err.message : 'Could not start the party');
+  1130→    } finally {
+  1131→      setCreatingId(null);
+  1132→    }
+  1133→  }
+  1134→
+  1135→  return (
+  1136→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1137→      <DialogContent className="max-h-[85vh] max-w-xl overflow-y-auto border-white/10 bg-[#12121c] text-zinc-100 custom-scrollbar">
+  1138→        <DialogHeader>
+  1139→          <DialogTitle className="text-lg font-black text-white">Start a watch party</DialogTitle>
+  1140→          <DialogDescription>
+  1141→            Pick a library title — you become the host and your playback syncs everyone in the room.
+  1142→          </DialogDescription>
+  1143→        </DialogHeader>
+  1144→
+  1145→        <div className="relative">
+  1146→          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden />
+  1147→          <label htmlFor="party-content-search" className="sr-only">
+  1148→            Search titles
+  1149→          </label>
+  1150→          <Input
+  1151→            id="party-content-search"
+  1152→            value={query}
+  1153→            onChange={(e) => setQuery(e.target.value)}
+  1154→            placeholder="Search the library…"
+  1155→            autoComplete="off"
+  1156→            className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+  1157→          />
+  1158→        </div>
+  1159→
+  1160→        <div className="min-h-[120px]">
+  1161→          {searching ? (
+  1162→            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" aria-busy="true" aria-label="Searching titles">
+  1163→              {Array.from({ length: 6 }).map((_, i) => (
+  1164→                <Skeleton key={i} className="h-[104px] rounded-xl" />
+  1165→              ))}
+  1166→            </div>
+  1167→          ) : debouncedQ.length === 0 ? (
+  1168→            <p className="py-8 text-center text-sm text-zinc-500">Type at least one character to search the library.</p>
+  1169→          ) : results.length === 0 ? (
+  1170→            <p className="py-8 text-center text-sm text-zinc-500">No titles match that search.</p>
+  1171→          ) : (
+  1172→            <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3" aria-label="Search results">
+  1173→              {results.map((c) => (
+  1174→                <li key={c.id}>
+  1175→                  <button
+  1176→                    type="button"
+  1177→                    onClick={() => void createParty(c)}
+  1178→                    disabled={creatingId != null}
+  1179→                    className="group flex w-full flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-2 text-left transition hover:border-rose-500/40 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60 disabled:opacity-60"
+  1180→                  >
+  1181→                    <span className="aspect-[2/3] w-full overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
+  1182→                      {c.thumbnail ? (
+  1183→                        <img src={c.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+  1184→                      ) : (
+  1185→                        <BrandPlaceholder title={c.title} />
+  1186→                      )}
+  1187→                    </span>
+  1188→                    <span className="line-clamp-2 text-xs font-semibold leading-tight text-zinc-100">{c.title}</span>
+  1189→                    <span className="flex items-center gap-1.5">
+  1190→                      <TypeBadge type={c.type} />
+  1191→                      {creatingId === c.id && <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-rose-400" aria-hidden />}
+  1192→                    </span>
+  1193→                  </button>
+  1194→                </li>
+  1195→              ))}
+  1196→            </ul>
+  1197→          )}
+  1198→        </div>
+  1199→      </DialogContent>
+  1200→    </Dialog>
+  1201→  );
+  1202→}
+  1203→
+  1204→/* ---------------------------------- AI tab --------------------------------- */
+  1205→
+  1206→function AiTab() {
+  1207→  const { user } = useAuth();
+  1208→  const home = useApi(`social-ai-home-${user?.id ?? 'anon'}`, () => social.aiHome(), { enabled: !!user });
+  1209→
+  1210→  if (!user) {
+  1211→    return (
+  1212→      <SignInPrompt
+  1213→        title="Sign in for social AI picks"
+  1214→        message="Friends-also-watched, taste matches and community favorites — computed from the people you follow."
+  1215→      />
+  1216→    );
+  1217→  }
+  1218→
+  1219→  if (home.loading && !home.data) {
+  1220→    return (
+  1221→      <div className="space-y-6" aria-busy="true" aria-label="Loading social AI picks">
+  1222→        <Skeleton className="h-6 w-52" />
+  1223→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+  1224→          {Array.from({ length: 4 }).map((_, i) => (
+  1225→            <Skeleton key={i} className="aspect-[2/3] rounded-xl" />
+  1226→          ))}
+  1227→        </div>
+  1228→        <Skeleton className="h-6 w-44" />
+  1229→        <Skeleton className="h-24 w-full rounded-xl" />
+  1230→      </div>
+  1231→    );
+  1232→  }
+  1233→  if (home.error && !home.data) return <ErrorState message={home.error} onRetry={home.refetch} />;
+  1234→
+  1235→  const data: SocialAiHome | null = home.data;
+  1236→  if (!data) return null;
+  1237→
+  1238→  const empty =
+  1239→    data.friendsAlsoWatched.length === 0 && data.tasteMatches.length === 0 && data.socialPicks.length === 0;
+  1240→
+  1241→  return (
+  1242→    <div className="space-y-10">
+  1243→      {empty && (
+  1244→        <EmptyState
+  1245→          icon={<Sparkles className="h-6 w-6" aria-hidden />}
+  1246→          title="No social picks yet"
+  1247→          message="Follow a few people and watch some titles — the AI cross-references your history with theirs to build these picks."
+  1248→        />
+  1249→      )}
+  1250→
+  1251→      {data.friendsAlsoWatched.length > 0 && (
+  1252→        <Section title="Friends also watched" subtitle="From the people you follow.">
+  1253→          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4" aria-label="Friends also watched">
+  1254→            {data.friendsAlsoWatched.map((item) => (
+  1255→              <li key={item.content.id}>
+  1256→                <AiContentCard
+  1257→                  contentId={item.content.id}
+  1258→                  title={item.content.title}
+  1259→                  type={item.content.type}
+  1260→                  thumbnail={item.content.thumbnail}
+  1261→                  reason={
+  1262→                    item.friendNames.length > 0
+  1263→                      ? `Because ${item.friendNames[0]}${item.friends > 1 ? ` and ${item.friends - 1} more` : ''} watched this`
+  1264→                      : null
+  1265→                  }
+  1266→                  rating={item.avgRating}
+  1267→                />
+  1268→              </li>
+  1269→            ))}
+  1270→          </ul>
+  1271→        </Section>
+  1272→      )}
+  1273→
+  1274→      {data.tasteMatches.length > 0 && (
+  1275→        <Section title="Your taste matches" subtitle="Members whose watch history overlaps with yours.">
+  1276→          <ul className="space-y-2.5" aria-label="Taste matches">
+  1277→            {data.tasteMatches.map((m) => (
+  1278→              <li
+  1279→                key={m.user.id}
+  1280→                className="flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3"
+  1281→              >
+  1282→                <UserAvatar username={m.user.username} avatar={m.user.avatar} className="h-10 w-10" />
+  1283→                <div className="min-w-0 flex-1">
+  1284→                  <p className="truncate text-sm font-bold text-zinc-100">{m.user.username}</p>
+  1285→                  <p className="text-xs text-zinc-500">
+  1286→                    {m.sharedTitles} shared {m.sharedTitles === 1 ? 'title' : 'titles'}
+  1287→                  </p>
+  1288→                  {m.genreOverlap.length > 0 && (
+  1289→                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+  1290→                      {m.genreOverlap.slice(0, 5).map((g) => (
+  1291→                        <span
+  1292→                          key={g}
+  1293→                          className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] font-medium text-zinc-300"
+  1294→                        >
+  1295→                          {g}
+  1296→                        </span>
+  1297→                      ))}
+  1298→                    </div>
+  1299→                  )}
+  1300→                </div>
+  1301→                <span className="shrink-0 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-bold text-rose-300">
+  1302→                  {Math.round(m.score * 100)}% match
+  1303→                </span>
+  1304→              </li>
+  1305→            ))}
+  1306→          </ul>
+  1307→        </Section>
+  1308→      )}
+  1309→
+  1310→      {data.socialPicks.length > 0 && (
+  1311→        <Section title="Community loved" subtitle="Highest-rated titles across the people you follow.">
+  1312→          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4" aria-label="Community loved">
+  1313→            {data.socialPicks.map((item) => (
+  1314→              <li key={item.content.id}>
+  1315→                <AiContentCard
+  1316→                  contentId={item.content.id}
+  1317→                  title={item.content.title}
+  1318→                  type={item.content.type}
+  1319→                  thumbnail={item.content.thumbnail}
+  1320→                  reason={
+  1321→                    item.reviewers.length > 0
+  1322→                      ? `Loved by ${item.reviewers.slice(0, 2).join(', ')}${item.reviewers.length > 2 ? ` +${item.reviewers.length - 2}` : ''}`
+  1323→                      : null
+  1324→                  }
+  1325→                  rating={item.avgRating}
+  1326→                  extra={
+  1327→                    item.reviewCount > 0 ? (
+  1328→                      <span className="text-[10px] text-zinc-500">
+  1329→                        {item.reviewCount} {item.reviewCount === 1 ? 'review' : 'reviews'}
+  1330→                      </span>
+  1331→                    ) : null
+  1332→                  }
+  1333→                />
+  1334→              </li>
+  1335→            ))}
+  1336→          </ul>
+  1337→        </Section>
+  1338→      )}
+  1339→    </div>
+  1340→  );
+  1341→}
+  1342→
+  1343→function AiContentCard({
+  1344→  contentId,
+  1345→  title,
+  1346→  type,
+  1347→  thumbnail,
+  1348→  reason,
+  1349→  rating,
+  1350→  extra,
+  1351→}: {
+  1352→  contentId: number;
+  1353→  title: string;
+  1354→  type: string;
+  1355→  thumbnail: string | null;
+  1356→  reason: string | null;
+  1357→  rating: number | null;
+  1358→  extra?: React.ReactNode;
+  1359→}) {
+  1360→  const [imgError, setImgError] = useState(false);
+  1361→  return (
+  1362→    <button
+  1363→      type="button"
+  1364→      onClick={() => navigate(`/content/${contentId}`)}
+  1365→      aria-label={`Open ${title}`}
+  1366→      className="group flex w-full flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-2 text-left transition hover:border-rose-500/40 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+  1367→    >
+  1368→      <span className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
+  1369→        {thumbnail && !imgError ? (
+  1370→          <img
+  1371→            src={thumbnail}
+  1372→            alt=""
+  1373→            loading="lazy"
+  1374→            onError={() => setImgError(true)}
+  1375→            className="h-full w-full object-cover transition group-hover:scale-[1.03]"
+  1376→          />
+  1377→        ) : (
+  1378→          <BrandPlaceholder title={title} />
+  1379→        )}
+  1380→        {rating != null && (
+  1381→          <span className="absolute right-1.5 top-1.5">
+  1382→            <RatingPill rating={Math.round(rating * 10) / 10} />
+  1383→          </span>
+  1384→        )}
+  1385→      </span>
+  1386→      <span className="line-clamp-2 text-xs font-semibold leading-tight text-zinc-100">{title}</span>
+  1387→      <span className="flex flex-wrap items-center gap-1.5">
+  1388→        <TypeBadge type={type} />
+  1389→        {extra}
+  1390→      </span>
+  1391→      {reason && <span className="line-clamp-2 text-[11px] leading-snug text-zinc-500">{reason}</span>}
+  1392→    </button>
+  1393→  );
+  1394→}
+  1395→
+  1396→export default SocialView;
+  1397→

@@ -1,0 +1,11 @@
+{
+  "name": "animaxia-stability",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FAZA 24 — Animaxia stability control plane (port 4060): autoscaling cu reguli exacte (backend CPU/latență/coadă, gateway per-regiune, 4 motoare AI), load balancing geo EU/US/ASIA cu fallback, failover + rolling deploy zero-downtime cu rollback automat, traffic shaping cu priorități și mesaje oneste. Echivalentul local rulabil al artefactelor de producție din animaxia-cloud/deploy/stability-faza24/. ZERO dependențe externe. Platforma protejată (FAZA 18/20/21/23, Neon FTS, 30B, FAZA 13/17, AI 15/16) este doar OBSERVATĂ și SUSȚINUTĂ — niciodată modificată.",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  }
+}

@@ -1,0 +1,51 @@
+$ bun --hot index.ts
+[edge] animaxia-edge-live UP — FAZA 28-E twin of Caddyfile.faza28-live
+[edge] upstreams: http://backend:4000, http://gateway:4040, http://observability:4050, http://stability:4060, http://realtime:4010, http://frontend:3000, redis://redis-global:4030
+[edge] :8080 redirect 308 → https://*:8443
+[edge] :8181 internal HTTP mirror (routing table = Caddyfile.faza28-live)
+[edge] :8443 public HTTPS edge — TLS 1.2+/1.3, ALPN h2+http/1.1, HSTS strict
+[edge] http:8181 GET /api/edge/status -> 200 (self 1ms)
+[edge] https:8443 GET /api/edge/health -> 200 (self 2ms)
+[edge] https:8443 GET /api/edge/health -> 200 (self 0ms)
+[edge] https:8443 GET /api/edge/health -> 200 (self 1ms)
+[edge] http:8181 GET /api/hub/browse -> 200 (http://gateway:4040 4ms)
+[edge] https:8443 GET /api/hub/browse -> 200 (http://gateway:4040 4ms)
+[edge] http:8181 GET /api/hub/browse?XTransformPort=8181 -> 200 (http://gateway:4040 2ms)
+[edge] http:8181 GET /api/hub/stats -> 200 (http://gateway:4040 2ms)
+[edge] https:8443 GET /api/hub/stats -> 200 (http://gateway:4040 3ms)
+[edge] http:8181 GET /api/hub/stats?XTransformPort=8181 -> 200 (http://gateway:4040 2ms)
+[edge] http:8181 GET /api/hub/genres -> 200 (http://gateway:4040 1ms)
+[edge] https:8443 GET /api/hub/genres -> 200 (http://gateway:4040 5ms)
+[edge] http:8181 GET /api/hub/genres?XTransformPort=8181 -> 200 (http://gateway:4040 1ms)
+[edge] http:8181 GET /api/hub/years -> 200 (http://gateway:4040 1ms)
+[edge] https:8443 GET /api/hub/years -> 200 (http://gateway:4040 15ms)
+[edge] http:8181 GET /api/hub/years?XTransformPort=8181 -> 200 (http://gateway:4040 2ms)
+[edge] http:8181 GET /api/hub/feed -> 200 (http://gateway:4040 2ms)
+[edge] https:8443 GET /api/hub/feed -> 200 (http://gateway:4040 2ms)
+[edge] http:8181 GET /api/hub/feed?XTransformPort=8181 -> 200 (http://gateway:4040 5ms)
+[edge] http:8181 GET /api/hub/recommendations -> 200 (http://gateway:4040 4ms)
+[edge] https:8443 GET /api/hub/recommendations -> 200 (http://gateway:4040 8ms)
+[edge] http:8181 GET /api/hub/recommendations?XTransformPort=8181 -> 200 (http://gateway:4040 4ms)
+[edge] https:8443 GET /api/hub/browse -> 200 (http://gateway:4040 2ms)
+[edge] https:8443 GET /api/hub/browse -> 200 (http://gateway:4040 2ms)
+[edge] http:8181 GET /api/edge/status -> 200 (self 0ms)
+[edge] http:8181 GET /api/edge/status -> 200 (self 0ms)
+error: socket hang up
+ code: "ECONNRESET"
+
+      at handshake (node:net:213:39)
+[edge] animaxia-edge-live UP — FAZA 28-E twin of Caddyfile.faza28-live
+[edge] upstreams: http://backend:4000, http://gateway:4040, http://observability:4050, http://stability:4060, http://realtime:4010, http://frontend:3000, redis://redis-global:4030
+[edge] :8080 redirect 308 → https://*:8443
+[edge] :8181 internal HTTP mirror (routing table = Caddyfile.faza28-live)
+46 |     }
+47 |   }
+48 |   let er;
+49 |   if (args.length > 0)
+50 |     er = args[0];
+51 |     throw er;
+                 ^
+error: Failed to listen at ::
+      at emitError (node:events:51:13)
+      at emitErrorNextTick (node:net:1401:12)
+error: script "dev" exited with code 1

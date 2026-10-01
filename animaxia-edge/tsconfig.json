@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "shared/**/*.ts",
+    "worker/src/**/*.ts",
+    "search/src/**/*.ts",
+    "ai/src/**/*.ts",
+    "auth/src/**/*.ts",
+    "player/src/**/*.ts",
+    "analytics/src/**/*.ts",
+    "cron/src/**/*.ts",
+    "tests/local-harness.ts"
+  ],
+  "exclude": ["node_modules", "tests/smoke-edge.mjs", "tests/e2e-edge.mjs", "scripts/lint.mjs"]
+}

@@ -1,0 +1,997 @@
+     1→#!/usr/bin/env bun
+     2→/**
+     3→ * tests/smoke-edge.mjs — hermetic smoke suite for the FAZA 8 Animaxia edge
+     4→ * layer. Runs the REAL worker modules (gateway + search + ai + auth + player
+     5→ * + analytics + cron) through tests/local-harness.ts against an in-process
+     6→ * stubbed cloud + HLS origin: no network, no Cloudflare credentials.
+     7→ *
+     8→ *   bun tests/smoke-edge.mjs        (from animaxia-edge/)
+     9→ *
+    10→ * Exits non-zero when any check fails.
+    11→ */
+    12→
+    13→import {
+    14→  makeEnv,
+    15→  edgeFetch,
+    16→  callWorker,
+    17→  consumeQueue,
+    18→  resetHarness,
+    19→  installFetchStub,
+    20→  installCaches,
+    21→  cachesStub,
+    22→  kvStore,
+    23→  r2Store,
+    24→  queue,
+    25→  rateLimiter,
+    26→  flushServiceWaitUntils,
+    27→  HarnessCtx,
+    28→} from './local-harness.ts';
+    29→import analyticsWorker from '../analytics/src/index.ts';
+    30→import cronWorker from '../cron/src/index.ts';
+    31→import searchWorker from '../search/src/index.ts';
+    32→import { edgeSignJwt } from '../shared/jwt.ts';
+    33→import { resetConfigCache } from '../shared/config.ts';
+    34→import { resetEdgeMetrics } from '../shared/metrics.ts'; // FAZA 9 ops
+    35→import {
+    36→  SHARD_HEADER,
+    37→  fnv1a,
+    38→  shardCountOf,
+    39→  computeShardIdFromContentId,
+    40→  computeShardIdFromTenant,
+    41→  resolveShardFromTenantOrContent,
+    42→  resolveShardOf,
+    43→  clientShardOf,
+    44→  shardKeySegment,
+    45→} from '../shared/shard.ts'; // FAZA 13 sharding
+    46→
+    47→/* ------------------------------------------------------------- reporting --- */
+    48→
+    49→let passed = 0;
+    50→let failed = 0;
+    51→const failures = [];
+    52→
+    53→function check(name, cond, extra = '') {
+    54→  if (cond) {
+    55→    passed += 1;
+    56→    console.log(`  ✓ ${name}`);
+    57→  } else {
+    58→    failed += 1;
+    59→    failures.push(`${name}${extra ? ` — ${extra}` : ''}`);
+    60→    console.log(`  ✗ ${name}${extra ? ` — ${extra}` : ''}`);
+    61→  }
+    62→}
+    63→
+    64→function suite(name) {
+    65→  console.log(`\n━ ${name}`);
+    66→}
+    67→
+    68→const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    69→const json = (data, status = 200, headers = {}) =>
+    70→  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...headers } });
+    71→
+    72→/* ------------------------------------------------------------ stub data ---- */
+    73→
+    74→const CATALOG = [
+    75→  { id: 1, type: 'anime', title: 'Naruto', metadata: { year: '2002', genres: ['action'], rating: 8.4 }, thumbnail: 'https://img/naruto.jpg' },
+    76→  { id: 2, type: 'anime', title: 'One Piece', metadata: { year: '1999', genres: ['adventure'], rating: 9.0 }, thumbnail: 'https://img/op.jpg' },
+    77→  { id: 3, type: 'anime', title: 'Attack on Titan', metadata: { year: '2013', rating: 9.1 }, thumbnail: 'https://img/aot.jpg' },
+    78→  { id: 4, type: 'movie', title: 'Big Buck Bunny', metadata: { year: '2008', rating: 7.5 }, thumbnail: 'https://img/bbb.jpg' },
+    79→  { id: 5, type: 'movie', title: 'Sintel', metadata: { year: '2010', rating: 8.0 }, thumbnail: 'https://img/sintel.jpg' },
+    80→  { id: 6, type: 'tv', title: 'Made in Korea', metadata: { year: '2026', rating: 7.9 }, thumbnail: 'https://img/mik.jpg' },
+    81→];
+    82→
+    83→const PLAYER_PAYLOAD = {
+    84→  content: { id: 1, title: 'Naruto', type: 'anime', thumbnail: 'https://img/naruto.jpg', rating: 8.4, year: 2002, overview: 'Ninja adventures.' },
+    85→  mode: 'hybrid',
+    86→  allowedTypes: ['m3u8', 'mp4', 'youtube'],
+    87→  sources: [
+    88→    { type: 'm3u8', url: 'https://test-streams.mux.dev/x/manifest.m3u8', label: 'HLS demo' },
+    89→    { type: 'mp4', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', label: 'MP4 demo' },
+    90→  ],
+    91→  primary: null,
+    92→  nextUp: null,
+    93→};
+    94→
+    95→const MASTER_M3U8 = [
+    96→  '#EXTM3U',
+    97→  '#EXT-X-VERSION:6',
+    98→  '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
+    99→  '360/playlist.m3u8',
+   100→  '',
+   101→].join('\n');
+   102→
+   103→const MEDIA_M3U8 = [
+   104→  '#EXTM3U',
+   105→  '#EXT-X-TARGETDURATION:10',
+   106→  '#EXTINF:9.0,',
+   107→  'seg0.ts',
+   108→  '#EXTINF:9.0,',
+   109→  'seg1.ts',
+   110→  '#EXT-X-ENDLIST',
+   111→  '',
+   112→].join('\n');
+   113→
+   114→const SEGMENT_BYTES = new Uint8Array(188 * 10).fill(0x47);
+   115→
+   116→/* ----------------------------------------------------------- stub cloud ---- */
+   117→
+   118→const cloud = {
+   119→  calls: [],
+   120→  failPaths: new Set(),
+   121→  counts: {},
+   122→};
+   123→
+   124→function cloudCount(path) {
+   125→  return cloud.calls.filter((c) => c.path === path).length;
+   126→}
+   127→
+   128→function resetCloud() {
+   129→  cloud.calls = [];
+   130→  cloud.failPaths.clear();
+   131→  cloud.counts = {};
+   132→}
+   133→
+   134→async function cloudHandler({ url, method, headers, bodyText }) {
+   135→  const path = url.pathname;
+   136→  cloud.calls.push({ path: `${path}${url.search}`, method, shard: headers.get(SHARD_HEADER) }); // FAZA 13: shard header seen upstream
+   137→
+   138→  if (cloud.failPaths.has(path)) {
+   139→    return json({ error: 'forced_failure' }, 503);
+   140→  }
+   141→  if (path === '/api/health') return json({ status: 'ok', service: 'animaxia-backend', db: { connected: true, totalItems: 78 } });
+   142→  if (path === '/api/all') return json({ data: CATALOG, totalPages: 1, total: CATALOG.length });
+   143→  if (path === '/api/search/advanced') return json({ took: 1, total: CATALOG.length, max_score: 5, data: CATALOG.slice(0, 5) });
+   144→  if (path === '/api/search/autocomplete') {
+   145→    return json({ suggestions: CATALOG.slice(0, 5).map(({ id, title, type, thumbnail }) => ({ id, title, type, thumbnail })) });
+   146→  }
+   147→  if (path === '/api/auth/login' || path === '/api/auth/register') {
+   148→    return json({ ok: true, user: { id: 42, email: 'smoke@animaxia.io', plan: 'free' }, accessToken: 'stub-access', refreshToken: 'stub-refresh-1', expiresIn: 900 });
+   149→  }
+   150→  if (path === '/api/auth/refresh') {
+   151→    const body = JSON.parse((await bodyText()) || '{}');
+   152→    return json({ ok: true, accessToken: `rotated-${body.refreshToken}`, refreshToken: 'new-refresh', expiresIn: 900 });
+   153→  }
+   154→  if (path === '/api/auth/logout') return json({ ok: true, revoked: true });
+   155→  if (path === '/api/auth/me') return json({ user: { id: 42, email: 'smoke@animaxia.io' }, stats: { watchlist: 0, history: 0, comments: 0 } });
+   156→  if (path === '/api/mobile/player/1') return json(PLAYER_PAYLOAD);
+   157→  if (path === '/api/analytics/views') return json({ ok: true });
+   158→  if (path === '/api/ai/rag/recommend' || path === '/api/ai/rag/chat') return json({ ok: true, provider: 'stub', data: CATALOG.slice(0, 3) });
+   159→  if (path === '/api/ai/assistant') {
+   160→    return new Response('data: {"t":"hello"}\n\ndata: [DONE]\n\n', {
+   161→      status: 200,
+   162→      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+   163→    });
+   164→  }
+   165→  if (path === '/api/ai/cloud/status') return json({ ok: true, provider: 'stub', degraded: false });
+   166→  if (path === '/api/ai/tools') return json({ ok: true, tools: [] });
+   167→  if (path === '/api/vector/search') return json({ ok: true, backend: 'stub', dims: 384, took: 3, data: [{ id: 1, title: 'Naruto', score: 0.92 }] });
+   168→  if (path === '/api/movies' || path === '/api/anime') return json({ data: [] });
+   169→  if (path === '/api/workers/refresh') return json({ ok: true, refreshed: [] });
+   170→  // FAZA 12 (miner) stubs: scheduling returns immediately with the tenant
+   171→  // count; status is the public health snapshot.
+   172→  if (path === '/api/miner/jobs') return json({ ok: true, allTenants: true, count: 3 }, 201);
+   173→  if (path === '/api/miner/status') return json({ ok: true, service: 'animaxia-miner', pool: { maxConcurrent: 2, running: 0 }, jobs: { byStatus: { done: 3 } } });
+   174→  return json({ error: 'stub_not_found', path }, 404);
+   175→}
+   176→
+   177→const hlsState = { segmentCalls: 0 };
+   178→
+   179→async function hlsHandler({ url }) {
+   180→  if (url.pathname === '/x/manifest.m3u8') {
+   181→    return new Response(MASTER_M3U8, { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl' } });
+   182→  }
+   183→  if (url.pathname === '/x/360/playlist.m3u8') {
+   184→    return new Response(MEDIA_M3U8, { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl' } });
+   185→  }
+   186→  if (url.pathname.endsWith('.ts')) {
+   187→    hlsState.segmentCalls += 1;
+   188→    return new Response(SEGMENT_BYTES, { status: 200, headers: { 'content-type': 'video/mp2t' } });
+   189→  }
+   190→  return new Response('not found', { status: 404 });
+   191→}
+   192→
+   193→/* ----------------------------------------------------------------- main ---- */
+   194→
+   195→const ADMIN_JWT = 'smoke-admin-jwt';
+   196→const INTERNAL_TOKEN = 'smoke-internal-token';
+   197→const JWT_SECRET = 'smoke-secret-1';
+   198→
+   199→async function setConfig(patch) {
+   200→  await kvStore('EDGE_CONFIG').setJson('config', patch);
+   201→  resetConfigCache();
+   202→}
+   203→
+   204→async function clearConfig() {
+   205→  await kvStore('EDGE_CONFIG').delete('config');
+   206→  resetConfigCache();
+   207→}
+   208→
+   209→async function main() {
+   210→  console.log('Animaxia Edge — smoke suite (hermetic, real worker code, stub cloud)');
+   211→  resetHarness();
+   212→
+   213→  const env = makeEnv({
+   214→    env: { JWT_SECRET, EDGE_ADMIN_JWT: ADMIN_JWT, EDGE_INTERNAL_TOKEN: INTERNAL_TOKEN },
+   215→  });
+   216→
+   217→  const restoreFetch = installFetchStub({
+   218→    '127.0.0.1': cloudHandler,
+   219→    'test-streams.mux.dev': hlsHandler,
+   220→  });
+   221→  const restoreCaches = installCaches(cachesStub());
+   222→
+   223→  try {
+   224→    /* ============================================== 1. gateway basics ==== */
+   225→    suite('1. gateway basics');
+   226→    {
+   227→      let { response } = await edgeFetch(env, '/');
+   228→      check('GET / → 200 gateway info', response.status === 200);
+   229→      let body = await response.json();
+   230→      check('gateway identity', body.ok === true && body.worker === 'animaxia-edge-gateway');
+   231→
+   232→      ({ response } = await edgeFetch(env, '/edge/health'));
+   233→      check('GET /edge/health → 200', response.status === 200);
+   234→
+   235→      ({ response } = await edgeFetch(env, '/edge/status'));
+   236→      body = await response.json();
+   237→      check(
+   238→        '/edge/status lists all 5 service bindings',
+   239→        body.bindings.services.length === 5 && body.bindings.services.includes('SVC_AI'),
+   240→      );
+   241→      check('/edge/status exposes cache config', body.config.cache.ttlSec === 60);
+   242→      check('/edge/status exposes rate limits', body.config.rateLimit.ipPerMin === 600);
+   243→
+   244→      ({ response } = await edgeFetch(env, '/definitely-not-a-route'));
+   245→      check('unknown route → 404 not_found', response.status === 404);
+   246→
+   247→      ({ response } = await edgeFetch(env, '/api/all', { method: 'OPTIONS' }));
+   248→      check('CORS preflight → 204', response.status === 204);
+   249→      check('CORS preflight allow-origin *', response.headers.get('access-control-allow-origin') === '*');
+   250→
+   251→      ({ response } = await edgeFetch(env, '/edge/health'));
+   252→      check('security header nosniff', response.headers.get('x-content-type-options') === 'nosniff');
+   253→      check('x-request-id present', (response.headers.get('x-request-id') || '').startsWith('edge-'));
+   254→      check('x-ratelimit-limit present', response.headers.get('x-ratelimit-limit') !== null);
+   255→      check('referrer policy hardened', response.headers.get('referrer-policy') === 'strict-origin-when-cross-origin');
+   256→    }
+   257→
+   258→    /* ======================================================== 2. WAF ==== */
+   259→    suite('2. WAF rules');
+   260→    {
+   261→      let { response, ctx } = await edgeFetch(env, '/api/all', { headers: { 'user-agent': 'curl/8.4.0' } });
+   262→      check('bot UA blocked (403)', response.status === 403);
+   263→      let body = await response.json();
+   264→      check('bot block code + rule', body.error === 'waf_blocked' && body.rule === 'bot');
+   265→      check('x-edge-waf header', response.headers.get('x-edge-waf') === 'bot');
+   266→      await ctx.flush();
+   267→
+   268→      ({ response } = await edgeFetch(env, `/api/search?q=${encodeURIComponent("' OR '1'='1")}`));
+   269→      body = await response.json();
+   270→      check('SQLi blocked', response.status === 403 && body.rule === 'sqli');
+   271→
+   272→      ({ response } = await edgeFetch(env, `/api/search?q=${encodeURIComponent('<script>alert(1)</script>')}`));
+   273→      body = await response.json();
+   274→      check('XSS blocked', response.status === 403 && body.rule === 'xss');
+   275→
+   276→      ({ response } = await edgeFetch(env, '/media/%2e%2e%2fetc/passwd'));
+   277→      body = await response.json();
+   278→      check('path traversal blocked', response.status === 403 && body.rule === 'traversal');
+   279→
+   280→      ({ response } = await edgeFetch(env, '/api/search?q=%00'));
+   281→      body = await response.json();
+   282→      check('null byte blocked', response.status === 403 && body.rule === 'null-byte');
+   283→
+   284→      ({ response } = await edgeFetch(env, `/api/search?q=${'a'.repeat(9000)}`));
+   285→      body = await response.json();
+   286→      check('oversized query blocked', response.status === 403 && body.rule === 'query-size');
+   287→
+   288→      resetCloud();
+   289→      ({ response } = await edgeFetch(env, `/api/search/advanced?q=${encodeURIComponent("O'Reilly")}`));
+   290→      check("benign \"O'Reilly\" passes the WAF", response.status === 200);
+   291→      ({ response } = await edgeFetch(env, `/api/search/advanced?q=${encodeURIComponent('one or two')}`));
+   292→      check('benign "one or two" passes the WAF', response.status === 200);
+   293→
+   294→      ({ response } = await edgeFetch(env, '/edge/waf/events'));
+   295→      check('WAF events admin requires auth', response.status === 401);
+   296→      ({ response } = await edgeFetch(env, '/edge/waf/events', { headers: { authorization: `Bearer ${ADMIN_JWT}` } }));
+   297→      body = await response.json();
+   298→      check('WAF events recorded + readable', response.status === 200 && body.events.length >= 1);
+   299→    }
+   300→
+   301→    /* ================================================ 3. rate limiting ==== */
+   302→    suite('3. global rate limiting (per-IP + per-user + heavy)');
+   303→    {
+   304→      await setConfig({ rateLimit: { ipPerMin: 3, userPerMin: 100, heavyPerMin: 100 } });
+   305→      rateLimiter().reset();
+   306→
+   307→      let last;
+   308→      for (let i = 0; i < 4; i += 1) {
+   309→        last = await edgeFetch(env, '/edge/health', { headers: { 'x-forwarded-for': '9.9.9.9' } });
+   310→      }
+   311→      check('4th request from one IP → 429', last.response.status === 429);
+   312→      check('429 body is rate_limited', (await last.response.json()).error === 'rate_limited');
+   313→      check('Retry-After present', Number(last.response.headers.get('retry-after')) >= 1);
+   314→      check('X-RateLimit-Limit echoes the limit', last.response.headers.get('x-ratelimit-limit') === '3');
+   315→
+   316→      await setConfig({ rateLimit: { ipPerMin: 600, userPerMin: 2, heavyPerMin: 100 } });
+   317→      rateLimiter().reset();
+   318→      const token = await edgeSignJwt({ sub: 42, email: 'smoke@animaxia.io', plan: 'free', typ: 'access' }, JWT_SECRET, 900);
+   319→      for (let i = 0; i < 3; i += 1) {
+   320→        last = await edgeFetch(env, '/edge/health', {
+   321→          headers: { 'x-forwarded-for': '8.8.8.8', authorization: `Bearer ${token}` },
+   322→        });
+   323→      }
+   324→      check('3rd authenticated request → 429 (per-user)', last.response.status === 429);
+   325→      check('per-user limit echoed', last.response.headers.get('x-ratelimit-limit') === '2');
+   326→
+   327→      await setConfig({ rateLimit: { ipPerMin: 600, userPerMin: 100, heavyPerMin: 2 } });
+   328→      rateLimiter().reset();
+   329→      for (let i = 0; i < 3; i += 1) {
+   330→        last = await edgeFetch(env, '/ai/embeddings', {
+   331→          method: 'POST',
+   332→          headers: { 'x-forwarded-for': '7.7.7.7', 'content-type': 'application/json' },
+   333→          body: JSON.stringify({ text: 'x' }),
+   334→        });
+   335→      }
+   336→      check('anonymous heavy path → per-IP heavy 429', last.response.status === 429);
+   337→      check('heavy limit echoed', last.response.headers.get('x-ratelimit-limit') === '2');
+   338→
+   339→      await clearConfig();
+   340→      rateLimiter().reset();
+   341→    }
+   342→
+   343→    /* ============================================ 4. cache: SWR + SIE ==== */
+   344→    suite('4. edge cache: MISS → HIT → STALE (SWR) → STALE-ERROR (SIE)');
+   345→    {
+   346→      await setConfig({ edge: { cacheTtlSec: 1, swrSec: 1, staleIfErrorSec: 86400 } });
+   347→      resetCloud();
+   348→
+   349→      let { response } = await edgeFetch(env, '/api/health');
+   350→      check('first GET /api/health → MISS', response.headers.get('x-edge-cache') === 'MISS');
+   351→      check('upstream body served', (await response.json()).db.totalItems === 78);
+   352→      check('cloud called once', cloudCount('/api/health') === 1);
+   353→
+   354→      ({ response } = await edgeFetch(env, '/api/health'));
+   355→      check('second GET → HIT', response.headers.get('x-edge-cache') === 'HIT');
+   356→      check('no extra upstream call on HIT', cloudCount('/api/health') === 1);
+   357→
+   358→      cloud.failPaths.add('/api/health');
+   359→      await sleep(1100); // beyond the 1s fresh window, inside the 1s SWR window
+   360→      ({ response } = await edgeFetch(env, '/api/health'));
+   361→      check('origin failing within SWR → STALE served', response.headers.get('x-edge-cache') === 'STALE');
+   362→      check('STALE body still complete', (await response.json()).status === 'ok');
+   363→
+   364→      await sleep(1100); // beyond SWR → blocking revalidation → origin still failing
+   365→      ({ response } = await edgeFetch(env, '/api/health'));
+   366→      check('beyond SWR + origin down → STALE-ERROR', response.headers.get('x-edge-cache') === 'STALE-ERROR');
+   367→      check('SIE body still complete', (await response.json()).status === 'ok');
+   368→
+   369→      cloud.failPaths.delete('/api/health');
+   370→      await clearConfig();
+   371→
+   372→      resetCloud();
+   373→      const token = await edgeSignJwt({ sub: 42, typ: 'access' }, JWT_SECRET, 900);
+   374→      ({ response } = await edgeFetch(env, '/api/all', { headers: { authorization: `Bearer ${token}` } }));
+   375→      check('authorized GET bypasses the cache', response.status === 200 && response.headers.get('x-edge-cache') === null);
+   376→      check('bypass still reaches the cloud', cloudCount('/api/all') === 1);
+   377→    }
+   378→
+   379→    /* ================================================= 5. R2 media ======== */
+   380→    suite('5. R2 media (/media/*)');
+   381→    {
+   382→      const mp4 = new Uint8Array(2048).fill(7);
+   383→      await r2Store('MEDIA_BUCKET').putBytes('offline-test.mp4', mp4, { contentType: 'video/mp4' });
+   384→      await r2Store('MEDIA_BUCKET').putBytes('thumbnails/poster.jpg', new Uint8Array(100).fill(3), { contentType: 'image/jpeg' });
+   385→
+   386→      let { response } = await edgeFetch(env, '/media/offline-test.mp4');
+   387→      check('GET offline-test.mp4 → 200', response.status === 200);
+   388→      check('content-type video/mp4', response.headers.get('content-type') === 'video/mp4');
+   389→      check('content-length 2048', response.headers.get('content-length') === '2048');
+   390→      check('accept-ranges bytes', response.headers.get('accept-ranges') === 'bytes');
+   391→      check('etag present', (response.headers.get('etag') || '') !== '');
+   392→      check('immutable-ish cache-control', (response.headers.get('cache-control') || '').includes('max-age=86400'));
+   393→
+   394→      ({ response } = await edgeFetch(env, '/media/offline-test.mp4', { method: 'HEAD' }));
+   395→      check('HEAD → 200 with length', response.status === 200 && response.headers.get('content-length') === '2048');
+   396→
+   397→      ({ response } = await edgeFetch(env, '/media/offline-test.mp4', { headers: { range: 'bytes=0-99' } }));
+   398→      check('range 0-99 → 206', response.status === 206);
+   399→      check('content-range correct', response.headers.get('content-range') === 'bytes 0-99/2048');
+   400→      check('partial length 100', response.headers.get('content-length') === '100');
+   401→
+   402→      ({ response } = await edgeFetch(env, '/media/offline-test.mp4', { headers: { range: 'bytes=-50' } }));
+   403→      check('suffix range → 206 (last 50 bytes)', response.status === 206 && response.headers.get('content-length') === '50');
+   404→
+   405→      ({ response } = await edgeFetch(env, '/media/offline-test.mp4', { headers: { range: 'bytes=999999-' } }));
+   406→      check('unsatisfiable range → 416', response.status === 416);
+   407→
+   408→      ({ response } = await edgeFetch(env, '/media/missing.bin'));
+   409→      check('missing object → 404 media_not_found', response.status === 404);
+   410→
+   411→      ({ response } = await edgeFetch(env, '/media/thumbnails/poster.jpg'));
+   412→      check('nested thumbnail key → 200 image/jpeg', response.status === 200 && response.headers.get('content-type') === 'image/jpeg');
+   413→    }
+   414→
+   415→    /* ================================================ 6. edge search ===== */
+   416→    suite('6. edge search (fuzzy + autocomplete)');
+   417→    {
+   418→      let { response } = await edgeFetch(env, '/search?q=naruto');
+   419→      check('GET /search?q=naruto → 200', response.status === 200);
+   420→      check('served from the edge', response.headers.get('x-edge-search') === 'edge');
+   421→      let body = await response.json();
+   422→      check('results source=edge', body.source === 'edge');
+   423→      check('top result is Naruto', body.results[0]?.id === 1 && body.results[0]?.title === 'Naruto');
+   424→      check('scores are numbers > 0', typeof body.results[0]?.score === 'number' && body.results[0].score > 0);
+   425→
+   426→      ({ response } = await edgeFetch(env, '/search?q=narutp'));
+   427→      body = await response.json();
+   428→      check('fuzzy: "narutp" still finds Naruto', body.results.some((r) => r.title === 'Naruto'));
+   429→
+   430→      ({ response } = await edgeFetch(env, '/search?q=zzzzzzzz'));
+   431→      body = await response.json();
+   432→      check('no match → empty results', body.results.length === 0);
+   433→
+   434→      ({ response } = await edgeFetch(env, '/search'));
+   435→      check('missing q → 400 bad_query', response.status === 400);
+   436→
+   437→      ({ response } = await edgeFetch(env, `/search?q=${'x'.repeat(200)}`));
+   438→      check('oversized q → 400', response.status === 400);
+   439→
+   440→      ({ response } = await edgeFetch(env, '/autocomplete?q=bi'));
+   441→      body = await response.json();
+   442→      check('autocomplete "bi" → Big Buck Bunny first', body.suggestions[0]?.title === 'Big Buck Bunny');
+   443→
+   444→      ({ response } = await edgeFetch(env, '/search/health'));
+   445→      body = await response.json();
+   446→      check('catalog snapshot has all 6 items', body.catalog?.items === 6);
+   447→
+   448→      ({ response } = await edgeFetch(env, '/search/refresh', { method: 'POST' }));
+   449→      check('refresh requires admin auth', response.status === 401);
+   450→      ({ response } = await edgeFetch(env, '/search/refresh', {
+   451→        method: 'POST',
+   452→        headers: { authorization: `Bearer ${ADMIN_JWT}` },
+   453→      }));
+   454→      body = await response.json();
+   455→      check('authorized refresh rebuilds the catalog', response.status === 200 && body.items === 6);
+   456→    }
+   457→
+   458→    /* ================================================== 7. edge auth ====== */
+   459→    suite('7. edge auth (verify / replay / device / refresh guard)');
+   460→    {
+   461→      const valid = await edgeSignJwt({ sub: 42, email: 'smoke@animaxia.io', plan: 'free', typ: 'access' }, JWT_SECRET, 900);
+   462→
+   463→      let { response } = await edgeFetch(env, '/auth/verify');
+   464→      check('verify without token → 401 auth_missing', response.status === 401 && (await response.json()).error === 'auth_missing');
+   465→
+   466→      ({ response } = await edgeFetch(env, '/auth/verify', { headers: { authorization: `Bearer ${valid}` } }));
+   467→      check('verify valid token → 200', response.status === 200);
+   468→      let body = await response.json();
+   469→      check('verify returns the user', body.user?.sub === 42 && body.user?.plan === 'free');
+   470→      check('verify reports all checks', body.checks?.signature === true && !!body.checks?.replay);
+   471→
+   472→      const expired = await edgeSignJwt({ sub: 42, typ: 'access' }, JWT_SECRET, -10);
+   473→      ({ response } = await edgeFetch(env, '/auth/verify', { headers: { authorization: `Bearer ${expired}` } }));
+   474→      check('expired token → 401 auth_expired', response.status === 401 && (await response.json()).error === 'auth_expired');
+   475→
+   476→      ({ response } = await edgeFetch(env, '/auth/verify', { headers: { authorization: `Bearer ${valid}x` } }));
+   477→      check('tampered signature → 401 auth_invalid', response.status === 401 && (await response.json()).error === 'auth_invalid');
+   478→
+   479→      // device-bound wrapper tokens (jti + dvp)
+   480→      ({ response } = await edgeFetch(env, '/auth/device/token', {
+   481→        method: 'POST',
+   482→        headers: { authorization: `Bearer ${valid}`, 'content-type': 'application/json' },
+   483→        body: JSON.stringify({ deviceId: 'dev-1' }),
+   484→      }));
+   485→      check('mint device token → 200', response.status === 200);
+   486→      body = await response.json();
+   487→      check('device token is device-bound', body.deviceBound === true && typeof body.token === 'string');
+   488→
+   489→      ({ response } = await edgeFetch(env, '/auth/verify', {
+   490→        headers: { authorization: `Bearer ${body.token}`, 'x-animaxia-device': 'dev-1' },
+   491→      }));
+   492→      check('device token verifies with matching header', response.status === 200);
+   493→
+   494→      ({ response } = await edgeFetch(env, '/auth/verify', {
+   495→        headers: { authorization: `Bearer ${body.token}`, 'x-animaxia-device': 'dev-1' },
+   496→      }));
+   497→      check('second presentation → 401 auth_replay (anti-replay)', response.status === 401 && (await response.json()).error === 'auth_replay');
+   498→
+   499→      const second = await (await edgeFetch(env, '/auth/device/token', {
+   500→        method: 'POST',
+   501→        headers: { authorization: `Bearer ${valid}`, 'content-type': 'application/json' },
+   502→        body: JSON.stringify({ deviceId: 'dev-1' }),
+   503→      })).response.json();
+   504→      ({ response } = await edgeFetch(env, '/auth/verify', {
+   505→        headers: { authorization: `Bearer ${second.token}`, 'x-animaxia-device': 'dev-2' },
+   506→      }));
+   507→      check('device hash mismatch → 401 auth_device', response.status === 401 && (await response.json()).error === 'auth_device');
+   508→
+   509→      // refresh replay guard
+   510→      ({ response } = await edgeFetch(env, '/auth/refresh', {
+   511→        method: 'POST',
+   512→        headers: { 'content-type': 'application/json' },
+   513→        body: JSON.stringify({ refreshToken: 'rt-abc' }),
+   514→      }));
+   515→      check('refresh passthrough → 200 rotated', response.status === 200 && response.headers.get('x-edge-auth') === 'refresh-rotated');
+   516→      await flushServiceWaitUntils();
+   517→      ({ response } = await edgeFetch(env, '/auth/refresh', {
+   518→        method: 'POST',
+   519→        headers: { 'content-type': 'application/json' },
+   520→        body: JSON.stringify({ refreshToken: 'rt-abc' }),
+   521→      }));
+   522→      check('replayed refresh token → 401 refresh_replay', response.status === 401 && (await response.json()).error === 'refresh_replay');
+   523→
+   524→      // plain passthroughs
+   525→      ({ response } = await edgeFetch(env, '/auth/login', {
+   526→        method: 'POST',
+   527→        headers: { 'content-type': 'application/json' },
+   528→        body: JSON.stringify({ email: 'smoke@animaxia.io', password: 'secret123' }),
+   529→      }));
+   530→      check('login passthrough → cloud session shape', response.status === 200 && (await response.json()).ok === true);
+   531→
+   532→      ({ response } = await edgeFetch(env, '/auth/me', { headers: { authorization: `Bearer ${valid}` } }));
+   533→      check('/auth/me passthrough', response.status === 200 && (await response.json()).user?.id === 42);
+   534→
+   535→      ({ response } = await edgeFetch(env, '/auth/logout', {
+   536→        method: 'POST',
+   537→        headers: { authorization: `Bearer ${valid}`, 'content-type': 'application/json' },
+   538→        body: '{}',
+   539→      }));
+   540→      check('logout passthrough', response.status === 200);
+   541→
+   542→      ({ response } = await edgeFetch(env, '/auth/health'));
+   543→      body = await response.json();
+   544→      check('auth health exposes the secret SOURCE only', response.status === 200 && body.secretFrom === 'JWT_SECRET' && body.replayRegistry === true);
+   545→    }
+   546→
+   547→    /* ==================================================== 8. edge AI ====== */
+   548→    suite('8. edge AI (answer cache + retrieval pre-warm + streaming)');
+   549→    {
+   550→      resetCloud();
+   551→      let { response } = await edgeFetch(env, '/ai/rag/recommend', {
+   552→        method: 'POST',
+   553→        headers: { 'content-type': 'application/json' },
+   554→        body: JSON.stringify({ query: 'ninjas', limit: 3 }),
+   555→      });
+   556→      check('rag recommend miss → 200', response.status === 200 && response.headers.get('x-edge-ai') === 'miss');
+   557→      await flushServiceWaitUntils();
+   558→
+   559→      ({ response } = await edgeFetch(env, '/ai/rag/recommend', {
+   560→        method: 'POST',
+   561→        headers: { 'content-type': 'application/json' },
+   562→        body: JSON.stringify({ query: 'ninjas', limit: 3 }),
+   563→      }));
+   564→      check('same request → x-edge-ai hit', response.headers.get('x-edge-ai') === 'hit');
+   565→      check('cloud saw exactly one rag call', cloudCount('/api/ai/rag/recommend') === 1);
+   566→
+   567→      const token = await edgeSignJwt({ sub: 42, typ: 'access' }, JWT_SECRET, 900);
+   568→      ({ response } = await edgeFetch(env, '/ai/rag/recommend', {
+   569→        method: 'POST',
+   570→        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+   571→        body: JSON.stringify({ query: 'ninjas', limit: 3 }),
+   572→      }));
+   573→      check('authorized request → bypass-auth (never cached)', response.headers.get('x-edge-ai') === 'bypass-auth');
+   574→      check('bypass reached the cloud', cloudCount('/api/ai/rag/recommend') === 2);
+   575→
+   576→      ({ response } = await edgeFetch(env, '/ai/embeddings', {
+   577→        method: 'POST',
+   578→        headers: { 'content-type': 'application/json' },
+   579→        body: JSON.stringify({ text: 'ninjas' }),
+   580→      }));
+   581→      check('embeddings hit via rag pre-warm (L2)', response.headers.get('x-edge-ai') === 'hit');
+   582→
+   583→      ({ response } = await edgeFetch(env, '/ai/embeddings', {
+   584→        method: 'POST',
+   585→        headers: { 'content-type': 'application/json' },
+   586→        body: JSON.stringify({ text: 'pirates' }),
+   587→      }));
+   588→      check('embeddings fresh text → miss', response.headers.get('x-edge-ai') === 'miss');
+   589→      await flushServiceWaitUntils();
+   590→      ({ response } = await edgeFetch(env, '/ai/embeddings', {
+   591→        method: 'POST',
+   592→        headers: { 'content-type': 'application/json' },
+   593→        body: JSON.stringify({ text: 'pirates' }),
+   594→      }));
+   595→      check('embeddings second time → hit', response.headers.get('x-edge-ai') === 'hit');
+   596→
+   597→      ({ response } = await edgeFetch(env, '/ai/embeddings', {
+   598→        method: 'POST',
+   599→        headers: { 'content-type': 'application/json' },
+   600→        body: JSON.stringify({ text: '' }),
+   601→      }));
+   602→      check('empty text → 400 invalid_text', response.status === 400);
+   603→
+   604→      ({ response } = await edgeFetch(env, '/ai/cloud/status'));
+   605→      check('cloud status cached passthrough → 200', response.status === 200);
+   606→      await flushServiceWaitUntils();
+   607→      await edgeFetch(env, '/ai/cloud/status');
+   608→      check('cloud status served from cache on repeat', cloudCount('/api/ai/cloud/status') === 1);
+   609→
+   610→      ({ response } = await edgeFetch(env, '/ai/assistant', {
+   611→        method: 'POST',
+   612→        headers: { 'content-type': 'application/json' },
+   613→        body: JSON.stringify({ message: 'hi' }),
+   614→      }));
+   615→      check('assistant SSE passthrough keeps event-stream', (response.headers.get('content-type') || '').includes('text/event-stream'));
+   616→      check('assistant tagged as stream', response.headers.get('x-edge-ai') === 'stream');
+   617→      check('assistant body preserved', (await response.text()).includes('data:'));
+   618→
+   619→      ({ response } = await edgeFetch(env, '/ai/health'));
+   620→      check('ai health → 200', response.status === 200);
+   621→    }
+   622→
+   623→    /* ================================================ 9. edge player ===== */
+   624→    suite('9. edge player (HLS manifest rewrite + segment cache)');
+   625→    {
+   626→      let { response } = await edgeFetch(env, '/player/manifest/1');
+   627→      check('manifest → 200', response.status === 200);
+   628→      check('content-type is m3u8', response.headers.get('content-type') === 'application/vnd.apple.mpegurl');
+   629→      check('tagged rewritten', response.headers.get('x-edge-player') === 'rewritten');
+   630→      const manifestBody = await response.text();
+   631→      check('variant line rewritten to edge', manifestBody.includes('/player/manifest/variant?src='));
+   632→
+   633→      resetCloud();
+   634→      ({ response } = await edgeFetch(env, '/player/manifest/1'));
+   635→      check('manifest repeat served entirely from cache (zero cloud calls)', response.status === 200 && cloudCount('/api/mobile/player/1') === 0);
+   636→      check('cached manifest still m3u8', response.headers.get('content-type') === 'application/vnd.apple.mpegurl');
+   637→      check('cached manifest still tagged rewritten', response.headers.get('x-edge-player') === 'rewritten');
+   638→
+   639→      ({ response } = await edgeFetch(env, '/player/manifest/abc'));
+   640→      check('bad manifest id → 400', response.status === 400);
+   641→
+   642→      const variantSrc = manifestBody.match(/variant\?src=([^&\s"']+)/)?.[1];
+   643→      check('variant src extracted', Boolean(variantSrc));
+   644→      ({ response } = await edgeFetch(env, `/player/manifest/variant?src=${variantSrc}`));
+   645→      check('variant playlist → 200 m3u8', response.status === 200 && response.headers.get('content-type') === 'application/vnd.apple.mpegurl');
+   646→      const mediaBody = await response.text();
+   647→      check('segments rewritten to /hls', mediaBody.includes('/hls?u='));
+   648→
+   649→      const segUrl = mediaBody.match(/\/hls\?u=([^&\s"']+)/)?.[1];
+   650→      ({ response } = await edgeFetch(env, `/hls?u=${segUrl}`));
+   651→      check('segment proxy → 200', response.status === 200);
+   652→      check('segment content-type mp2t', response.headers.get('content-type') === 'video/mp2t');
+   653→      const segCallsAfterFirst = hlsState.segmentCalls;
+   654→      ({ response } = await edgeFetch(env, `/hls?u=${segUrl}`));
+   655→      check('segment served from L1 on repeat', response.headers.get('x-edge-cache') === 'HIT' && hlsState.segmentCalls === segCallsAfterFirst);
+   656→      check('segment cache-control long', (response.headers.get('cache-control') || '').includes('max-age=3600'));
+   657→
+   658→      ({ response } = await edgeFetch(env, `/hls?u=${encodeURIComponent('https://evil.example.com/seg.ts')}`));
+   659→      check('non-allowlisted segment host → 403', response.status === 403);
+   660→      ({ response } = await edgeFetch(env, '/hls'));
+   661→      check('missing u → 400', response.status === 400);
+   662→
+   663→      ({ response } = await edgeFetch(env, '/player/sources/1'));
+   664→      const sourcesBody = await response.json();
+   665→      check('sources passthrough → cloud player payload', response.status === 200 && Array.isArray(sourcesBody.sources));
+   666→
+   667→      ({ response } = await edgeFetch(env, '/player/health'));
+   668→      check('player health → 200 with R2', response.status === 200 && (await response.json()).r2 === true);
+   669→    }
+   670→
+   671→    /* ============================================= 10. edge analytics ==== */
+   672→    suite('10. edge analytics (queue + trending + flush)');
+   673→    {
+   674→      queue().clear();
+   675→      resetCloud();
+   676→
+   677→      let { response } = await edgeFetch(env, '/analytics/view', {
+   678→        method: 'POST',
+   679→        headers: { 'content-type': 'application/json' },
+   680→        body: JSON.stringify({ contentId: 1, title: 'Naruto', event: 'view' }),
+   681→      });
+   682→      check('view → queued', response.status === 200 && (await response.json()).delivery === 'queue');
+   683→
+   684→      await edgeFetch(env, '/analytics/event', {
+   685→        method: 'POST',
+   686→        headers: { 'content-type': 'application/json' },
+   687→        body: JSON.stringify({ contentId: 1, title: 'Naruto', event: 'play' }),
+   688→      });
+   689→      await edgeFetch(env, '/beacon', {
+   690→        method: 'POST',
+   691→        headers: { 'content-type': 'text/plain' },
+   692→        body: JSON.stringify({ contentId: 1, event: 'complete' }),
+   693→      });
+   694→      await edgeFetch(env, '/analytics/view', {
+   695→        method: 'POST',
+   696→        headers: { 'content-type': 'application/json' },
+   697→        body: JSON.stringify({ contentId: 2, title: 'Sintel' }),
+   698→      });
+   699→      check('all 4 events captured by the queue', queue().messages.length === 4);
+   700→
+   701→      ({ response } = await edgeFetch(env, '/analytics/trending?window=1h'));
+   702→      let body = await response.json();
+   703→      check('trending window=1h → 200', response.status === 200);
+   704→      check('top row is content 1 with score 6 (1 view + 2×play + 3×complete)', body.rows[0]?.contentId === 1 && body.rows[0]?.score === 6);
+   705→      check('second row is content 2 with score 1', body.rows[1]?.contentId === 2 && body.rows[1]?.score === 1);
+   706→
+   707→      ({ response } = await edgeFetch(env, '/analytics/view', {
+   708→        method: 'POST',
+   709→        headers: { 'content-type': 'application/json' },
+   710→        body: JSON.stringify({ contentId: 0 }),
+   711→      }));
+   712→      check('invalid contentId → 400', response.status === 400);
+   713→      ({ response } = await edgeFetch(env, '/analytics/view', {
+   714→        method: 'POST',
+   715→        headers: { 'content-type': 'application/json' },
+   716→        body: JSON.stringify({ contentId: 1, event: 'teleport' }),
+   717→      }));
+   718→      check('invalid event → 400', response.status === 400);
+   719→
+   720→      await consumeQueue(analyticsWorker, env, [{ contentId: 5, event: 'view', ts: Date.now() }]);
+   721→      check('queue consumer delivers to cloud /api/analytics/views', cloudCount('/api/analytics/views') === 1);
+   722→
+   723→      // buffer path (no queue binding) + flush
+   724→      const envB = makeEnv({
+   725→        without: ['ANALYTICS_QUEUE'],
+   726→        env: { EDGE_INTERNAL_TOKEN: INTERNAL_TOKEN },
+   727→      });
+   728→      let direct = await callWorker(analyticsWorker, new Request('https://edge.animaxia.test/analytics/view', {
+   729→        method: 'POST',
+   730→        headers: { 'content-type': 'application/json' },
+   731→        body: JSON.stringify({ contentId: 7, title: 'Buffered', event: 'view' }),
+   732→      }), envB);
+   733→      check('without queue → buffered delivery', (await direct.response.json()).delivery === 'buffer');
+   734→      direct = await callWorker(analyticsWorker, new Request('https://edge.animaxia.test/analytics/view', {
+   735→        method: 'POST',
+   736→        headers: { 'content-type': 'application/json' },
+   737→        body: JSON.stringify({ contentId: 7, title: 'Buffered', event: 'view' }),
+   738→      }), envB);
+   739→      await direct.ctx.flush();
+   740→
+   741→      direct = await callWorker(analyticsWorker, new Request('https://edge.animaxia.test/analytics/flush', { method: 'POST' }), envB);
+   742→      check('flush without internal auth → 401', direct.response.status === 401);
+   743→      direct = await callWorker(analyticsWorker, new Request('https://edge.animaxia.test/analytics/flush', {
+   744→        method: 'POST',
+   745→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   746→      }), envB);
+   747→      const flushBody = await direct.response.json();
+   748→      check('flush drains the buffer to the cloud', direct.response.status === 200 && flushBody.drained === 2);
+   749→      check('cloud received both buffered views', cloudCount('/api/analytics/views') === 3);
+   750→
+   751→      ({ response } = await edgeFetch(env, '/analytics/health'));
+   752→      check('analytics health → 200', response.status === 200);
+   753→    }
+   754→
+   755→    /* =================================================== 11. cron jobs ==== */
+   756→    suite('11. cron jobs (manual runs + edge-only cleanups)');
+   757→    {
+   758→      let direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/health'), env);
+   759→      check('cron health → 7 jobs (FAZA 12: +miner-sync)', direct.response.status === 200 && (await direct.response.json()).jobs === 7);
+   760→
+   761→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/run/daily-picks'), env);
+   762→      check('manual run requires auth', direct.response.status === 401);
+   763→
+   764→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/run/daily-picks', {
+   765→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   766→      }), env);
+   767→      const result = await direct.response.json();
+   768→      check('daily-picks run ok against the cloud', direct.response.status === 200 && result.ok === true);
+   769→
+   770→
+   771→
+   772→      await kvStore('EDGE_CACHE').put('waf:1:old', '{}');
+   773→      await kvStore('EDGE_CACHE').put('cron:log:1:old', '{}');
+   774→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/run/cleanup-logs', {
+   775→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   776→      }), env);
+   777→      await direct.ctx.flush();
+   778→      check('cleanup-logs purges waf + cron:log keys', (await kvStore('EDGE_CACHE').get('waf:1:old')) === null && (await kvStore('EDGE_CACHE').get('cron:log:1:old')) === null);
+   779→
+   780→      await kvStore('EDGE_RATELIMIT').put('rl:old:1', '5');
+   781→      await kvStore('EDGE_REPLAY').put('replay:old', '1');
+   782→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/run/cleanup-sessions', {
+   783→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   784→      }), env);
+   785→      await direct.ctx.flush();
+   786→      check('cleanup-sessions purges rl + replay keys', (await kvStore('EDGE_RATELIMIT').get('rl:old:1')) === null && (await kvStore('EDGE_REPLAY').get('replay:old')) === null);
+   787→
+   788→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/jobs', {
+   789→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   790→      }), env);
+   791→      const jobsBody = await direct.response.json();
+   792→      check('cron jobs listing', direct.response.status === 200 && Object.keys(jobsBody.jobs).length === 7 && Array.isArray(jobsBody.results));
+   793→
+   794→      // FAZA 12 (miner): dedicated runner POSTs {daily-sync, allTenants} to
+   795→      // the cloud and reports the queued tenant-sync count.
+   796→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/run/miner-sync', {
+   797→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   798→      }), env);
+   799→      const minerRun = await direct.response.json();
+   800→      check('miner-sync run queues per-tenant jobs', direct.response.status === 200 && minerRun.ok === true && /queued 3 tenant sync/i.test(String(minerRun.detail)));
+   801→
+   802→      direct = await callWorker(cronWorker, new Request('https://edge.animaxia.test/cron/run/nope', {
+   803→        headers: { 'x-internal-token': INTERNAL_TOKEN },
+   804→      }), env);
+   805→      check('unknown job → 404 (after miner-sync)', direct.response.status === 404);
+   806→
+   807→      const schedCtx = new HarnessCtx();
+   808→      await cronWorker.scheduled({ cron: '*/5 * * * *', scheduledTime: Date.now() }, env, schedCtx);
+   809→      await schedCtx.flush();
+   810→      check('scheduled */5 flush trigger completes without throwing', true);
+   811→    }
+   812→
+   813→    /* ============================================== 12. websocket path ==== */
+   814→    suite('12. WebSocket endpoint (/ws/assistant)');
+   815→    {
+   816→      let { response } = await edgeFetch(env, '/ws/assistant');
+   817→      check('plain GET → 426 upgrade_required', response.status === 426);
+   818→      check('upgrade hint header', response.headers.get('upgrade') === 'websocket');
+   819→
+   820→      ({ response } = await edgeFetch(env, '/ws/assistant', { headers: { upgrade: 'websocket' } }));
+   821→      check('bun runtime without WebSocketPair → explicit 501', response.status === 501 && (await response.json()).error === 'ws_unsupported_runtime');
+   822→    }
+   823→
+   824→    /* ==================================== 13. edge metrics (FAZA 9 ops) ==== */
+   825→    suite('13. edge metrics (FAZA 9 ops)');
+   826→    {
+   827→      resetEdgeMetrics(); // deterministic counters for this suite only
+   828→
+   829→      // FAZA 12 (miner): gateway /edge/miner/status proxies the cloud status
+   830→      // (public, no-store) — checked here so the reset above also covers the
+   831→      // per-isolate miner counter.
+   832→      {
+   833→        const ms = await edgeFetch(env, '/edge/miner/status');
+   834→        const msBody = await ms.response.json();
+   835→        check('gateway /edge/miner/status proxies cloud status', ms.response.status === 200 && msBody.service === 'animaxia-miner' && msBody.pool?.maxConcurrent === 2);
+   836→        check('gateway /edge/miner/status is no-store', ms.response.headers.get('cache-control') === 'no-store');
+   837→      }
+   838→
+   839→      // gateway /edge/metrics is admin-guarded like the other /edge/* routes
+   840→      let { response } = await edgeFetch(env, '/edge/metrics');
+   841→      check('gateway /edge/metrics without auth → 401', response.status === 401);
+   842→
+   843→      ({ response } = await edgeFetch(env, '/edge/metrics', { headers: { 'x-internal-token': INTERNAL_TOKEN } }));
+   844→      check('gateway /edge/metrics with internal token → 200', response.status === 200);
+   845→      check('prometheus content-type', (response.headers.get('content-type') || '').startsWith('text/plain'));
+   846→      const emptyText = await response.text();
+   847→      check('prometheus render declares requests_total family', emptyText.includes('# TYPE animaxia_edge_requests_total counter'));
+   848→
+   849→      // gateway traffic → counters + latency + cache-tag series appear
+   850→      await edgeFetch(env, '/edge/health');
+   851→      await edgeFetch(env, '/api/all');
+   852→      await edgeFetch(env, '/api/all?q=metrics-suite');
+   853→
+   854→      ({ response } = await edgeFetch(env, '/edge/metrics', { headers: { 'x-internal-token': INTERNAL_TOKEN } }));
+   855→      const text = await response.text();
+   856→      check(
+   857→        'requests counter recorded for /edge/health',
+   858→        /animaxia_edge_requests_total\{module="gateway",route="\/edge\/health",status="200"\} [1-9]/.test(text),
+   859→      );
+   860→      check(
+   861→        'requests counter recorded for /api/all',
+   862→        /animaxia_edge_requests_total\{module="gateway",route="\/api\/all",status="200"\} [1-9]/.test(text),
+   863→      );
+   864→      check(
+   865→        'latency histogram recorded',
+   866→        /animaxia_edge_request_latency_ms_count\{module="gateway",route="\/edge\/health"\} [1-9]/.test(text),
+   867→      );
+   868→      check(
+   869→        'cache events counter recorded from x-edge-cache tag',
+   870→        /animaxia_edge_cache_events_total\{module="gateway",state="[a-z-]+"\} [1-9]/.test(text),
+   871→      );
+   872→
+   873→      // WAF block counter (attack-tool UA → bot rule)
+   874→      await edgeFetch(env, '/api/all', { headers: { 'user-agent': 'sqlmap/1.5.2' } });
+   875→      ({ response } = await edgeFetch(env, '/edge/metrics', { headers: { 'x-internal-token': INTERNAL_TOKEN } }));
+   876→      const wafText = await response.text();
+   877→      check(
+   878→        'waf blocks counter incremented (rule=bot)',
+   879→        /animaxia_edge_waf_blocks_total\{rule="bot"\} [1-9]/.test(wafText),
+   880→      );
+   881→
+   882→      // sub-worker /metrics: public, prometheus + json, module label isolation
+   883→      let sub = await callWorker(searchWorker, new Request('https://edge.animaxia.test/search?q=big'), env);
+   884→      check('search query through the worker → 200', sub.response.status === 200);
+   885→      sub = await callWorker(searchWorker, new Request('https://edge.animaxia.test/metrics?format=json'), env);
+   886→      check('search /metrics?format=json → 200', sub.response.status === 200);
+   887→      const mj = await sub.response.json();
+   888→      const searchSeries = (mj.counters || []).filter(
+   889→        (c) => c.name === 'animaxia_edge_requests_total' && c.labels.module === 'search',
+   890→      );
+   891→      check(
+   892→        'json snapshot carries module="search" series',
+   893→        searchSeries.length > 0 && searchSeries.every((c) => c.value >= 1),
+   894→        JSON.stringify(searchSeries).slice(0, 120),
+   895→      );
+   896→      sub = await callWorker(searchWorker, new Request('https://edge.animaxia.test/metrics'), env);
+   897→      const promSearch = await sub.response.text();
+   898→      check(
+   899→        'search /metrics prometheus render has module label',
+   900→        promSearch.includes('animaxia_edge_requests_total{module="search"'),
+   901→      );
+   902→    }
+   903→    /* ======================================== 14. sharding (FAZA 13) ====== */
+   904→    suite('14. sharding (FAZA 13: shard-aware cache keys + header)');
+   905→    {
+   906→      // --- pure shard math (shared/shard.ts, pinned FAZA 13 spec) ---------
+   907→      check('fnv1a known vectors (FNV-1a 32-bit)', fnv1a('') === 2166136261 && fnv1a('a') === 3826002220 && fnv1a('hello') === 1335831723);
+   908→      check('fnv1a stable across calls', fnv1a('tenant:acme') === fnv1a('tenant:acme'));
+   909→
+   910→      check('shardCountOf: default 4', shardCountOf() === 4 && shardCountOf({}) === 4);
+   911→      check('shardCountOf: SHARDCOUNT honored + guarded', shardCountOf({ SHARDCOUNT: '8' }) === 8 && shardCountOf({ SHARDCOUNT: '0' }) === 4 && shardCountOf({ SHARDCOUNT: 'abc' }) === 4 && shardCountOf({ SHARDCOUNT: '' }) === 4);
+   912→
+   913→      const four = { SHARDCOUNT: '4' };
+   914→      check('content shard: 5 → 0 (SERIAL ids are shard-0, legacy compatible)', computeShardIdFromContentId(5, four) === 0 && computeShardIdFromContentId('42', four) === 0);
+   915→      check('content shard: 1_500_000_000 → 1, 4_500_000_000 → 0 (range wrap)', computeShardIdFromContentId(1_500_000_000, four) === 1 && computeShardIdFromContentId(4_500_000_000, four) === 0);
+   916→      check('content shard: garbage → 0', computeShardIdFromContentId('nope', four) === 0 && computeShardIdFromContentId(-7, four) === 0);
+   917→
+   918→      const acmeShard = computeShardIdFromTenant('acme', four);
+   919→      check('tenant shard: acme stable (=== 3) and within 0..3', acmeShard === computeShardIdFromTenant('acme', four) && acmeShard === 3 && acmeShard >= 0 && acmeShard <= 3);
+   920→      check('shardKeySegment: 0 → "s0:", 2 → "s2:"', shardKeySegment(0) === 's0:' && shardKeySegment(2) === 's2:');
+   921→
+   922→      // --- resolveShardFromTenantOrContent (pinned edge resolution) -------
+   923→      const req = (path, headers = {}) => new Request(`https://edge.animaxia.test${path}`, { headers });
+   924→      check('resolve: /api/content/42 global → 0', resolveShardFromTenantOrContent(req('/api/content/42'), 'global', four) === 0);
+   925→      check('resolve: /player/1500000000 global → 1', resolveShardFromTenantOrContent(req('/player/1500000000'), 'global', four) === 1);
+   926→      check('resolve: /content/2500000000 global → 2', resolveShardFromTenantOrContent(req('/content/2500000000'), 'global', four) === 2);
+   927→      check('resolve: tenant acme wins over content path', resolveShardFromTenantOrContent(req('/api/content/2500000000'), 'acme', four) === acmeShard);
+   928→      check('resolve: garbage path → 0', resolveShardFromTenantOrContent(req('/definitely/no/numbers/here'), 'global', four) === 0);
+   929→      check('resolve: /player/manifest/42 (non-numeric after player) → 0', resolveShardFromTenantOrContent(req('/player/manifest/42'), 'global', four) === 0);
+   930→
+   931→      // --- client header override (resolution order: header > tenant > content > 0)
+   932→      check('client header x-animaxia-shard: 2 honored even on /api/content/42', resolveShardOf(req('/api/content/42', { [SHARD_HEADER]: '2' }), 'global', four) === 2);
+   933→      check('invalid client header values fall back to recompute', clientShardOf(req('/api/content/42', { [SHARD_HEADER]: '4' }), four) === null
+   934→        && clientShardOf(req('/x', { [SHARD_HEADER]: '-1' }), four) === null
+   935→        && clientShardOf(req('/x', { [SHARD_HEADER]: 'abc' }), four) === null
+   936→        && resolveShardOf(req('/api/content/42', { [SHARD_HEADER]: '9' }), 'global', four) === 0);
+   937→
+   938→      // --- gateway integration (real worker via the harness) --------------
+   939→      resetCloud();
+   940→      const unique = `?shard-suite=${Date.now()}`;
+   941→      let { response } = await edgeFetch(env, `/api/movies${unique}`);
+   942→      check('gateway global response carries x-animaxia-shard: 0', response.headers.get(SHARD_HEADER) === '0');
+   943→      check('gateway global cache key has the s0: segment (EDGE_CACHE L2)', (await kvStore('EDGE_CACHE').get(`cache:s0:api:/api/movies${unique}`)) !== null);
+   944→      check('legacy un-sharded global key NOT written', (await kvStore('EDGE_CACHE').get(`cache:api:/api/movies${unique}`)) === null);
+   945→      check('upstream saw x-animaxia-shard: 0 (global)', cloud.calls.length === 1 && cloud.calls[0].shard === '0');
+   946→
+   947→      ({ response } = await edgeFetch(env, `/api/movies${unique}`, { headers: { 'x-animaxia-tenant': 'acme' } }));
+   948→      check('gateway acme response carries x-animaxia-shard: 3 (tenant hash)', response.headers.get(SHARD_HEADER) === String(acmeShard));
+   949→      check(`gateway acme cache key has the t:acme:s${acmeShard}: segment`, (await kvStore('EDGE_CACHE').get(`cache:t:acme:s${acmeShard}:api:/api/movies${unique}`)) !== null);
+   950→      check('upstream saw x-animaxia-shard: 3 (tenant acme)', cloud.calls.length === 2 && cloud.calls[1].shard === '3');
+   951→
+   952→      ({ response } = await edgeFetch(env, `/api/movies${unique}`, { headers: { [SHARD_HEADER]: '2' } }));
+   953→      check('gateway honors a valid client shard header end-to-end (2)', response.headers.get(SHARD_HEADER) === '2');
+   954→      check(`client-header shard isolates its own cache key (s2:)`, (await kvStore('EDGE_CACHE').get(`cache:s2:api:/api/movies${unique}`)) !== null);
+   955→      check('upstream saw x-animaxia-shard: 2 (client override)', cloud.calls.length === 3 && cloud.calls[2].shard === '2');
+   956→
+   957→      // --- /edge/status advertises the sharding layer ---------------------
+   958→      ({ response } = await edgeFetch(env, '/edge/status'));
+   959→      const status = await response.json();
+   960→      check('/edge/status exposes sharding config (FAZA 13)', status.config?.sharding?.header === SHARD_HEADER && status.config?.sharding?.defaultShard === 0 && status.config?.sharding?.cacheKeyIsolation === true);
+   961→
+   962→      // --- sub-worker key formats (ai / search / player) ------------------
+   963→      await edgeFetch(env, '/ai/rag/recommend', {
+   964→        method: 'POST',
+   965→        headers: { 'content-type': 'application/json' },
+   966→        body: JSON.stringify({ query: 'shard-suite', limit: 1 }),
+   967→      });
+   968→      await flushServiceWaitUntils();
+   969→      const embKeys = kvStore('EMBEDDINGS_CACHE').dumpKeys();
+   970→      check('ai worker writes shard-scoped global keys (s0:ans:rag:…)', embKeys.some((k) => k.startsWith('s0:ans:rag:')));
+   971→      check('ai worker legacy un-sharded ans: key NOT written', !embKeys.some((k) => /^ans:rag:/.test(k)));
+   972→
+   973→      await edgeFetch(env, '/search?q=shard-suite');
+   974→      check('search worker catalog snapshot key is s0:catalog:v1 (global)', (await kvStore('SEARCH_CACHE').get('s0:catalog:v1', 'json')) !== null);
+   975→
+   976→      await edgeFetch(env, '/player/sources/1');
+   977→      check('player worker sources cache key is s0:player:sources:1', (await kvStore('EDGE_CACHE').get('cache:s0:player:sources:1')) !== null);
+   978→    }
+   979→  } finally {
+   980→    restoreFetch();
+   981→    restoreCaches();
+   982→  }
+   983→
+   984→  console.log(`\n────────────────────────────────────────`);
+   985→  console.log(`smoke: ${passed} passed, ${failed} failed`);
+   986→  if (failures.length) {
+   987→    console.log('failures:');
+   988→    for (const f of failures) console.log(`  ✗ ${f}`);
+   989→  }
+   990→  if (failed > 0) process.exit(1);
+   991→}
+   992→
+   993→main().catch((err) => {
+   994→  console.error('smoke suite crashed:', err);
+   995→  process.exit(1);
+   996→});
+   997→

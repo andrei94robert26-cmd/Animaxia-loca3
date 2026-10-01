@@ -155,13 +155,13 @@ export const playerHubRouter = express.Router();
 playerHubRouter.get('/status', wrap(async (req, res) => {
   const totals = await one(
     `SELECT
-       (SELECT COUNT(*)::int FROM playlists) AS playlists,
-       (SELECT COUNT(*)::int FROM playlistitems) AS playlistitems,
-       (SELECT COUNT(*)::int FROM subtitletracks) AS subtitletracks`,
+       (SELECT COUNT(*) FROM playlists) AS playlists,
+       (SELECT COUNT(*) FROM playlistitems) AS playlistitems,
+       (SELECT COUNT(*) FROM subtitletracks) AS subtitletracks`,
   );
   let user = null;
   if (req.user) {
-    const mine = await one(`SELECT COUNT(*)::int AS count FROM playlists WHERE userid = $1`, [req.user.id]);
+    const mine = await one(`SELECT COUNT(*) AS count FROM playlists WHERE userid = $1`, [req.user.id]);
     user = { id: req.user.id, playlistsCount: num(mine?.count) };
   }
   res.json({
@@ -226,7 +226,7 @@ playerHubRouter.get('/continue-watching', requireAuthLocal, wrap(async (req, res
 playerHubRouter.get('/playlists', requireAuthLocal, wrap(async (req, res) => {
   const data = await rows(
     `SELECT p.id, p.title, p.description, p.createdat, p.updatedat,
-            (SELECT COUNT(*)::int FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemscount,
+            (SELECT COUNT(*) FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemscount,
             (SELECT c.thumbnail
                FROM playlistitems pi
                JOIN content c ON c.id = pi.contentid
@@ -258,7 +258,7 @@ playerHubRouter.post('/playlists', requireAuthLocal, wrap(async (req, res) => {
   const description = validateDescription(body.description);
   if (description.error) return res.status(400).json({ error: description.error });
 
-  const countRow = await one(`SELECT COUNT(*)::int AS count FROM playlists WHERE userid = $1`, [req.user.id]);
+  const countRow = await one(`SELECT COUNT(*) AS count FROM playlists WHERE userid = $1`, [req.user.id]);
   if (num(countRow?.count) >= MAX_PLAYLISTS_PER_USER) {
     return res.status(409).json({
       error: `Playlist limit reached — max ${MAX_PLAYLISTS_PER_USER} playlists per user`,
@@ -327,7 +327,7 @@ playerHubRouter.patch('/playlists/:id', requireAuthLocal, wrap(async (req, res) 
     return res.json({ ok: true, playlist: playlistRow(playlist) }); // idempotent no-op
   }
 
-  sets.push(`updatedat = NOW()`);
+  sets.push(`updatedat = CURRENT_TIMESTAMP`);
   params.push(playlist.id);
   const updated = await one(
     `UPDATE playlists SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
@@ -368,7 +368,7 @@ playerHubRouter.post('/playlists/:id/items', requireAuthLocal, wrap(async (req, 
   }
 
   const countRow = await one(
-    `SELECT COUNT(*)::int AS count FROM playlistitems WHERE playlistid = $1`,
+    `SELECT COUNT(*) AS count FROM playlistitems WHERE playlistid = $1`,
     [playlist.id],
   );
   if (num(countRow?.count) >= MAX_ITEMS_PER_PLAYLIST) {
@@ -390,7 +390,7 @@ playerHubRouter.post('/playlists/:id/items', requireAuthLocal, wrap(async (req, 
     return res.json({ ok: true, added: false, duplicate: true });
   }
 
-  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+  await one(`UPDATE playlists SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [playlist.id]);
   emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
   return res.status(201).json({
     ok: true,
@@ -432,7 +432,7 @@ playerHubRouter.delete('/playlists/:id/items/:contentId', requireAuthLocal, wrap
      WHERE pi.id = ordered.id AND pi.position <> ordered.newpos`,
     [playlist.id],
   );
-  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+  await one(`UPDATE playlists SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [playlist.id]);
   emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
   return res.json({ ok: true, removed: true });
 }));
@@ -473,12 +473,12 @@ playerHubRouter.post('/playlists/:id/reorder', requireAuthLocal, wrap(async (req
     await rows(
       `UPDATE playlistitems pi
          SET position = u.pos
-       FROM unnest($2::int[], $3::int[]) AS u(cid, pos)
+       FROM unnest($2[], $3[]) AS u(cid, pos)
        WHERE pi.playlistid = $1 AND pi.contentid = u.cid`,
       [playlist.id, ids, ids.map((_, i) => i)],
     );
   }
-  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+  await one(`UPDATE playlists SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [playlist.id]);
   emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
   return res.json({ ok: true, reordered: true, count: ids.length });
 }));
@@ -532,9 +532,9 @@ playerHubRouter.post('/progress', requireAuthLocal, wrap(async (req, res) => {
 
   await one(
     `INSERT INTO watchhistory (userid, contentid, progress, watchedat)
-     VALUES ($1, $2, $3, NOW())
+     VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
      ON CONFLICT (userid, contentid)
-     DO UPDATE SET progress = EXCLUDED.progress, watchedat = NOW()`,
+     DO UPDATE SET progress = EXCLUDED.progress, watchedat = CURRENT_TIMESTAMP`,
     [req.user.id, contentId, seconds],
   );
 
@@ -633,7 +633,7 @@ playerHubRouter.post('/subtitles/:contentId', requireAdminLocal, wrap(async (req
   if (!content) return res.status(404).json({ error: 'Content not found' });
 
   const countRow = await one(
-    `SELECT COUNT(*)::int AS count FROM subtitletracks WHERE contentid = $1`,
+    `SELECT COUNT(*) AS count FROM subtitletracks WHERE contentid = $1`,
     [contentId],
   );
   if (num(countRow?.count) >= MAX_SUBTITLE_TRACKS_PER_CONTENT) {
@@ -687,10 +687,10 @@ playerHubRouter.delete('/subtitles/:contentId/:trackId', requireAdminLocal, wrap
 playerHubRouter.get('/stats', wrap(async (req, res) => {
   const totals = await one(
     `SELECT
-       (SELECT COUNT(*)::int FROM playlists) AS playlists,
-       (SELECT COUNT(*)::int FROM playlistitems) AS playlistitems,
-       (SELECT COUNT(*)::int FROM subtitletracks) AS subtitletracks,
-       (SELECT COUNT(*)::int FROM watchhistory) AS watchentries`,
+       (SELECT COUNT(*) FROM playlists) AS playlists,
+       (SELECT COUNT(*) FROM playlistitems) AS playlistitems,
+       (SELECT COUNT(*) FROM subtitletracks) AS subtitletracks,
+       (SELECT COUNT(*) FROM watchhistory) AS watchentries`,
   );
   const top = await rows(
     `SELECT c.id, c.title, c.thumbnail, c.type
@@ -718,9 +718,9 @@ playerHubRouter.get('/stats', wrap(async (req, res) => {
 
   if (req.user?.role === 'admin') {
     const active = await one(
-      `SELECT COUNT(DISTINCT userid)::int AS count
+      `SELECT COUNT(DISTINCT userid) AS count
        FROM playlists
-       WHERE updatedat > NOW() - interval '7 days'`,
+       WHERE updatedat > datetime('now','-7 days')`,
     );
     payload.admin = { activePlaylistsLast7d: num(active?.count) };
   }

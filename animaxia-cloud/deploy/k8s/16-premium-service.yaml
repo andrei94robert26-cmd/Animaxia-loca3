@@ -1,0 +1,132 @@
+# =============================================================================
+# Animaxia Cloud — premium-service (:4006)
+# Plan catalog (free/plus/pro), plan limits middleware, Stripe checkout (sandbox + live), subscriptions.
+# Gateway prefixes: /api/premium
+# Deployment + ClusterIP Service + HorizontalPodAutoscaler.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: premium-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: premium-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: premium
+spec:
+  # HPA owns replica count once autoscaling is running; this is the initial value
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: premium-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: premium-service
+        app.kubernetes.io/part-of: animaxia-cloud
+        app.kubernetes.io/component: premium
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4006"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: premium-service
+          image: ghcr.io/animaxia/premium-service:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 4006
+              protocol: TCP
+            - name: metrics
+              containerPort: 4006
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: animaxia-config
+            - secretRef:
+                name: animaxia-secrets
+          env:
+            - name: PORT
+              value: "4006"
+            - name: SERVICENAME
+              value: "premium-service"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: premium-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: premium-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: premium
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: premium-service
+  ports:
+    - name: http
+      port: 4006
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: premium-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: premium-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: premium
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: premium-service
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # avoid flapping; queue-service especially dislikes replica churn
+      stabilizationWindowSeconds: 300

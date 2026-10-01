@@ -188,7 +188,7 @@ router.post('/confirm', requireAuth, wrap(async (req, res) => {
 
   // Activate the plan and stamp a fresh 30-day period.
   const userRow = await one(
-    `UPDATE users SET plan = $2, planexpiresat = NOW() + ($3::text)::interval WHERE id = $1 RETURNING *`,
+    `UPDATE users SET plan = $2, planexpiresat = datetime('now','+' || $3) WHERE id = $1 RETURNING *`,
     [req.user.id, targetPlan, `${PERIOD_DAYS} days`],
   );
   if (!userRow) {
@@ -198,7 +198,7 @@ router.post('/confirm', requireAuth, wrap(async (req, res) => {
   if (sub) {
     sub = await one(
       `UPDATE subscriptions
-       SET status = 'active', currentperiodend = NOW() + ($2::text)::interval
+       SET status = 'active', currentperiodend = datetime('now','+' || $2)
        WHERE id = $1 RETURNING *`,
       [Number(sub.id), `${PERIOD_DAYS} days`],
     );
@@ -206,7 +206,7 @@ router.post('/confirm', requireAuth, wrap(async (req, res) => {
     // Memory-only session whose mirror row vanished — recreate it as active.
     sub = await one(
       `INSERT INTO subscriptions (userid, plan, status, provider, sessionid, currentperiodend)
-       VALUES ($1, $2, 'active', $3, $4, NOW() + ($5::text)::interval) RETURNING *`,
+       VALUES ($1, $2, 'active', $3, $4, datetime('now','+' || $5)) RETURNING *`,
       [req.user.id, targetPlan, sessionId.startsWith('cs_sandbox_') ? 'stripe-sandbox' : 'stripe', sessionId, `${PERIOD_DAYS} days`],
     );
   }

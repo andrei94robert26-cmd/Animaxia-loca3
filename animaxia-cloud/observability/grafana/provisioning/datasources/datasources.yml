@@ -1,0 +1,80 @@
+# =============================================================================
+# Animaxia Cloud — Grafana datasource provisioning (BLUEPRINT §11)
+# =============================================================================
+# Mounted read-only into the `grafana` container by
+# deploy/docker/docker-compose.observability.yml
+# (/etc/grafana/provisioning/datasources/datasources.yml).
+#
+# Hostnames are Docker DNS service names on the `animaxia` network
+# (prometheus:9090, loki:3100, tempo:3200). UIDs are referenced by the
+# provisioned dashboards in observability/grafana/dashboards/ — changing a
+# UID here breaks them.
+# =============================================================================
+
+apiVersion: 1
+
+# Keep provisioned datasources when this file changes / Grafana restarts
+# (prune: true would delete datasources that disappear from this list).
+prune: false
+
+datasources:
+  # ── Metrics ────────────────────────────────────────────────────────────────
+  - name: Prometheus
+    uid: animaxia-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s          # match prometheus.yml global scrape_interval
+      prometheusType: Prometheus
+      prometheusVersion: 3.1.0
+
+  # ── Logs ───────────────────────────────────────────────────────────────────
+  - name: Loki
+    uid: animaxia-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Match Prometheus's step cadence for mixed panels.
+      maxLines: 5000
+
+  # ── Traces ─────────────────────────────────────────────────────────────────
+  - name: Tempo
+    uid: animaxia-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      httpMethod: GET
+      # Service-graph metrics come from Prometheus (needs a metrics-generator
+      # to be fully populated; harmless when absent).
+      serviceMap:
+        datasourceUid: animaxia-prom
+      nodeGraph:
+        enabled: true
+      # Trace → logs correlation. The Animaxia services log one JSON line per
+      # request with `service` = SERVICENAME (e.g. "auth-service") — the same
+      # value Tempo sees as the service.name resource attribute — and embed
+      # traceId in the line body, so both the label filter and the raw
+      # trace-id filter find the right lines.
+      tracesToLogsV2:
+        datasourceUid: animaxia-loki
+        customQuery: true
+        # '$$' survives Grafana's provisioning env expansion and reaches the
+        # query builder as a literal '$' template variable.
+        query: '{service="$${__service.name}"} |= ""'
+        steps: []
+      # Classic (pre-v2) correlation kept for Grafana versions/features that
+      # still read it: filter by the trace id embedded in the log line.
+      tracesToLogs:
+        datasourceUid: animaxia-loki
+        filterByTraceID: true
+        filterBySpanID: false
+        tags:
+          - service

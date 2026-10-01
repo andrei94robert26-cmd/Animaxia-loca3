@@ -1,0 +1,809 @@
+     1→/**
+     2→ * db.js — Unified async data layer: Neon PostgreSQL first, with automatic
+     3→ * local JSON-file fallback (data/content.json) when Postgres is unreachable.
+     4→ * Includes a 60s reconnect probe that migrates local rows back into Postgres.
+     5→ * All public methods return plain objects with `createdat` serialized as ISO string.
+     6→ */
+     7→
+     8→import pg from 'pg';
+     9→import fs from 'node:fs';
+    10→import path from 'node:path';
+    11→import { fileURLToPath } from 'node:url';
+    12→import { logger } from './utils/logger.js';
+    13→import { computeShardIdFromContentId, shardMap, shardBranchName } from './modules/sharding/model.js'; // FAZA 13 (sharding) — model.js is pure (imports nothing), no cycle
+    14→
+    15→const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    16→const DATA_DIR = path.join(__dirname, 'data');
+    17→const LOCAL_FILE = path.join(DATA_DIR, 'content.json');
+    18→
+    19→const DDL = `
+    20→CREATE TABLE IF NOT EXISTS content (
+    21→  id SERIAL PRIMARY KEY,
+    22→  externalid TEXT UNIQUE,
+    23→  type TEXT,
+    24→  title TEXT,
+    25→  metadata JSONB,
+    26→  thumbnail TEXT,
+    27→  createdat TIMESTAMP DEFAULT NOW()
+    28→);
+    29→CREATE INDEX IF NOT EXISTS idx_content_type ON content (type);
+    30→CREATE INDEX IF NOT EXISTS idx_content_createdat ON content (createdat DESC);
+    31→`;
+    32→
+    33→const UPSERT_SQL = `
+    34→INSERT INTO content (externalid, type, title, metadata, thumbnail)
+    35→VALUES ($1, $2, $3, $4::jsonb, $5)
+    36→ON CONFLICT (externalid) DO UPDATE
+    37→SET type = EXCLUDED.type,
+    38→    title = EXCLUDED.title,
+    39→    metadata = EXCLUDED.metadata,
+    40→    thumbnail = EXCLUDED.thumbnail
+    41→RETURNING *
+    42→`;
+    43→
+    44→let pool = null;
+    45→let driver = null; // 'postgres' | 'local'
+    46→let lastError = null;
+    47→let reconnectTimer = null;
+    48→let localStore = null;
+    49→
+    50→function withTimeout(promise, ms) {
+    51→  return Promise.race([
+    52→    promise,
+    53→    new Promise((_, reject) => {
+    54→      const t = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    55→      if (typeof t.unref === 'function') t.unref();
+    56→    }),
+    57→  ]);
+    58→}
+    59→
+    60→function safeParseJson(value, fallback) {
+    61→  if (value === null || value === undefined) return fallback;
+    62→  if (typeof value === 'object') return value;
+    63→  try {
+    64→    return JSON.parse(value);
+    65→  } catch {
+    66→    return fallback;
+    67→  }
+    68→}
+    69→
+    70→function normalizeRow(row) {
+    71→  if (!row) return null;
+    72→  return {
+    73→    id: Number(row.id),
+    74→    externalid: row.externalid,
+    75→    type: row.type,
+    76→    title: row.title,
+    77→    metadata: safeParseJson(row.metadata, {}) ?? {},
+    78→    thumbnail: row.thumbnail === undefined ? null : row.thumbnail,
+    79→    createdat:
+    80→      row.createdat instanceof Date
+    81→        ? row.createdat.toISOString()
+    82→        : String(row.createdat ?? new Date().toISOString()),
+    83→  };
+    84→}
+    85→
+    86→/** JSON-file backed store with identical query semantics to the SQL layer. */
+    87→class LocalStore {
+    88→  constructor(file) {
+    89→    this.file = file;
+    90→    this.rows = [];
+    91→    this.load();
+    92→  }
+    93→
+    94→  load() {
+    95→    try {
+    96→      if (fs.existsSync(this.file)) {
+    97→        const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    98→        this.rows = Array.isArray(parsed) ? parsed : [];
+    99→      }
+   100→    } catch (err) {
+   101→      logger.error(`[DB] Failed to read local store: ${err.message} — starting empty`);
+   102→      this.rows = [];
+   103→    }
+   104→  }
+   105→
+   106→  persist() {
+   107→    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+   108→    const tmp = `${this.file}.tmp`;
+   109→    fs.writeFileSync(tmp, JSON.stringify(this.rows, null, 2), 'utf8');
+   110→    fs.renameSync(tmp, this.file);
+   111→  }
+   112→
+   113→  nextId() {
+   114→    return this.rows.reduce((max, r) => Math.max(max, Number(r.id) || 0), 0) + 1;
+   115→  }
+   116→
+   117→  all() {
+   118→    return this.rows;
+   119→  }
+   120→
+   121→  list({ page = 1, limit = 20, type, search, sort = 'createdat' }) {
+   122→    let filtered = this.rows;
+   123→    if (type) filtered = filtered.filter((r) => r.type === type);
+   124→    if (search) {
+   125→      const needle = String(search).toLowerCase();
+   126→      filtered = filtered.filter((r) => String(r.title || '').toLowerCase().includes(needle));
+   127→    }
+   128→    const sorted = [...filtered].sort((a, b) => {
+   129→      if (sort === 'title') {
+   130→        return String(a.title || '').localeCompare(String(b.title || '')) || a.id - b.id;
+   131→      }
+   132→      const at = Date.parse(a.createdat) || 0;
+   133→      const bt = Date.parse(b.createdat) || 0;
+   134→      if (bt !== at) return bt - at;
+   135→      return b.id - a.id;
+   136→    });
+   137→    const total = sorted.length;
+   138→    const safeLimit = Math.min(100, Math.max(1, limit));
+   139→    const safePage = Math.max(1, page);
+   140→    const start = (safePage - 1) * safeLimit;
+   141→    return {
+   142→      data: sorted.slice(start, start + safeLimit).map(normalizeRow),
+   143→      total,
+   144→      page: safePage,
+   145→      limit: safeLimit,
+   146→      totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+   147→    };
+   148→  }
+   149→
+   150→  byId(id) {
+   151→    const numeric = Number(id);
+   152→    return this.rows.find((r) => Number(r.id) === numeric) || null;
+   153→  }
+   154→
+   155→  byExternalId(externalid) {
+   156→    return this.rows.find((r) => r.externalid === externalid) || null;
+   157→  }
+   158→
+   159→  upsert({ externalid, type, title, metadata, thumbnail }) {
+   160→    const existing = this.byExternalId(externalid);
+   161→    if (existing) {
+   162→      existing.type = type === undefined || type === null ? existing.type : type;
+   163→      existing.title = title ?? existing.title;
+   164→      existing.metadata = safeParseJson(metadata, {}) ?? {};
+   165→      existing.thumbnail = thumbnail === undefined ? existing.thumbnail : thumbnail;
+   166→      this.persist();
+   167→      return { record: normalizeRow(existing), created: false };
+   168→    }
+   169→    const row = {
+   170→      id: this.nextId(),
+   171→      externalid,
+   172→      type: type ?? null,
+   173→      title,
+   174→      metadata: safeParseJson(metadata, {}) ?? {},
+   175→      thumbnail: thumbnail ?? null,
+   176→      createdat: new Date().toISOString(),
+   177→    };
+   178→    this.rows.push(row);
+   179→    this.persist();
+   180→    return { record: normalizeRow(row), created: true };
+   181→  }
+   182→
+   183→  remove(id) {
+   184→    const existing = this.byId(id);
+   185→    if (!existing) return null;
+   186→    this.rows = this.rows.filter((r) => r !== existing);
+   187→    this.persist();
+   188→    return normalizeRow(existing);
+   189→  }
+   190→
+   191→  count() {
+   192→    return this.rows.length;
+   193→  }
+   194→
+   195→  countsByType() {
+   196→    return this.rows.reduce((acc, r) => {
+   197→      const key = r.type || 'unknown';
+   198→      acc[key] = (acc[key] || 0) + 1;
+   199→      return acc;
+   200→    }, {});
+   201→  }
+   202→}
+   203→
+   204→/* NEON FREE PLAN (optimizare scale-to-zero): timestamp-ul ultimei interogări
+   205→ * reușite pe PostgreSQL — folosit de /api/health ca să decidă ONEST dacă merită
+   206→ * să reîmprospăteze statisticile catalogului (piggyback pe traficul real) sau
+   207→ * să servească valorile din cache fără să trezească compute-ul Neon adormit. */
+   208→let dbActivityAt = 0;
+   209→
+   210→/** Ultima activitate reală pe PostgreSQL (ms epoch); 0 = niciodată (driver local). */
+   211→export function lastDbActivityAt() {
+   212→  return dbActivityAt;
+   213→}
+   214→
+   215→async function q(text, params = []) {
+   216→  try {
+   217→    const result = await pool.query(text, params);
+   218→    dbActivityAt = Date.now();
+   219→    return result;
+   220→  } catch (err) {
+   221→    logger.error(`[DB] PostgreSQL query error: ${err.message}`);
+   222→    throw err;
+   223→  }
+   224→}
+   225→
+   226→function stopReconnectProbe() {
+   227→  if (reconnectTimer) {
+   228→    clearInterval(reconnectTimer);
+   229→    reconnectTimer = null;
+   230→  }
+   231→}
+   232→
+   233→/**
+   234→ * One-time migration of local-fallback rows into PostgreSQL (idempotent upserts).
+   235→ * After a successful migration the local file is archived as content.json.migrated
+   236→ * so subsequent boots do not repeat the work.
+   237→ */
+   238→async function migrateLocalToPostgres() {
+   239→  if (!fs.existsSync(LOCAL_FILE)) return 0;
+   240→  let rows = [];
+   241→  try {
+   242→    const parsed = JSON.parse(fs.readFileSync(LOCAL_FILE, 'utf8'));
+   243→    rows = Array.isArray(parsed) ? parsed : [];
+   244→  } catch (err) {
+   245→    logger.warn(`[DB] Local store unreadable, skipping migration: ${err.message}`);
+   246→    return 0;
+   247→  }
+   248→  if (!rows.length) return 0;
+   249→  let migrated = 0;
+   250→  for (const row of rows) {
+   251→    try {
+   252→      await q(UPSERT_SQL, [
+   253→        row.externalid,
+   254→        row.type ?? null,
+   255→        row.title ?? 'untitled',
+   256→        JSON.stringify(safeParseJson(row.metadata, {})),
+   257→        row.thumbnail ?? null,
+   258→      ]);
+   259→      migrated += 1;
+   260→    } catch (err) {
+   261→      logger.warn(`[DB] Migration skipped row ${row.externalid}: ${err.message}`);
+   262→    }
+   263→  }
+   264→  try {
+   265→    fs.renameSync(LOCAL_FILE, `${LOCAL_FILE}.migrated`);
+   266→  } catch (err) {
+   267→    logger.warn(`[DB] Could not archive local store: ${err.message}`);
+   268→  }
+   269→  logger.info(`[DB] Migrated ${migrated}/${rows.length} local rows into PostgreSQL`);
+   270→  return migrated;
+   271→}
+   272→
+   273→/* NEON FREE PLAN: probe-ul de reconnect rulează DOAR în starea de eroare
+   274→ * (local fallback după un boot eșuat). Interval 60s: probe-ul se oprește
+   275→ * singur la reconnect, deci NU poate ține treaz un Neon sănătos — iar când
+   276→ * Neon e doar suspendat (scale-to-zero), prima tentativă la 60s îl trezește
+   277→ * (exact un cold start) și serviciul se recuperează în ~1 min în loc de 5.
+   278→ * Pe traiectoria normală (pool activ) probe-ul nu există deloc. */
+   279→function startReconnectProbe() {
+   280→  if (reconnectTimer || !pool) return;
+   281→  reconnectTimer = setInterval(async () => {
+   282→    if (driver !== 'local') {
+   283→      stopReconnectProbe();
+   284→      return;
+   285→    }
+   286→    try {
+   287→      await withTimeout(pool.query('SELECT 1'), 15000);
+   288→      await q(DDL);
+   289→      await migrateLocalToPostgres();
+   290→      driver = 'postgres';
+   291→      dbActivityAt = Date.now();
+   292→      lastError = null;
+   293→      stopReconnectProbe();
+   294→      logger.info('[DB] Reconnected to PostgreSQL');
+   295→    } catch (err) {
+   296→      logger.debug(`[DB] Reconnect probe failed: ${err.message}`);
+   297→    }
+   298→  }, 60000);
+   299→  if (typeof reconnectTimer.unref === 'function') reconnectTimer.unref();
+   300→}
+   301→
+   302→function switchToLocal(reason) {
+   303→  driver = 'local';
+   304→  if (!localStore) localStore = new LocalStore(LOCAL_FILE);
+   305→  startReconnectProbe();
+   306→  logger.warn(`[DB] Active driver: local fallback store (${LOCAL_FILE})${reason ? ` — ${reason}` : ''}`);
+   307→}
+   308→
+   309→/**
+   310→ * Probe PostgreSQL and initialise the schema; on failure fall back to the
+   311→ * local JSON store and keep probing for reconnection every 60s.
+   312→ */
+   313→export async function initDb() {
+   314→  const databaseUrl = process.env.DATABASEURL;
+   315→  if (!databaseUrl) {
+   316→    lastError = 'DATABASEURL is not set';
+   317→    logger.error('[DB] PostgreSQL unavailable (DATABASEURL missing) — switching to local fallback store');
+   318→    switchToLocal();
+   319→    return driverInfo();
+   320→  }
+   321→
+   322→  pool = new pg.Pool({
+   323→    connectionString: databaseUrl,
+   324→    ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined,
+   325→    max: parseInt(process.env.PGPOOLMAX || '10', 10),
+   326→    idleTimeoutMillis: 30000,
+   327→    connectionTimeoutMillis: 8000,
+   328→  });
+   329→  pool.on('error', (err) => logger.error(`[DB] idle client error: ${err.message}`));
+   330→
+   331→  /* NEON FREE PLAN (cold-start toleranță): Neon scale-to-zero suspendă compute-ul
+   332→   * după 5 min de inactivitate; primul CONNECT după pauză = cold start care
+   333→   * poate depăși cele 8s. Un singur eșec la boot ar degrada serviciul pe
+   334→   * local-fallback până la următorul probe. 3 încercări one-shot la boot
+   335→   * (cost unic, zero sarcină recurentă) acoperă cold start-ul. */
+   336→  const BOOT_ATTEMPTS = 3;
+   337→  let lastBootErr = null;
+   338→  for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt++) {
+   339→    try {
+   340→      await withTimeout(pool.query('SELECT 1'), 15000);
+   341→      lastBootErr = null;
+   342→      break;
+   343→    } catch (err) {
+   344→      lastBootErr = err;
+   345→      logger.warn(`[DB] boot connect attempt ${attempt}/${BOOT_ATTEMPTS} failed: ${err.message}`);
+   346→      if (attempt < BOOT_ATTEMPTS) await new Promise((r) => setTimeout(r, 2000));
+   347→    }
+   348→  }
+   349→
+   350→  try {
+   351→    if (lastBootErr) throw lastBootErr;
+   352→    await q(DDL);
+   353→    // Adopt any rows written while running on the local fallback store.
+   354→    await migrateLocalToPostgres();
+   355→    driver = 'postgres';
+   356→    lastError = null;
+   357→    stopReconnectProbe();
+   358→    logger.info('[DB] Connected to PostgreSQL (Neon) — schema ready');
+   359→  } catch (err) {
+   360→    lastError = err.message;
+   361→    logger.error(`[DB] PostgreSQL unavailable (${err.message}) — switching to local fallback store`);
+   362→    switchToLocal();
+   363→  }
+   364→  return driverInfo();
+   365→}
+   366→
+   367→export async function listContent({
+   368→  page = 1,
+   369→  limit = 20,
+   370→  type,
+   371→  search,
+   372→  sort = 'createdat',
+   373→} = {}) {
+   374→  const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+   375→  const safePage = Math.max(1, parseInt(page, 10) || 1);
+   376→
+   377→  if (driver === 'local') {
+   378→    return localStore.list({ page: safePage, limit: safeLimit, type, search, sort });
+   379→  }
+   380→
+   381→  const clauses = [];
+   382→  const values = [];
+   383→  if (type) {
+   384→    values.push(type);
+   385→    clauses.push(`type = $${values.length}`);
+   386→  }
+   387→  if (search) {
+   388→    values.push(String(search));
+   389→    clauses.push(`title ILIKE '%' || $${values.length} || '%'`);
+   390→  }
+   391→  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+   392→  const orderBy = sort === 'title' ? 'ORDER BY title ASC' : 'ORDER BY createdat DESC, id DESC';
+   393→  const offset = (safePage - 1) * safeLimit;
+   394→
+   395→  const totalRes = await q(`SELECT COUNT(*)::int AS count FROM content ${where}`, values);
+   396→  const rowsRes = await q(
+   397→    `SELECT * FROM content ${where} ${orderBy} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+   398→    [...values, safeLimit, offset],
+   399→  );
+   400→  const total = totalRes.rows[0]?.count ?? 0;
+   401→  return {
+   402→    data: rowsRes.rows.map(normalizeRow),
+   403→    total,
+   404→    page: safePage,
+   405→    limit: safeLimit,
+   406→    totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+   407→  };
+   408→}
+   409→
+   410→export async function getContentById(id, opts = {}) {
+   411→  if (driver === 'local') return normalizeRow(localStore.byId(id));
+   412→  // FAZA 13 (sharding): optional shard affinity — when opts.shardId is an
+   413→  // integer ≥ 0, try the shard-filtered lookup first and fall back to the
+   414→  // legacy unfiltered query on miss/error (a bogus hint never breaks reads).
+   415→  const shardId = Number.isInteger(opts.shardId) && opts.shardId >= 0 ? opts.shardId : null;
+   416→  if (shardId !== null) {
+   417→    try {
+   418→      const res = await q('SELECT * FROM content WHERE id = $1 AND shardid = $2', [Number(id), shardId]);
+   419→      if (res.rows[0]) return normalizeRow(res.rows[0]);
+   420→    } catch (err) {
+   421→      logger.debug(`[DB] shard-hinted read failed for content ${id} (shard ${shardId}): ${err.message}`);
+   422→    }
+   423→  }
+   424→  const res = await q('SELECT * FROM content WHERE id = $1', [Number(id)]);
+   425→  return normalizeRow(res.rows[0]);
+   426→}
+   427→
+   428→export async function getContentByExternalId(externalid) {
+   429→  if (driver === 'local') return normalizeRow(localStore.byExternalId(externalid));
+   430→  const res = await q('SELECT * FROM content WHERE externalid = $1', [externalid]);
+   431→  return normalizeRow(res.rows[0]);
+   432→}
+   433→
+   434→/**
+   435→ * FAZA 16-a central dedup hook: after a successful postgres upsert, extract
+   436→ * every source embedded in the content metadata (url, finalUrl, player,
+   437→ * sources[] {src,kind}, trailer, youtube) and register each one in the global
+   438→ * `contentsources` registry (addedBy='upsert'). This covers every ingest path
+   439→ * (miner, POST /api/content, discover add, AI enrichment, external frontend
+   440→ * adds). Best-effort: never throws, never blocks the local-fallback driver.
+   441→ */
+   442→async function registerContentSourcesBestEffort(record) {
+   443→  try {
+   444→    if (driver !== 'postgres' || !record?.id) return;
+   445→    const { registerSource } = await import('./modules/ingest/dedup.js');
+   446→    const meta = safeParseJson(record.metadata, {}) ?? {};
+   447→    const candidates = [];
+   448→    const pushStr = (v) => {
+   449→      if (typeof v === 'string' && v.trim()) candidates.push(v);
+   450→    };
+   451→    pushStr(meta.url);
+   452→    pushStr(meta.finalUrl);
+   453→    pushStr(meta.trailer);
+   454→    pushStr(meta.youtube);
+   455→    if (typeof meta.player === 'string') {
+   456→      pushStr(meta.player);
+   457→    } else if (meta.player && typeof meta.player === 'object') {
+   458→      pushStr(meta.player.url);
+   459→      pushStr(meta.player.embed);
+   460→      pushStr(meta.player.src);
+   461→    }
+   462→    if (Array.isArray(meta.sources)) {
+   463→      for (const s of meta.sources) {
+   464→        if (typeof s === 'string') pushStr(s);
+   465→        else if (s && typeof s === 'object') pushStr(s.src);
+   466→      }
+   467→    }
+   468→    for (const raw of candidates) {
+   469→      try {
+   470→        await registerSource({ url: raw, contentId: record.id, externalId: record.externalid, addedBy: 'upsert' });
+   471→      } catch {
+   472→        /* best-effort per source */
+   473→      }
+   474→    }
+   475→  } catch {
+   476→    /* never throw from the hook */
+   477→  }
+   478→}
+   479→
+   480→export async function upsertContent({ externalid, type, title, metadata, thumbnail }) {
+   481→  if (!externalid || !title) {
+   482→    throw new Error('upsertContent requires externalid and title');
+   483→  }
+   484→  if (driver === 'local') {
+   485→    return localStore.upsert({ externalid, type, title, metadata, thumbnail });
+   486→  }
+   487→  const existing = await getContentByExternalId(externalid);
+   488→  const res = await q(UPSERT_SQL, [
+   489→    externalid,
+   490→    type ?? null,
+   491→    title,
+   492→    JSON.stringify(safeParseJson(metadata, {})),
+   493→    thumbnail ?? null,
+   494→  ]);
+   495→  const record = normalizeRow(res.rows[0]);
+   496→  // FAZA 13 (sharding): stamp the row's shard id (RANGE rule) — best-effort,
+   497→  // never throws. Ids < 1B → shard 0, matching the column DEFAULT (no-op
+   498→  // UPDATE via the `shardid <> $1` guard); future 1B+ ranges self-stamp.
+   499→  try {
+   500→    const shardid = computeShardIdFromContentId(record.id);
+   501→    await q('UPDATE content SET shardid = $1 WHERE id = $2 AND shardid <> $1', [shardid, record.id]);
+   502→  } catch (err) {
+   503→    logger.debug(`[DB] shardid stamp skipped for content ${record?.id}: ${err.message}`);
+   504→  }
+   505→  await registerContentSourcesBestEffort(record);
+   506→  return { record, created: !existing };
+   507→}
+   508→
+   509→export async function deleteContent(id) {
+   510→  if (driver === 'local') return localStore.remove(id);
+   511→  const res = await q('DELETE FROM content WHERE id = $1 RETURNING *', [Number(id)]);
+   512→  return normalizeRow(res.rows[0]);
+   513→}
+   514→
+   515→export async function countContent() {
+   516→  if (driver === 'local') return localStore.count();
+   517→  const res = await q('SELECT COUNT(*)::int AS count FROM content');
+   518→  return res.rows[0]?.count ?? 0;
+   519→}
+   520→
+   521→export async function countsByType() {
+   522→  if (driver === 'local') return localStore.countsByType();
+   523→  const res = await q('SELECT type, COUNT(*)::int AS count FROM content GROUP BY type');
+   524→  return res.rows.reduce((acc, r) => {
+   525→    acc[r.type || 'unknown'] = r.count;
+   526→    return acc;
+   527→  }, {});
+   528→}
+   529→
+   530→export function driverInfo() {
+   531→  return {
+   532→    driver: driver === 'postgres' ? 'postgres' : 'local-fallback',
+   533→    connected: driver === 'postgres',
+   534→    ...(driver !== 'postgres' && lastError ? { lastError } : {}),
+   535→  };
+   536→}
+   537→
+   538→/** FAZA 9 (ops): live pg pool gauges for the metrics collector — zeros when
+   539→ *  the pool is not initialized (local fallback driver / pre-boot). */
+   540→export function poolStats() {
+   541→  if (!pool) return { total: 0, idle: 0, waiting: 0 };
+   542→  return {
+   543→    total: typeof pool.totalCount === 'number' ? pool.totalCount : 0,
+   544→    idle: typeof pool.idleCount === 'number' ? pool.idleCount : 0,
+   545→    waiting: typeof pool.waitingCount === 'number' ? pool.waitingCount : 0,
+   546→  };
+   547→}
+   548→
+   549→/**
+   550→ * Generic SQL query on the active PostgreSQL pool — used by the Phase-2
+   551→ * platform modules (users, premium, social, ai, analytics, search, workers).
+   552→ * Throws a 503-tagged error when running on the local fallback store.
+   553→ */
+   554→export async function query(text, params = []) {
+   555→  if (driver !== 'postgres' || !pool) {
+   556→    const err = new Error('SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use)');
+   557→    err.status = 503;
+   558→    throw err;
+   559→  }
+   560→  return q(text, params);
+   561→}
+   562→
+   563→export async function ping() {
+   564→  if (driver === 'postgres') {
+   565→    try {
+   566→      await withTimeout(pool.query('SELECT 1'), 3000);
+   567→      return true;
+   568→    } catch {
+   569→      return false;
+   570→    }
+   571→  }
+   572→  return true;
+   573→}
+   574→
+   575→export async function closeDb() {
+   576→  stopReconnectProbe();
+   577→  if (pool) {
+   578→    try {
+   579→      await pool.end();
+   580→      logger.info('[DB] PostgreSQL pool closed');
+   581→    } catch (err) {
+   582→      logger.warn(`[DB] pool close error: ${err.message}`);
+   583→    }
+   584→  }
+   585→}
+   586→
+   587→/* ====================================================================
+   588→ * FAZA 13 (sharding — Task 13-2): Neon multi-branch shard pool registry.
+   589→ *
+   590→ * Every shard id in the generated shard map (see modules/sharding/model.js)
+   591→ * gets a registry entry. Shard 0 and any shard N ≥ 1 WITHOUT a configured
+   592→ * SHARD{N}URL resolve to the MAIN pool (logical sharding mode: shardid
+   593→ * columns, routing, metrics and health are real, one physical database). A
+   594→ * shard N ≥ 1 WITH a non-empty SHARD{N}URL gets a dedicated pg.Pool on that
+   595→ * Neon branch (physical mode, activated purely by configuration). queryOnShard
+   596→ * falls back to the main pool when a dedicated branch pool fails at the
+   597→ * connection level — a down branch never breaks reads.
+   598→ * ==================================================================== */
+   599→
+   600→const shardPools = new Map(); // shardId -> { shardid, branch, url, pool, ownPool, healthy, lastError, stats }
+   601→
+   602→/** Create a standalone pg.Pool for a Neon branch (same tuning as the main
+   603→ *  pool). Does NOT register it — registration is by shardId via ensureShardPool. */
+   604→export function createPoolForBranch(name, url) {
+   605→  const branchPool = new pg.Pool({
+   606→    connectionString: url,
+   607→    ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined,
+   608→    max: parseInt(process.env.PGPOOLMAX || '10', 10),
+   609→    idleTimeoutMillis: 30000,
+   610→    connectionTimeoutMillis: 8000,
+   611→  });
+   612→  branchPool.on('error', (err) => logger.error(`[DB] shard pool ${name} idle client error: ${err.message}`));
+   613→  return branchPool;
+   614→}
+   615→
+   616→/**
+   617→ * Idempotent per-shard registry entry. Shard 0 / shards without SHARD{N}URL →
+   618→ * { ownPool: false, pool: null } where the MAIN pool is resolved lazily at
+   619→ * query time (initDb() may not have run yet when this is first called).
+   620→ * Shard N ≥ 1 with a non-empty SHARD{N}URL → dedicated branch pool
+   621→ * (ownPool: true) created once and cached.
+   622→ */
+   623→export function ensureShardPool(shardId) {
+   624→  const n = Number(shardId);
+   625→  const id = Number.isInteger(n) && n >= 0 ? n : 0;
+   626→  const existing = shardPools.get(id);
+   627→  if (existing) return existing;
+   628→
+   629→  const branch = shardBranchName(id);
+   630→  const url = id >= 1 ? String(process.env[`SHARD${id}URL`] || '').trim() : '';
+   631→  const stats = { queries: 0, errors: 0 };
+   632→
+   633→  if (id >= 1 && url) {
+   634→    const entry = {
+   635→      shardid: id,
+   636→      branch,
+   637→      url,
+   638→      ownPool: true,
+   639→      pool: createPoolForBranch(branch, url),
+   640→      healthy: true,
+   641→      lastError: null,
+   642→      stats,
+   643→    };
+   644→    shardPools.set(id, entry);
+   645→    logger.info(`[DB] shard ${id} → dedicated Neon branch pool (${branch})`);
+   646→    return entry;
+   647→  }
+   648→
+   649→  // Logical mode: main-pool-backed. `pool: null` on purpose — the main pool
+   650→  // is resolved at query time (it may not exist yet pre-boot).
+   651→  const entry = {
+   652→    shardid: id,
+   653→    branch,
+   654→    url: null,
+   655→    ownPool: false,
+   656→    pool: null,
+   657→    healthy: null, // mirrors driver === 'postgres' at read time
+   658→    lastError: null,
+   659→    stats,
+   660→  };
+   661→  shardPools.set(id, entry);
+   662→  return entry;
+   663→}
+   664→
+   665→/** Ensure + return the underlying pg pool for a shard (null pre-boot for
+   666→ *  main-backed entries — the main pool is initialised by initDb()). */
+   667→export function getPoolForShard(shardId) {
+   668→  const entry = ensureShardPool(shardId);
+   669→  if (entry.ownPool) return entry.pool;
+   670→  return pool; // module-scope main pool (null until initDb runs)
+   671→}
+   672→
+   673→/** Connection-level failure detection for the branch → main fallback. */
+   674→function isConnectionError(err) {
+   675→  const code = String(err?.code || '');
+   676→  if (
+   677→    code.startsWith('08') || // PostgreSQL class 08 — connection_exception
+   678→    ['57P01', '57P02', '57P03'].includes(code) || // admin/crash shutdown, cannot connect now
+   679→    ['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'EPIPE', 'EAI_AGAIN'].includes(code)
+   680→  ) {
+   681→    return true;
+   682→  }
+   683→  const message = String(err?.message || '');
+   684→  return (
+   685→    message.includes('timeout exceeded when trying to connect') ||
+   686→    message.includes('Connection terminated') ||
+   687→    message.includes('connection terminated')
+   688→  );
+   689→}
+   690→
+   691→/**
+   692→ * Run a query on a specific shard's pool. Dedicated branch pools fall back to
+   693→ * the MAIN pool on connection-level failures (resilience — a down branch never
+   694→ * breaks reads; logged as a warning). Throws the same 503-tagged error as
+   695→ * query() when the PostgreSQL driver is inactive (local fallback store).
+   696→ */
+   697→export async function queryOnShard(shardId, text, params = []) {
+   698→  if (driver !== 'postgres' || !pool) {
+   699→    const err = new Error('SQL layer unavailable — PostgreSQL driver inactive (local fallback store in use)');
+   700→    err.status = 503;
+   701→    throw err;
+   702→  }
+   703→  const entry = ensureShardPool(shardId);
+   704→  entry.stats.queries += 1;
+   705→  const target = entry.ownPool ? entry.pool : pool;
+   706→  try {
+   707→    if (!target) throw new Error('shard pool not initialised');
+   708→    const res = await target.query(text, params);
+   709→    if (entry.ownPool) {
+   710→      entry.healthy = true;
+   711→      entry.lastError = null;
+   712→    }
+   713→    return res;
+   714→  } catch (err) {
+   715→    entry.stats.errors += 1;
+   716→    if (entry.ownPool && (err.message === 'shard pool not initialised' || isConnectionError(err))) {
+   717→      entry.healthy = false;
+   718→      entry.lastError = err.message;
+   719→      logger.warn(
+   720→        `[DB] shard ${entry.shardid} (${entry.branch}) query failed (${err.message}) — falling back to main pool`,
+   721→      );
+   722→      return pool.query(text, params); // main pool is guaranteed non-null here
+   723→    }
+   724→    throw err;
+   725→  }
+   726→}
+   727→
+   728→/** Registry snapshot for metrics/admin — one entry per shard in the shard map. */
+   729→export function listShardPools() {
+   730→  return Object.keys(shardMap())
+   731→    .map(Number)
+   732→    .sort((a, b) => a - b)
+   733→    .map((id) => {
+   734→      const entry = ensureShardPool(id);
+   735→      const poolStatsOf = (p) => ({
+   736→        total: typeof p?.totalCount === 'number' ? p.totalCount : 0,
+   737→        idle: typeof p?.idleCount === 'number' ? p.idleCount : 0,
+   738→        waiting: typeof p?.waitingCount === 'number' ? p.waitingCount : 0,
+   739→      });
+   740→      if (entry.ownPool) {
+   741→        return {
+   742→          shardid: entry.shardid,
+   743→          branch: entry.branch,
+   744→          mode: 'branch',
+   745→          urlConfigured: true,
+   746→          connected: entry.healthy === true,
+   747→          healthy: entry.healthy,
+   748→          lastError: entry.lastError,
+   749→          pool: poolStatsOf(entry.pool),
+   750→          stats: { ...entry.stats },
+   751→        };
+   752→      }
+   753→      return {
+   754→        shardid: entry.shardid,
+   755→        branch: entry.branch,
+   756→        mode: 'main',
+   757→        urlConfigured: id === 0 ? Boolean(String(process.env.DATABASEURL || '').trim()) : false,
+   758→        connected: driver === 'postgres',
+   759→        lastError: entry.lastError,
+   760→        pool: poolStats(),
+   761→        stats: { ...entry.stats },
+   762→      };
+   763→    });
+   764→}
+   765→
+   766→/** End every dedicated branch pool (ownPool). The main pool is closed by
+   767→ *  closeDb() — never double-closed here. */
+   768→export async function closeShardPools() {
+   769→  const closed = [];
+   770→  for (const [id, entry] of shardPools) {
+   771→    if (!entry.ownPool || !entry.pool) continue;
+   772→    try {
+   773→      await entry.pool.end();
+   774→      closed.push(id);
+   775→      entry.healthy = false;
+   776→      entry.lastError = 'pool closed';
+   777→    } catch (err) {
+   778→      logger.warn(`[DB] shard ${id} pool close error: ${err.message}`);
+   779→    }
+   780→  }
+   781→  if (closed.length) logger.info(`[DB] shard branch pools closed (${closed.join(', ')})`);
+   782→  return closed;
+   783→}
+   784→
+   785→/** Unified data-layer facade mirroring the named exports. */
+   786→export const db = {
+   787→  initDb,
+   788→  listContent,
+   789→  getContentById,
+   790→  getContentByExternalId,
+   791→  upsertContent,
+   792→  deleteContent,
+   793→  countContent,
+   794→  countsByType,
+   795→  driverInfo,
+   796→  ping,
+   797→  closeDb,
+   798→  query,
+   799→  // FAZA 13 (sharding) — multi-branch shard pool registry
+   800→  createPoolForBranch,
+   801→  ensureShardPool,
+   802→  getPoolForShard,
+   803→  queryOnShard,
+   804→  listShardPools,
+   805→  closeShardPools,
+   806→};
+   807→
+   808→export default db;
+   809→

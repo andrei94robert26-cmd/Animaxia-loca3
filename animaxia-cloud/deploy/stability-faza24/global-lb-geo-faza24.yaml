@@ -1,0 +1,92 @@
+# =============================================================================
+# FAZA 24 — Load balancing global (EU / US / ASIA) — plan declarativ.
+#
+#   • Rutare geografică: utilizatorii din EU → regiunea EU, US → US,
+#     ASIA → ASIA (continente + țări reprezentative; producție: GeoIP complet
+#     în edge FAZA 22 / GeoDNS).
+#   • Fallback automat: regiunea primară down → prima regiune sănătoasă din
+#     lanțul de preferințe (eu→[us,asia], us→[eu,asia], asia→[us,eu]).
+#   • Health-check global obligatoriu (poll 10s, timeout 4s, 3 eșecuri = down):
+#       backend       → /api/health        (:4000)
+#       gateway       → /api/infra/health  (:4040)
+#       observability → /health            (:4050)
+#   • Doar routing-ul — zero modificări de cod pe aplicație.
+#
+# Oglindit 1:1 de GlobalLoadBalancer (mini-services/animaxia-stability/
+# modules/loadbalancer.ts) — suita stability-faza24.mjs afirmă maparea.
+# =============================================================================
+---
+apiVersion: animaxia.io/v1
+kind: GlobalLoadBalancer
+metadata:
+  name: animaxia-global-lb
+  labels:
+    animaxia.io/faza: "24"
+spec:
+  regions:
+    - name: eu
+      label: "EU (Frankfurt)"
+      fallbackChain: [us, asia]
+    - name: us
+      label: "US (Virginia)"
+      fallbackChain: [eu, asia]
+    - name: asia
+      label: "ASIA (Singapore)"
+      fallbackChain: [us, eu]
+  geo:
+    continents:
+      EU: eu
+      NA: us
+      SA: us
+      AS: asia
+      OC: asia
+      AF: eu     # cel mai apropiat hub de cablu
+      AN: eu
+    countries:
+      RO: eu    DE: eu    FR: eu    IT: eu    ES: eu    GB: eu
+      PL: eu    NL: eu    SE: eu    MD: eu    NG: eu    ZA: eu
+      EG: eu    KE: eu
+      US: us    CA: us    MX: us    BR: us    AR: us    CO: us
+      CL: us
+      JP: asia  CN: asia  IN: asia  KR: asia  SG: asia  TH: asia
+      ID: asia  AU: asia  NZ: asia  PH: asia  VN: asia
+  healthChecks:
+    - name: backend
+      url: http://animaxia-backend.animaxia-core.svc:4000/api/health
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: true          # fără backend/gateway/observability → alertă critică
+    - name: gateway
+      url: http://animaxia-gateway.animaxia-edge.svc:4040/api/infra/health
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: true
+    - name: observability
+      url: http://animaxia-observability.animaxia-ops.svc:4050/health
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: true
+    - name: frontend
+      url: http://animaxia-frontend.animaxia-core.svc:3000/
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: false
+    - name: realtime
+      url: http://animaxia-realtime.animaxia-core.svc:4010/
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: false
+    - name: watchdog
+      url: http://animaxia-watchdog.animaxia-core.svc:4020/health
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: false
+    - name: redis
+      redisPing: animaxia-redis-global:6379
+      intervalSeconds: 10
+      timeoutSeconds: 4
+      mandatory: false
+  failover:
+    unhealthyThreshold: 3      # 3 eșecuri consecutive = regiune down
+    failback: gradual          # revenire treptată la regiunea primară
+    dnsTtlSeconds: 30          # TTL scurt pentru redirect rapid

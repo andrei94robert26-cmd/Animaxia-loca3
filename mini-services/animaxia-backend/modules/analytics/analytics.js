@@ -87,10 +87,10 @@ async function computeTrending(windowKey) {
   const agg = await rows(
     `SELECT * FROM (
        SELECT v.contentid,
-              COUNT(*) FILTER (WHERE v.event = 'view')::int AS views,
-              COUNT(*) FILTER (WHERE v.event = 'play')::int AS plays
+              COUNT(*) FILTER (WHERE v.event = 'view') AS views,
+              COUNT(*) FILTER (WHERE v.event = 'play') AS plays
        FROM viewevents v
-       WHERE v.createdat > NOW() - ($1::text)::interval
+       WHERE v.createdat > datetime('now','-' || $1)
        GROUP BY v.contentid
      ) t
      ORDER BY (t.plays * 2 + t.views) DESC, t.contentid ASC
@@ -110,8 +110,8 @@ async function computeTrending(windowKey) {
   }
 
   const contentRows = await rows(
-    `SELECT * FROM content WHERE id = ANY($1::int[])`,
-    [agg.map((r) => num(r.contentid))],
+    `SELECT * FROM content WHERE id IN (SELECT value FROM json_each($1))`,
+    [JSON.stringify(agg.map((r) => num(r.contentid)))],
   );
   const byId = new Map(contentRows.map((r) => [num(r.id), r]));
 
@@ -136,34 +136,34 @@ async function computeOverview() {
   const [totalsRow, byDayRows, topContentRows, planRows, activeRow, signupRows] = await Promise.all([
     one(
       `SELECT
-         (SELECT COUNT(*)::int FROM users) AS users,
-         (SELECT COUNT(*)::int FROM content) AS content,
-         (SELECT COUNT(*)::int FROM comments) AS comments,
-         (SELECT COUNT(*) FILTER (WHERE event = 'view')::int FROM viewevents) AS views,
-         (SELECT COUNT(*) FILTER (WHERE event = 'play')::int FROM viewevents) AS plays`,
+         (SELECT COUNT(*) FROM users) AS users,
+         (SELECT COUNT(*) FROM content) AS content,
+         (SELECT COUNT(*) FROM comments) AS comments,
+         (SELECT COUNT(*) FILTER (WHERE event = 'view') FROM viewevents) AS views,
+         (SELECT COUNT(*) FILTER (WHERE event = 'play') FROM viewevents) AS plays`,
     ),
     rows(
-      `SELECT to_char(date_trunc('day', createdat), 'YYYY-MM-DD') AS date, COUNT(*)::int AS count
+      `SELECT strftime('%Y-%m-%d', createdat) AS date, COUNT(*) AS count
        FROM viewevents
-       WHERE createdat > NOW() - '14 days'::interval
+       WHERE createdat > datetime('now','-14 days')
        GROUP BY 1
        ORDER BY 1`,
     ),
     rows(
       `SELECT v.contentid, ct.title, ct.type, ct.thumbnail,
-              COUNT(*) FILTER (WHERE v.event = 'view')::int AS views,
-              COUNT(*) FILTER (WHERE v.event = 'play')::int AS plays
+              COUNT(*) FILTER (WHERE v.event = 'view') AS views,
+              COUNT(*) FILTER (WHERE v.event = 'play') AS plays
        FROM viewevents v
        JOIN content ct ON ct.id = v.contentid
        GROUP BY v.contentid, ct.title, ct.type, ct.thumbnail
        ORDER BY views DESC, plays DESC, v.contentid ASC
        LIMIT 5`,
     ),
-    rows(`SELECT plan, COUNT(*)::int AS count FROM users GROUP BY plan`),
+    rows(`SELECT plan, COUNT(*) AS count FROM users GROUP BY plan`),
     one(
-      `SELECT COUNT(DISTINCT userid)::int AS count
+      `SELECT COUNT(DISTINCT userid) AS count
        FROM viewevents
-       WHERE userid IS NOT NULL AND createdat > NOW() - '7 days'::interval`,
+       WHERE userid IS NOT NULL AND createdat > datetime('now','-7 days')`,
     ),
     rows(`SELECT username, createdat FROM users ORDER BY createdat DESC, id DESC LIMIT 5`),
   ]);
@@ -274,25 +274,25 @@ router.get('/user/:id', requireAuth, wrap(async (req, res) => {
 
   const [totalsRow, byDayRows, topTypeRows] = await Promise.all([
     one(
-      `SELECT COUNT(*) FILTER (WHERE event = 'view')::int AS views,
-              COUNT(*) FILTER (WHERE event = 'play')::int AS plays,
-              COUNT(*) FILTER (WHERE event = 'complete')::int AS completed
+      `SELECT COUNT(*) FILTER (WHERE event = 'view') AS views,
+              COUNT(*) FILTER (WHERE event = 'play') AS plays,
+              COUNT(*) FILTER (WHERE event = 'complete') AS completed
        FROM viewevents WHERE userid = $1`,
       [targetId],
     ),
     rows(
-      `SELECT to_char(date_trunc('day', createdat), 'YYYY-MM-DD') AS date, COUNT(*)::int AS count
+      `SELECT strftime('%Y-%m-%d', createdat) AS date, COUNT(*) AS count
        FROM viewevents
-       WHERE userid = $1 AND createdat > NOW() - ($2::text)::interval
+       WHERE userid = $1 AND createdat > datetime('now','-' || $2)
        GROUP BY 1
        ORDER BY 1`,
       [targetId, `${days} days`],
     ),
     rows(
-      `SELECT ct.type AS type, COUNT(*)::int AS count
+      `SELECT ct.type AS type, COUNT(*) AS count
        FROM viewevents v
        JOIN content ct ON ct.id = v.contentid
-       WHERE v.userid = $1 AND v.createdat > NOW() - ($2::text)::interval
+       WHERE v.userid = $1 AND v.createdat > datetime('now','-' || $2)
        GROUP BY ct.type
        ORDER BY count DESC, ct.type ASC
        LIMIT 5`,

@@ -1,0 +1,37 @@
+{
+  "name": "animaxia-cloud",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud — microservices, gateway, queue, observability, K8s/Helm, CI/CD, CDN edge and disaster recovery for the Animaxia platform.",
+  "workspaces": [
+    "common",
+    "domain",
+    "services/gateway-service",
+    "services/auth-service",
+    "services/content-service",
+    "services/ai-service",
+    "services/analytics-service",
+    "services/search-service",
+    "services/premium-service",
+    "services/social-service",
+    "services/mobile-service",
+    "services/queue-service"
+  ],
+  "scripts": {
+    "dev": "bash scripts/dev-up.sh",
+    "dev:down": "bash scripts/dev-down.sh",
+    "smoke": "bash scripts/smoke-test.sh",
+    "gateway": "bun services/gateway-service/server.js",
+    "auth": "bun services/auth-service/server.js",
+    "content": "bun services/content-service/server.js",
+    "ai": "bun services/ai-service/server.js",
+    "analytics": "bun services/analytics-service/server.js",
+    "search": "bun services/search-service/server.js",
+    "premium": "bun services/premium-service/server.js",
+    "social": "bun services/social-service/server.js",
+    "mobile": "bun services/mobile-service/server.js",
+    "queue": "bun services/queue-service/server.js",
+    "verify": "node scripts/verify-syntax.mjs"
+  }
+}

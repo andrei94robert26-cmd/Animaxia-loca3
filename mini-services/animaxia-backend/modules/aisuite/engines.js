@@ -335,11 +335,11 @@ export async function socialData() {
         (SELECT count(*) FROM reviews) reviews,
         (SELECT count(*) FROM commentvotes) commentvotes,
         (SELECT count(*) FROM reviewlikes) reviewlikes,
-        (SELECT count(*) FROM activityevents WHERE createdat > NOW() - INTERVAL '7 days') activity7d`),
+        (SELECT count(*) FROM activityevents WHERE createdat > datetime('now','-7 days')) activity7d`),
     rows(`SELECT c.contentid, cnt.title, count(*) n FROM comments c JOIN content cnt ON cnt.id = c.contentid GROUP BY c.contentid, cnt.title ORDER BY n DESC LIMIT 5`),
-    rows(`SELECT r.contentid, cnt.title, count(*) n, round(avg(r.rating)::numeric, 1) avgrating FROM reviews r JOIN content cnt ON cnt.id = r.contentid GROUP BY r.contentid, cnt.title ORDER BY n DESC LIMIT 5`),
-    rows(`SELECT type, count(*) n FROM activityevents WHERE createdat > NOW() - INTERVAL '7 days' GROUP BY type ORDER BY n DESC LIMIT 8`),
-    rows(`SELECT count(*) n FROM follows WHERE createdat > NOW() - INTERVAL '7 days'`),
+    rows(`SELECT r.contentid, cnt.title, count(*) n, round(avg(r.rating), 1) avgrating FROM reviews r JOIN content cnt ON cnt.id = r.contentid GROUP BY r.contentid, cnt.title ORDER BY n DESC LIMIT 5`),
+    rows(`SELECT type, count(*) n FROM activityevents WHERE createdat > datetime('now','-7 days') GROUP BY type ORDER BY n DESC LIMIT 8`),
+    rows(`SELECT count(*) n FROM follows WHERE createdat > datetime('now','-7 days')`),
     rows(`SELECT c.id, c.body, c.createdat, cnt.title FROM comments c JOIN content cnt ON cnt.id = c.contentid ORDER BY c.createdat DESC LIMIT 12`),
     rows(`SELECT r.rating, r.title, r.body, r.createdat, cnt.title AS content_title FROM reviews r JOIN content cnt ON cnt.id = r.contentid ORDER BY r.createdat DESC LIMIT 8`),
   ]);
@@ -404,8 +404,8 @@ export async function watchpartyData() {
   /* AI group picks — high-rating, popular, family-safe-leaning titles across types. */
   const candidates = await rows(`
     SELECT id, title, type, metadata FROM content
-    WHERE (metadata->>'rating')::numeric >= 7.5 AND type IN ('movie','tv')
-    ORDER BY (metadata->>'rating')::numeric DESC, id ASC LIMIT 30`);
+    WHERE (metadata->>'rating') >= 7.5 AND type IN ('movie','tv')
+    ORDER BY (metadata->>'rating') DESC, id ASC LIMIT 30`);
   const picks = candidates
     .map((c) => ({
       contentId: c.id,
@@ -467,7 +467,7 @@ export async function recommendationsData({ userId = null, limit = 12 } = {}) {
   const trending = await rows(`
     SELECT v.contentid, c.title, c.type, c.metadata, count(*) n
     FROM viewevents v JOIN content c ON c.id = v.contentid
-    WHERE v.createdat > NOW() - INTERVAL '7 days'
+    WHERE v.createdat > datetime('now','-7 days')
     GROUP BY v.contentid, c.title, c.type, c.metadata
     ORDER BY n DESC LIMIT 10`);
   const trendingIds = new Set(trending.map((t) => t.contentid));
@@ -475,8 +475,8 @@ export async function recommendationsData({ userId = null, limit = 12 } = {}) {
   /* Signal 3 — quality pool: best rated titles. */
   const pool = await rows(`
     SELECT id, title, type, metadata FROM content
-    WHERE type IN ('movie','tv') AND (metadata->>'rating')::numeric >= 7
-    ORDER BY (metadata->>'rating')::numeric DESC, id ASC LIMIT 120`);
+    WHERE type IN ('movie','tv') AND (metadata->>'rating') >= 7
+    ORDER BY (metadata->>'rating') DESC, id ASC LIMIT 120`);
 
   const scored = pool
     .filter((p) => !watchedIds.has(p.id))
@@ -686,12 +686,12 @@ export async function statsData() {
           count(*) FILTER (WHERE status = 'error') errs,
           count(*) FILTER (WHERE degraded) degraded
         FROM aiusagelogs`),
-    rows(`SELECT feature, count(*) n, round(avg(latencyms)::numeric,0) avgms FROM aiusagelogs GROUP BY feature ORDER BY n DESC LIMIT 12`),
+    rows(`SELECT feature, count(*) n, round(avg(latencyms),0) avgms FROM aiusagelogs GROUP BY feature ORDER BY n DESC LIMIT 12`),
     rows(`SELECT provider, count(*) n FROM aiusagelogs GROUP BY provider ORDER BY n DESC`),
-    rows(`SELECT date_trunc('day', createdat) AS bucket, count(*) n FROM aiusagelogs WHERE createdat > NOW() - INTERVAL '14 days' GROUP BY 1 ORDER BY 1`),
+    rows(`SELECT strftime('%Y-%m-%d', createdat) AS bucket, count(*) n FROM aiusagelogs WHERE createdat > datetime('now','-14 days') GROUP BY 1 ORDER BY 1`),
     rows(`SELECT
-            percentile_disc(0.5) WITHIN GROUP (ORDER BY latencyms) p50,
-            percentile_disc(0.95) WITHIN GROUP (ORDER BY latencyms) p95
+            percentile_disc(latencyms, 0.5) p50,
+            percentile_disc(latencyms, 0.95) p95
           FROM aiusagelogs WHERE latencyms IS NOT NULL`),
     rows(`SELECT feature, errormessage, count(*) n FROM aiusagelogs WHERE status = 'error' GROUP BY feature, errormessage ORDER BY n DESC LIMIT 5`),
     rows(`SELECT key, value FROM aisettings WHERE key LIKE 'suite:%'`),
@@ -737,15 +737,15 @@ export async function infiniteFeed({ cursor = 0, seed = 'animaxia', genre = null
   const offset = page * size;
   const jitter = hashSeed(seed);
 
-  const where = genre ? `WHERE c.metadata->'genres' @> $1::jsonb` : '';
+  const where = genre ? `WHERE c.metadata->'genres' @> $1` : '';
   const params = genre ? [JSON.stringify([genre])] : [];
   const rowsData = await rows(
     `SELECT c.id, c.title, c.type, c.metadata, c.thumbnail,
-            (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days') views7d
+            (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > datetime('now','-7 days')) views7d
      FROM content c ${where}
      ORDER BY
-       ((COALESCE((c.metadata->>'rating')::numeric, 0) * 6)
-        + (LEAST((SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days'), 20) * 1.5)
+       ((COALESCE((c.metadata->>'rating'), 0) * 6)
+        + (LEAST((SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > datetime('now','-7 days')), 20) * 1.5)
         + (CASE WHEN c.thumbnail IS NOT NULL AND c.thumbnail <> '' THEN 5 ELSE 0 END)) DESC,
        c.id ASC
      OFFSET $${genre ? 2 : 1} LIMIT $${genre ? 3 : 2}`,
@@ -766,7 +766,7 @@ export async function infiniteFeed({ cursor = 0, seed = 'animaxia', genre = null
     };
   });
 
-  const totalRow = genre ? await one(`SELECT count(*) n FROM content c WHERE c.metadata->'genres' @> $1::jsonb`, [JSON.stringify([genre])]) : await one(`SELECT count(*) n FROM content`);
+  const totalRow = genre ? await one(`SELECT count(*) n FROM content c WHERE c.metadata->'genres' @> $1`, [JSON.stringify([genre])]) : await one(`SELECT count(*) n FROM content`);
   const total = Number(totalRow?.n || 0);
   const ms = Date.now() - t0;
   recordRun('infinite', { provider: 'sql', ms });
@@ -1050,18 +1050,18 @@ export async function posterData({ sampleSize = 12 } = {}) {
 export async function trendsData() {
   const t0 = Date.now();
   const [now7, prev7, byGenre, watchMomentum, topContent] = await Promise.all([
-    rows(`SELECT contentid, count(*) n FROM viewevents WHERE createdat > NOW() - INTERVAL '7 days' GROUP BY contentid ORDER BY n DESC LIMIT 10`),
-    rows(`SELECT contentid, count(*) n FROM viewevents WHERE createdat > NOW() - INTERVAL '14 days' AND createdat <= NOW() - INTERVAL '7 days' GROUP BY contentid`),
+    rows(`SELECT contentid, count(*) n FROM viewevents WHERE createdat > datetime('now','-7 days') GROUP BY contentid ORDER BY n DESC LIMIT 10`),
+    rows(`SELECT contentid, count(*) n FROM viewevents WHERE createdat > datetime('now','-14 days') AND createdat <= datetime('now','-7 days') GROUP BY contentid`),
     rows(`
       SELECT g.value genre, count(*) n
-      FROM viewevents v, content c, jsonb_array_elements_text(c.metadata->'genres') g
-      WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days'
+      FROM viewevents v, content c, json_each(c.metadata->'genres') g
+      WHERE v.contentid = c.id AND v.createdat > datetime('now','-7 days')
       GROUP BY g.value ORDER BY n DESC LIMIT 8`),
-    one(`SELECT count(*) FILTER (WHERE watchedat > NOW() - INTERVAL '7 days') last7, count(*) FILTER (WHERE watchedat > NOW() - INTERVAL '14 days' AND watchedat <= NOW() - INTERVAL '7 days') prev7 FROM watchhistory`),
+    one(`SELECT count(*) FILTER (WHERE watchedat > datetime('now','-7 days')) last7, count(*) FILTER (WHERE watchedat > datetime('now','-14 days') AND watchedat <= datetime('now','-7 days')) prev7 FROM watchhistory`),
     rows(`
       SELECT c.id, c.title, c.metadata,
-        (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '7 days') now_n,
-        (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > NOW() - INTERVAL '14 days' AND v.createdat <= NOW() - INTERVAL '7 days') prev_n
+        (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > datetime('now','-7 days')) now_n,
+        (SELECT count(*) FROM viewevents v WHERE v.contentid = c.id AND v.createdat > datetime('now','-14 days') AND v.createdat <= datetime('now','-7 days')) prev_n
       FROM content c WHERE c.type IN ('movie','tv') ORDER BY c.id DESC LIMIT 200`),
   ]);
 

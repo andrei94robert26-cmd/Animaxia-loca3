@@ -1,0 +1,18 @@
+{
+  "name": "@animaxia/content-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud content-service (:4002) — core content CRUD + miner + admin seed (ported verbatim from the monolith server.js core routes) plus the provider mounts (Jikan anime, TMDB movies/tv, TVmaze schedule, football, F1, RSS news) and the advanced-cache management router.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "fast-xml-parser": "^4.5.1"
+  }
+}

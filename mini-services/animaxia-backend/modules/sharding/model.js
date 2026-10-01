@@ -149,15 +149,20 @@ export function resolveShardFromRequest({ tenant, contentId, header } = {}) {
  */
 export function shardingModelSnapshot() {
   const n = shardCount();
-  const shards = [];
-  let physical = false;
-  for (let i = 0; i < n; i += 1) {
-    const urlConfigured =
-      i === 0
-        ? Boolean(String(process.env.DATABASEURL || '').trim()) // shard 0 is backed by the main DATABASEURL
-        : Boolean(String(process.env[`SHARD${i}URL`] || '').trim());
-    if (i >= 1 && urlConfigured) physical = true;
-    shards.push({ shardid: i, branch: shardBranchName(i), urlConfigured });
-  }
-  return { shardcount: n, shards, mode: physical ? 'physical' : 'logical' };
+
+  const shards = Array.from({ length: n }, (_, shardid) => ({
+    shardid,
+    branch: shardBranchName(shardid),
+    urlConfigured: false,
+    backend: 'sqlite',
+    storage: 'local',
+    routesTo: 0,
+  }));
+
+  return {
+    shardcount: n,
+    shards,
+    mode: 'sqlite-local',
+    physicalDatabases: 1,
+  };
 }

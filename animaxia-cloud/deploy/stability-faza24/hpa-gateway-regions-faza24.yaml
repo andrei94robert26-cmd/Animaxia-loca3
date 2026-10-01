@@ -1,0 +1,175 @@
+# =============================================================================
+# FAZA 24 — HPA gateway global PER REGIUNE (EU / US / ASIA).
+#
+#   metrici: RPS per replică, latență p95, error rate
+#   scale-out la spike-uri de trafic:  rps/replică > 375 (75% din 500)
+#                                      | p95 > 400ms | erori > 2%
+#   scale-in la trafic redus:          rps/replică < 150 (30% din 500)
+#   min 2 / max 15 replici PER REGIUNE.
+#
+# Gateway-ul doar rutează — logica FAZA 18/20/21/23 rămâne în backend,
+# NICIODATAL atinsă. Valorile = GATEWAY_POLICIES din
+# mini-services/animaxia-stability/config.ts.
+# =============================================================================
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: animaxia-gateway-eu-faza24
+  namespace: animaxia-edge
+  labels:
+    app.kubernetes.io/name: animaxia-global-gateway
+    animaxia.io/region: eu
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: animaxia-gateway-eu
+  minReplicas: 2
+  maxReplicas: 15
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_rps
+        target:
+          type: AverageValue
+          averageValue: "500"   # capacitatea per replică (GATEWAY_RPS_PER_REPLICA)
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_latency_p95_ms
+        target:
+          type: AverageValue
+          averageValue: "400"   # GATEWAY_LATENCY_P95_MS
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_error_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"     # GATEWAY_ERROR_RATE_PCT
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120   # fereastra spike 2 min (identic :4060)
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600   # trafic redus 10 min înainte de scale-in
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: animaxia-gateway-us-faza24
+  namespace: animaxia-edge
+  labels:
+    app.kubernetes.io/name: animaxia-global-gateway
+    animaxia.io/region: us
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: animaxia-gateway-us
+  minReplicas: 2
+  maxReplicas: 15
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_rps
+        target:
+          type: AverageValue
+          averageValue: "500"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_latency_p95_ms
+        target:
+          type: AverageValue
+          averageValue: "400"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_error_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: animaxia-gateway-asia-faza24
+  namespace: animaxia-edge
+  labels:
+    app.kubernetes.io/name: animaxia-global-gateway
+    animaxia.io/region: asia
+    animaxia.io/faza: "24"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: animaxia-gateway-asia
+  minReplicas: 2
+  maxReplicas: 15
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_rps
+        target:
+          type: AverageValue
+          averageValue: "500"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_latency_p95_ms
+        target:
+          type: AverageValue
+          averageValue: "400"
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_gateway_error_rate_pct
+        target:
+          type: AverageValue
+          averageValue: "2"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

@@ -24,7 +24,6 @@
 
 import express from 'express';
 import { rows, one, isoOrNull, num } from '../platform/sql.js';
-import { assertPostgres } from '../platform/sql.js';
 import { requireAuth, attachUser } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import { insertActivityEvent } from './activity-events.js';
@@ -97,7 +96,6 @@ socialReviewsRouter.get(
   '/reviews/content/:id',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     const contentId = parseId(req.params.id);
     if (!Number.isInteger(contentId)) return res.status(400).json({ error: 'Invalid content id' });
 
@@ -128,7 +126,6 @@ socialReviewsRouter.post(
   requireAuth,
   reviewLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const contentId = parseId(req.body?.contentId);
     const rating = num(req.body?.rating, NaN);
@@ -153,7 +150,7 @@ socialReviewsRouter.post(
 
     const saved = existing
       ? await one(
-          `UPDATE reviews SET rating = $3, title = $4, body = $5, updatedat = NOW()
+          `UPDATE reviews SET rating = $3, title = $4, body = $5, updatedat = CURRENT_TIMESTAMP
            WHERE id = $1 AND userid = $2
            RETURNING id, rating, title, body, createdat, updatedat, contentid`,
           [num(existing.id), me, rating, title, body],
@@ -200,7 +197,6 @@ socialReviewsRouter.delete(
   '/reviews/:id',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid review id' });
     const review = await one(`SELECT id, userid FROM reviews WHERE id = $1`, [id]);
@@ -219,7 +215,6 @@ socialReviewsRouter.post(
   requireAuth,
   likeLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid review id' });
@@ -252,7 +247,6 @@ socialReviewsRouter.get(
   '/reviews/recent',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     const limit = Math.min(Math.max(num(req.query.limit, 20), 1), 50);
     const me = req.user ? num(req.user.id) : null;
 

@@ -1,0 +1,625 @@
+     1→/**
+     2→ * modules/users/auth.js — Authentication core:
+     3→ *   • POST /api/auth/register — create account (first user or ADMINEMAILS → admin)
+     4→ *   • POST /api/auth/login    — password login with brute-force protection
+     5→ *   • POST /api/auth/refresh  — rotating refresh tokens (sha256-hashed at rest)
+     6→ *   • POST /api/auth/logout   — revoke a refresh token
+     7→ *   • GET  /api/auth/me       — current user profile snapshot
+     8→ *   • POST /api/auth/forgot-password — issue a 6-digit reset code (Phase 6)
+     9→ *   • POST /api/auth/reset-password  — consume the code, set a new password (Phase 6)
+    10→ *   • GET  /api/auth/verify?token=   — TS3: consume an email verification token
+    11→ *   • POST /api/auth/2fa/setup|enable|disable — TS3: TOTP 2FA lifecycle
+    12→ * Middleware: attachUser (optional), requireAuth, requireAdmin.
+    13→ * Zero external crypto dependencies: node:crypto HS256 JWT + scrypt hashing
+    14→ * (TS3 keeps this true: TOTP is also node:crypto-only, see ./totp.js).
+    15→ */
+    16→
+    17→import crypto from 'node:crypto';
+    18→import express from 'express';
+    19→import { one, rows, parseJsonb, isoOrNull, num } from '../platform/sql.js';
+    20→import { clientIpOf, bruteForce, auditLog, userRateLimit } from '../security/security.js';
+    21→import { logger } from '../../utils/logger.js';
+    22→import { baseAuthSecret, tenantSecretFor, verifyTenantJwt, tenantOfPayload } from '../tenant/jwt-tenant.js';
+    23→import { tenantOfUser, GLOBAL_TENANT_SLUG } from '../tenant/core.js';
+    24→import { sendMail, smtpConfigured } from './mailer.js'; // TS3: real SMTP (nodemailer, lazy)
+    25→import { generateSecret, verifyTotp } from './totp.js'; // TS3: RFC 6238 TOTP, node:crypto only
+    26→
+    27→const ACCESS_TTL_SEC = 15 * 60; // 15 minutes
+    28→const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+    29→
+    30→const authLimiter = userRateLimit({ scope: 'ip', max: 30, windowMs: 60000, key: 'auth' });
+    31→
+    32→/* --------------------------------- JWT core --------------------------------- */
+    33→
+    34→function authSecret() {
+    35→  if (process.env.AUTHSECRET) return process.env.AUTHSECRET;
+    36→  // Deterministic derived secret: stable across restarts without extra config,
+    37→  // unique per deployment (bound to the DATABASEURL).
+    38→  return crypto
+    39→    .createHash('sha256')
+    40→    .update(`animaxia-auth:${process.env.DATABASEURL || 'local'}`)
+    41→    .digest('hex');
+    42→}
+    43→
+    44→// FAZA 11: the canonical base secret + per-tenant derivation live in
+    45→// modules/tenant/jwt-tenant.js (same derivation as authSecret above).
+    46→void baseAuthSecret;
+    47→const authSecretForTenant = (slug) => tenantSecretFor(slug);
+    48→
+    49→function b64url(input) {
+    50→  return Buffer.from(input).toString('base64url');
+    51→}
+    52→
+    53→function signJwt(payload) {
+    54→  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+    55→  const nowSec = Math.floor(Date.now() / 1000);
+    56→  // FAZA 11: tokens with a non-global `tenant` claim are signed with the
+    57→  // per-tenant derived secret; everything else keeps the base secret
+    58→  // (byte-identical signatures to pre-FAZA-11 tokens).
+    59→  const secret = payload?.tenant && payload.tenant !== GLOBAL_TENANT_SLUG
+    60→    ? authSecretForTenant(payload.tenant)
+    61→    : authSecret();
+    62→  const body = b64url(JSON.stringify({ ...payload, iat: nowSec, exp: nowSec + ACCESS_TTL_SEC }));
+    63→  const sig = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
+    64→  return `${header}.${body}.${sig}`;
+    65→}
+    66→
+    67→function verifyJwt(token) {
+    68→  // FAZA 11: dual-path verification (base secret first, then the
+    69→  // tenant-derived secret selected via the untrusted tenant claim).
+    70→  // Accepts every token the legacy single-path verifier accepted.
+    71→  return verifyTenantJwt(token);
+    72→}
+    73→
+    74→/* ------------------------------ password hashing ----------------------------- */
+    75→
+    76→function hashPassword(password) {
+    77→  const salt = crypto.randomBytes(16);
+    78→  const N = 16384;
+    79→  const r = 8;
+    80→  const p = 1;
+    81→  const key = crypto.scryptSync(String(password), salt, 32, { N, r, p });
+    82→  return `scrypt$${N}$${r}$${p}$${salt.toString('base64')}$${key.toString('base64')}`;
+    83→}
+    84→
+    85→function verifyPassword(password, stored) {
+    86→  try {
+    87→    const [scheme, nStr, rStr, pStr, saltB64, hashB64] = String(stored || '').split('$');
+    88→    if (scheme !== 'scrypt' || !saltB64 || !hashB64) return false;
+    89→    const salt = Buffer.from(saltB64, 'base64');
+    90→    const expected = Buffer.from(hashB64, 'base64');
+    91→    const actual = crypto.scryptSync(String(password), salt, expected.length, {
+    92→      N: parseInt(nStr, 10),
+    93→      r: parseInt(rStr, 10),
+    94→      p: parseInt(pStr, 10),
+    95→    });
+    96→    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+    97→  } catch {
+    98→    return false;
+    99→  }
+   100→}
+   101→
+   102→/* ------------------------------ user serialization ---------------------------- */
+   103→
+   104→export function publicUser(row) {
+   105→  if (!row) return null;
+   106→  return {
+   107→    id: num(row.id),
+   108→    email: row.email,
+   109→    username: row.username,
+   110→    avatar: row.avatar || null,
+   111→    role: row.role || 'user',
+   112→    plan: row.plan || 'free',
+   113→    planexpiresat: isoOrNull(row.planexpiresat),
+   114→    preferences: parseJsonb(row.preferences, {}),
+   115→    createdat: isoOrNull(row.createdat),
+   116→    lastloginat: isoOrNull(row.lastloginat),
+   117→    // TS3 (auth avansat): additive fields — email verification + 2FA state.
+   118→    emailverified: row.emailverified === true,
+   119→    twofaenabled: row.twofaenabled === true,
+   120→  };
+   121→}
+   122→
+   123→export async function getUserById(id) {
+   124→  return one(`SELECT * FROM users WHERE id = $1`, [Number(id)]);
+   125→}
+   126→
+   127→/* -------------------------------- token session ------------------------------- */
+   128→
+   129→async function issueSession(user, ip, tenantSlug = null) {
+   130→  // FAZA 11: resolve the caller's tenant (explicit override on refresh
+   131→  // rotation, else the user's membership; 'global' fallback keeps the
+   132→  // pre-FAZA-11 token shape + signing path for anonymous/legacy accounts).
+   133→  let tenant = tenantSlug || GLOBAL_TENANT_SLUG;
+   134→  if (!tenantSlug) {
+   135→    try {
+   136→      const t = await tenantOfUser(user.id);
+   137→      if (t?.slug) tenant = t.slug;
+   138→    } catch {
+   139→      tenant = GLOBAL_TENANT_SLUG;
+   140→    }
+   141→  }
+   142→  const accessToken = signJwt({ sub: Number(user.id), email: user.email, plan: user.plan || 'free', typ: 'access', tenant });
+   143→  const refreshToken = crypto.randomBytes(48).toString('base64url');
+   144→  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+   145→  await rows(
+   146→    `INSERT INTO refreshtokens (userid, tokenhash, expiresat, tenantid) VALUES ($1, $2, NOW() + ($3::text)::interval, $4)`,
+   147→    [Number(user.id), tokenHash, `${Math.round(REFRESH_TTL_MS / 1000)} seconds`, tenant],
+   148→  );
+   149→  return { accessToken, refreshToken, expiresIn: ACCESS_TTL_SEC, tenant };
+   150→}
+   151→
+   152→async function findRefreshToken(refreshToken) {
+   153→  if (!refreshToken || typeof refreshToken !== 'string') return null;
+   154→  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+   155→  const row = await one(
+   156→    `SELECT rt.*, u.id AS uid FROM refreshtokens rt
+   157→     JOIN users u ON u.id = rt.userid
+   158→     WHERE rt.tokenhash = $1 AND rt.revoked = FALSE AND rt.expiresat > NOW()`,
+   159→    [tokenHash],
+   160→  );
+   161→  // FAZA 11: refresh tokens are tenant-aware — the rotated session keeps the
+   162→  // tenant the token was issued under (falls back to the user's current
+   163→  // tenant when the column predates FAZA 11).
+   164→  return row || null;
+   165→}
+   166→
+   167→async function revokeRefreshToken(refreshToken) {
+   168→  if (!refreshToken || typeof refreshToken !== 'string') return false;
+   169→  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+   170→  const res = await one(
+   171→    `UPDATE refreshtokens SET revoked = TRUE WHERE tokenhash = $1 AND revoked = FALSE RETURNING id`,
+   172→    [tokenHash],
+   173→  );
+   174→  return Boolean(res);
+   175→}
+   176→
+   177→/* --------------------------------- middleware -------------------------------- */
+   178→
+   179→function extractBearer(req) {
+   180→  const header = req.headers.authorization;
+   181→  if (!header || !String(header).startsWith('Bearer ')) return null;
+   182→  const token = String(header).slice(7).trim();
+   183→  return token || null;
+   184→}
+   185→
+   186→/** Attach req.user when a valid Bearer token is present; never rejects. */
+   187→export async function attachUser(req, _res, next) {
+   188→  try {
+   189→    const token = extractBearer(req);
+   190→    if (token) {
+   191→      const payload = verifyJwt(token);
+   192→      if (payload?.sub) {
+   193→        const row = await getUserById(payload.sub);
+   194→        if (row) {
+   195→          req.user = publicUser(row);
+   196→          req.user.tenant = tenantOfPayload(payload); // FAZA 11 (additive field)
+   197→        }
+   198→      }
+   199→    }
+   200→  } catch {
+   201→    // DB hiccup on an optional path — continue as anonymous.
+   202→  }
+   203→  next();
+   204→}
+   205→
+   206→/** Require a valid Bearer token; sets req.user (fresh row) or rejects 401. */
+   207→export async function requireAuth(req, res, next) {
+   208→  const token = extractBearer(req);
+   209→  const payload = token ? verifyJwt(token) : null;
+   210→  if (!payload?.sub) {
+   211→    return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+   212→  }
+   213→  try {
+   214→    const row = await getUserById(payload.sub);
+   215→    if (!row) return res.status(401).json({ error: 'Account no longer exists', code: 'AUTH_REQUIRED' });
+   216→    req.user = publicUser(row);
+   217→    req.user.tenant = tenantOfPayload(payload); // FAZA 11 (additive field)
+   218→    return next();
+   219→  } catch (err) {
+   220→    return next(err);
+   221→  }
+   222→}
+   223→
+   224→/** Require the caller to be an admin (use after requireAuth). */
+   225→export function requireAdmin(req, res, next) {
+   226→  if (!req.user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+   227→  if (req.user.role !== 'admin') {
+   228→    return res.status(403).json({ error: 'Admin access required', code: 'ADMIN_REQUIRED' });
+   229→  }
+   230→  return next();
+   231→}
+   232→
+   233→/* ---------------------------------- router ----------------------------------- */
+   234→
+   235→export const authRouter = express.Router();
+   236→
+   237→const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+   238→const USERNAME_RE = /^[a-zA-Z0-9._-]{3,24}$/;
+   239→
+   240→authRouter.post('/register', authLimiter, async (req, res, next) => {
+   241→  try {
+   242→    const { email, username, password } = req.body || {};
+   243→    const ip = clientIpOf(req);
+   244→    if (!email || !username || !password) {
+   245→      return res.status(400).json({ error: 'Missing required fields: email, username, password' });
+   246→    }
+   247→    if (!EMAIL_RE.test(String(email))) {
+   248→      return res.status(400).json({ error: 'Invalid email address' });
+   249→    }
+   250→    if (!USERNAME_RE.test(String(username))) {
+   251→      return res.status(400).json({ error: 'Username must be 3-24 characters (letters, numbers, . _ -)' });
+   252→    }
+   253→    if (String(password).length < 8) {
+   254→      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+   255→    }
+   256→
+   257→    const existing = await one(`SELECT id, email FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+   258→    if (existing) {
+   259→      await auditLog({ action: 'auth.register.duplicate', ip, meta: { email } });
+   260→      return res.status(409).json({ error: 'An account with this email already exists' });
+   261→    }
+   262→
+   263→    // Bootstrap rule: ADMINEMAILS env list, or the very first account created.
+   264→    const adminEmails = (process.env.ADMINEMAILS || '')
+   265→      .split(',')
+   266→      .map((s) => s.trim().toLowerCase())
+   267→      .filter(Boolean);
+   268→    const adminCount = await one(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin'`);
+   269→    const role = adminEmails.includes(String(email).toLowerCase()) || num(adminCount?.count) === 0 ? 'admin' : 'user';
+   270→
+   271→    const inserted = await one(
+   272→      `INSERT INTO users (email, username, passwordhash, role, preferences)
+   273→       VALUES ($1, $2, $3, $4, '{}'::jsonb)
+   274→       RETURNING *`,
+   275→      [String(email).toLowerCase(), String(username), hashPassword(password), role],
+   276→    );
+   277→
+   278→    // TS3 (email verification): with SMTP configured the account starts
+   279→    // UNVERIFIED and a single-use 24h token is emailed; without SMTP (sandbox)
+   280→    // the account is auto-verified. Registration is NEVER blocked by mail —
+   281→    // sendMail degrades silently and the token simply stays pending.
+   282→    let emailVerified = false;
+   283→    try {
+   284→      if (smtpConfigured()) {
+   285→        const verifyToken = crypto.randomBytes(32).toString('hex');
+   286→        await rows(
+   287→          `INSERT INTO emailtokens (token, userid, purpose, expiresat)
+   288→           VALUES ($1, $2, 'verify-email', NOW() + interval '24 hours')`,
+   289→          [verifyToken, Number(inserted.id)],
+   290→        );
+   291→        const appUrl = String(process.env.APPURL || 'http://localhost:81').replace(/\/+$/, '');
+   292→        const verifyUrl = `${appUrl}/#/auth?verify=${verifyToken}`;
+   293→        await sendMail({
+   294→          to: inserted.email,
+   295→          subject: 'Animaxia — confirmă adresa de email',
+   296→          text: `Salut, ${inserted.username}!\n\nConfirma adresa de email pentru contul tău Animaxia:\n${verifyUrl}\n\nLink-ul expiră în 24 de ore și poate fi folosit o singură dată.`,
+   297→          html: `<p>Salut, <b>${inserted.username}</b>!</p><p>Confirmă adresa de email pentru contul tău Animaxia:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p style="color:#888">Link-ul expiră în 24 de ore și poate fi folosit o singură dată.</p>`,
+   298→        });
+   299→        logger.info(`[auth] Verification email sent/queued for ${inserted.email}`);
+   300→      } else {
+   301→        emailVerified = true;
+   302→        await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(inserted.id)]);
+   303→        logger.info(`[auth] sandbox: auto-verified ${inserted.email} (SMTPURL unset)`);
+   304→      }
+   305→    } catch (verifyErr) {
+   306→      // Never block registration on the verification side-channel.
+   307→      logger.warn(`[auth] email-verify side-channel failed for ${inserted.email}: ${verifyErr?.message || verifyErr}`);
+   308→    }
+   309→
+   310→    const session = await issueSession(inserted, ip);
+   311→    await auditLog({ userid: Number(inserted.id), action: 'auth.register', ip, meta: { role } });
+   312→    logger.info(`[auth] Registered ${inserted.email} (role=${role})`);
+   313→    return res.status(201).json({ ok: true, user: publicUser({ ...inserted, emailverified: emailVerified }), ...session });
+   314→  } catch (err) {
+   315→    // TS1 (security/integrity): users_username_lower_unique (case-insensitive)
+   316→    // → honest 409 instead of a raw 500 from the unique index violation.
+   317→    if (err && err.code === '23505' && /users_username_lower_unique|users_username_key/i.test(String(err.constraint || err.message))) {
+   318→      return res.status(409).json({ error: 'Username already taken' });
+   319→    }
+   320→    return next(err);
+   321→  }
+   322→});
+   323→
+   324→authRouter.post('/login', authLimiter, async (req, res, next) => {
+   325→  try {
+   326→    const { email, password } = req.body || {};
+   327→    const ip = clientIpOf(req);
+   328→    if (!email || !password) {
+   329→      return res.status(400).json({ error: 'Missing required fields: email, password' });
+   330→    }
+   331→
+   332→    const gate = bruteForce.check(ip, email);
+   333→    if (!gate.allowed) {
+   334→      await auditLog({ action: 'auth.login.locked', ip, meta: { email } });
+   335→      res.set('Retry-After', String(gate.retryAfterSec));
+   336→      return res.status(429).json({
+   337→        error: `Too many failed attempts — account locked for ${gate.retryAfterSec}s`,
+   338→        retryAfterSec: gate.retryAfterSec,
+   339→        code: 'BRUTE_FORCE_LOCK',
+   340→      });
+   341→    }
+   342→
+   343→    const row = await one(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+   344→    if (!row || !verifyPassword(password, row.passwordhash)) {
+   345→      bruteForce.record(ip, email, false);
+   346→      await auditLog({ userid: row ? Number(row.id) : null, action: 'auth.login.failed', ip, meta: { email } });
+   347→      const check = bruteForce.check(ip, email);
+   348→      return res.status(401).json({
+   349→        error: 'Invalid email or password',
+   350→        attemptsRemaining: check.remaining,
+   351→      });
+   352→    }
+   353→
+   354→    bruteForce.record(ip, email, true);
+   355→    await rows(`UPDATE users SET lastloginat = NOW() WHERE id = $1`, [Number(row.id)]);
+   356→
+   357→    // TS3 (2FA TOTP): enabled accounts must present a valid current code —
+   358→    // a missing code answers 401 2FA_REQUIRED so the client can re-prompt.
+   359→    if (row.twofaenabled) {
+   360→      const totp = String(req.body?.code ?? '').trim();
+   361→      if (!totp) {
+   362→        return res.status(401).json({ error: '2FA code required', code: '2FA_REQUIRED' });
+   363→      }
+   364→      if (!verifyTotp(row.twofasecret, totp)) {
+   365→        bruteForce.record(ip, email, false); // brute-forcing codes hits the same lock
+   366→        await auditLog({ userid: Number(row.id), action: 'auth.login.2fa_failed', ip, meta: { email } });
+   367→        return res.status(401).json({ error: 'Invalid 2FA code', code: '2FA_INVALID' });
+   368→      }
+   369→    }
+   370→
+   371→    const session = await issueSession(row, ip);
+   372→    await auditLog({ userid: Number(row.id), action: 'auth.login', ip, meta: {} });
+   373→    return res.json({ ok: true, user: publicUser(row), ...session });
+   374→  } catch (err) {
+   375→    return next(err);
+   376→  }
+   377→});
+   378→
+   379→/* TS1 (security): token refresh is an auth surface too — same limiter as
+   380→   login/register (brute-forcing refresh tokens gets throttled the same way). */
+   381→authRouter.post('/refresh', authLimiter, async (req, res, next) => {
+   382→  try {
+   383→    const { refreshToken } = req.body || {};
+   384→    const row = await findRefreshToken(refreshToken);
+   385→    if (!row) {
+   386→      return res.status(401).json({ error: 'Invalid or expired refresh token', code: 'REFRESH_INVALID' });
+   387→    }
+   388→    // Rotation: revoke the presented token, issue a fresh pair.
+   389→    await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE id = $1`, [Number(row.id)]);
+   390→    const user = await getUserById(row.userid);
+   391→    if (!user) return res.status(401).json({ error: 'Account no longer exists', code: 'REFRESH_INVALID' });
+   392→    const session = await issueSession(user, clientIpOf(req), row.tenantid || null);
+   393→    return res.json({ ok: true, ...session });
+   394→  } catch (err) {
+   395→    return next(err);
+   396→  }
+   397→});
+   398→
+   399→authRouter.post('/logout', async (req, res, next) => {
+   400→  try {
+   401→    const { refreshToken } = req.body || {};
+   402→    const revoked = await revokeRefreshToken(refreshToken);
+   403→    return res.json({ ok: true, revoked });
+   404→  } catch (err) {
+   405→    return next(err);
+   406→  }
+   407→});
+   408→
+   409→authRouter.get('/me', requireAuth, async (req, res) => {
+   410→  const stats = await one(
+   411→    `SELECT
+   412→       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
+   413→       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history,
+   414→       (SELECT COUNT(*)::int FROM comments WHERE userid = $1) AS comments`,
+   415→    [req.user.id],
+   416→  );
+   417→  res.json({ user: req.user, stats: { watchlist: num(stats?.watchlist), history: num(stats?.history), comments: num(stats?.comments) } });
+   418→});
+   419→
+   420→/* ----------------- TS3: email verification + 2FA TOTP (additive) -------------- */
+   421→
+   422→/**
+   423→ * GET /api/auth/verify?token= — consume a single-use, <24h email verification
+   424→ * token: marks the account emailverified=true and the token used. The email
+   425→ * link targets {APPURL}/#/auth?verify={token}; the SPA calls this endpoint.
+   426→ */
+   427→authRouter.get('/verify', async (req, res, next) => {
+   428→  try {
+   429→    const token = String(req.query.token || '').trim().toLowerCase();
+   430→    if (!/^[0-9a-f]{64}$/.test(token)) {
+   431→      return res.status(400).json({ error: 'Invalid verification token format' });
+   432→    }
+   433→    const row = await one(
+   434→      `SELECT userid FROM emailtokens
+   435→       WHERE token = $1 AND purpose = 'verify-email' AND usedat IS NULL AND expiresat > NOW()`,
+   436→      [token],
+   437→    );
+   438→    if (!row) {
+   439→      return res.status(400).json({ error: 'Invalid or expired verification token' });
+   440→    }
+   441→    await rows(`UPDATE emailtokens SET usedat = NOW() WHERE token = $1`, [token]);
+   442→    await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(row.userid)]);
+   443→    await auditLog({ userid: Number(row.userid), action: 'auth.email.verified', ip: clientIpOf(req), meta: {} });
+   444→    logger.info(`[auth] Email verified for user ${row.userid}`);
+   445→    return res.json({ ok: true, message: 'Email verificat' });
+   446→  } catch (err) {
+   447→    return next(err);
+   448→  }
+   449→});
+   450→
+   451→/**
+   452→ * POST /api/auth/2fa/setup — start TOTP enrollment: stores a fresh secret
+   453→ * (still inactive) and returns it with an otpauth:// URL for the user's
+   454→ * authenticator app (Google Authenticator &c. render the QR from this).
+   455→ * The CURRENT CODE IS NEVER RETURNED — activation requires proving the user
+   456→ * owns a working device via POST /2fa/enable {code}.
+   457→ */
+   458→authRouter.post('/2fa/setup', requireAuth, async (req, res, next) => {
+   459→  try {
+   460→    const row = await getUserById(req.user.id);
+   461→    if (row?.twofaenabled) {
+   462→      return res.status(400).json({ error: '2FA is already enabled — disable it first (/2fa/disable)' });
+   463→    }
+   464→    const secret = generateSecret(); // 20 bytes → 32 base32 chars
+   465→    await rows(`UPDATE users SET twofasecret = $1 WHERE id = $2`, [secret, req.user.id]);
+   466→    const email = row?.email || req.user.email;
+   467→    const otpauthUrl = `otpauth://totp/Animaxia:${encodeURIComponent(email)}?secret=${secret}&issuer=Animaxia`;
+   468→    await auditLog({ userid: req.user.id, action: 'auth.2fa.setup_started', ip: clientIpOf(req), meta: {} });
+   469→    logger.info(`[auth] 2FA setup started for user ${req.user.id} (secret stored, NOT enabled)`);
+   470→    return res.json({ ok: true, secret, otpauthUrl });
+   471→  } catch (err) {
+   472→    return next(err);
+   473→  }
+   474→});
+   475→
+   476→/** POST /api/auth/2fa/enable {code} — confirm enrollment with a live code. */
+   477→authRouter.post('/2fa/enable', requireAuth, async (req, res, next) => {
+   478→  try {
+   479→    const { code } = req.body || {};
+   480→    const row = await getUserById(req.user.id);
+   481→    if (row?.twofaenabled) {
+   482→      return res.json({ ok: true, already: true });
+   483→    }
+   484→    if (!row?.twofasecret) {
+   485→      return res.status(400).json({ error: 'No 2FA setup in progress — call /2fa/setup first' });
+   486→    }
+   487→    if (!code || !verifyTotp(row.twofasecret, String(code).trim())) {
+   488→      return res.status(400).json({ error: 'Invalid 2FA code — check your authenticator app and try again' });
+   489→    }
+   490→    await rows(`UPDATE users SET twofaenabled = TRUE WHERE id = $1`, [req.user.id]);
+   491→    await auditLog({ userid: req.user.id, action: 'auth.2fa.enabled', ip: clientIpOf(req), meta: {} });
+   492→    logger.info(`[auth] 2FA ENABLED for user ${req.user.id}`);
+   493→    return res.json({ ok: true });
+   494→  } catch (err) {
+   495→    return next(err);
+   496→  }
+   497→});
+   498→
+   499→/** POST /api/auth/2fa/disable {code} — verify a live code, then wipe the secret. */
+   500→authRouter.post('/2fa/disable', requireAuth, async (req, res, next) => {
+   501→  try {
+   502→    const { code } = req.body || {};
+   503→    const row = await getUserById(req.user.id);
+   504→    if (!row?.twofaenabled && !row?.twofasecret) {
+   505→      return res.status(400).json({ error: '2FA is not enabled' });
+   506→    }
+   507→    if (!row?.twofasecret || !code || !verifyTotp(row.twofasecret, String(code).trim())) {
+   508→      await auditLog({ userid: req.user.id, action: 'auth.2fa.disable_failed', ip: clientIpOf(req), meta: {} });
+   509→      return res.status(400).json({ error: 'Invalid 2FA code — 2FA stays enabled' });
+   510→    }
+   511→    await rows(`UPDATE users SET twofasecret = NULL, twofaenabled = FALSE WHERE id = $1`, [req.user.id]);
+   512→    await auditLog({ userid: req.user.id, action: 'auth.2fa.disabled', ip: clientIpOf(req), meta: {} });
+   513→    logger.info(`[auth] 2FA DISABLED for user ${req.user.id} (secret wiped)`);
+   514→    return res.json({ ok: true });
+   515→  } catch (err) {
+   516→    return next(err);
+   517→  }
+   518→});
+   519→
+   520→/* --------------------- password reset (Phase 6, additive) -------------------- */
+   521→
+   522→const RESET_CODE_TTL_MIN = 30;
+   523→
+   524→/**
+   525→ * POST /api/auth/forgot-password { email } — always ok (no user enumeration).
+   526→ * Sandbox mode (no SMTPURL configured — the default): the 6-digit code is
+   527→ * returned in the response so the flow is completable end-to-end; a production
+   528→ * deployment emails it instead. Codes are stored sha256-hashed, single-use,
+   529→ * valid 30 minutes.
+   530→ */
+   531→authRouter.post('/forgot-password', authLimiter, async (req, res, next) => {
+   532→  try {
+   533→    const { email } = req.body || {};
+   534→    const ip = clientIpOf(req);
+   535→    if (!email || !EMAIL_RE.test(String(email))) {
+   536→      return res.status(400).json({ error: 'A valid email address is required' });
+   537→    }
+   538→    const normalized = String(email).toLowerCase();
+   539→    const user = await one(`SELECT id, email, username FROM users WHERE email = $1`, [normalized]);
+   540→    await auditLog({ userid: user ? Number(user.id) : null, action: 'auth.forgot_password', ip, meta: { email: normalized } });
+   541→
+   542→    let sandboxCode = null;
+   543→    if (user) {
+   544→      const code = String(crypto.randomInt(100000, 1000000));
+   545→      const codeHash = crypto.createHash('sha256').update(`${normalized}:${code}`).digest('hex');
+   546→      await rows(
+   547→        `INSERT INTO passwordresets (userid, codehash, expiresat)
+   548→         VALUES ($1, $2, NOW() + ($3::text)::interval)`,
+   549→        [Number(user.id), codeHash, `${RESET_CODE_TTL_MIN} minutes`],
+   550→      );
+   551→      // TS3: with SMTP configured the code is EMAILED — it is never placed in
+   552→      // the JSON response in that mode. The in-response code stays a sandbox
+   553→      // fallback ONLY (no SMTPURL + non-production + not explicitly disabled).
+   554→      if (smtpConfigured()) {
+   555→        const sent = await sendMail({
+   556→          to: normalized,
+   557→          subject: 'Animaxia — cod de resetare a parolei',
+   558→          text: `Codul tău de resetare Animaxia este: ${code}\nCodul este valabil ${RESET_CODE_TTL_MIN} de minute și poate fi folosit o singură dată.`,
+   559→          html: `<p>Codul tău de resetare Animaxia este: <b style="font-size:18px">${code}</b></p><p style="color:#888">Valabil ${RESET_CODE_TTL_MIN} de minute, o singură utilizare.</p>`,
+   560→        });
+   561→        logger.info(`[auth] Reset code emailed to ${normalized} (sent=${sent})`);
+   562→      } else {
+   563→        const allowCodeInResponse =
+   564→          !process.env.SMTPURL &&
+   565→          process.env.NODE_ENV !== 'production' &&
+   566→          process.env.ALLOWRESETCODEINRESPONSE !== 'false';
+   567→        if (allowCodeInResponse) {
+   568→          sandboxCode = code;
+   569→          logger.info(`[auth] Reset code for ${normalized}: ${code} (sandbox mode — SMTPURL unset, non-production)`);
+   570→        }
+   571→      }
+   572→    }
+   573→    return res.json({
+   574→      ok: true,
+   575→      message: 'If an account exists for this email, a reset code has been sent.',
+   576→      sandbox: sandboxCode != null,
+   577→      ...(sandboxCode ? { code: sandboxCode, codeExpiresInMin: RESET_CODE_TTL_MIN } : {}),
+   578→    });
+   579→  } catch (err) {
+   580→    return next(err);
+   581→  }
+   582→});
+   583→
+   584→/**
+   585→ * POST /api/auth/reset-password { email, code, newPassword } — consume a valid
+   586→ * pending code, set the new password and revoke every refresh token (all
+   587→ * devices log out). Audited.
+   588→ */
+   589→authRouter.post('/reset-password', authLimiter, async (req, res, next) => {
+   590→  try {
+   591→    const { email, code, newPassword } = req.body || {};
+   592→    const ip = clientIpOf(req);
+   593→    if (!email || !code || !newPassword) {
+   594→      return res.status(400).json({ error: 'Missing required fields: email, code, newPassword' });
+   595→    }
+   596→    if (String(newPassword).length < 8) {
+   597→      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+   598→    }
+   599→    const normalized = String(email).toLowerCase();
+   600→    const codeHash = crypto.createHash('sha256').update(`${normalized}:${String(code)}`).digest('hex');
+   601→    const reset = await one(
+   602→      `SELECT pr.id, pr.userid FROM passwordresets pr
+   603→       JOIN users u ON u.id = pr.userid
+   604→       WHERE u.email = $1 AND pr.codehash = $2 AND pr.used = FALSE AND pr.expiresat > NOW()
+   605→       ORDER BY pr.createdat DESC LIMIT 1`,
+   606→      [normalized, codeHash],
+   607→    );
+   608→    if (!reset) {
+   609→      await auditLog({ action: 'auth.reset_password.failed', ip, meta: { email: normalized } });
+   610→      return res.status(400).json({ error: 'Invalid or expired reset code', code: 'RESET_CODE_INVALID' });
+   611→    }
+   612→    await rows(`UPDATE passwordresets SET used = TRUE WHERE id = $1`, [Number(reset.id)]);
+   613→    await rows(`UPDATE users SET passwordhash = $1 WHERE id = $2`, [hashPassword(newPassword), Number(reset.userid)]);
+   614→    // New password everywhere → kill all sessions.
+   615→    await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE userid = $1 AND revoked = FALSE`, [Number(reset.userid)]);
+   616→    await auditLog({ userid: Number(reset.userid), action: 'auth.reset_password', ip, meta: {} });
+   617→    logger.info(`[auth] Password reset completed for ${normalized}`);
+   618→    return res.json({ ok: true });
+   619→  } catch (err) {
+   620→    return next(err);
+   621→  }
+   622→});
+   623→
+   624→export default authRouter;
+   625→

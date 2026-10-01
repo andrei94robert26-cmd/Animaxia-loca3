@@ -1,0 +1,1098 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * search-view.tsx — Căutare universală Animaxia (FAZA 16).
+     5→ *
+     6→ *  - Tab-ul „Bibliotecă” rulează pe motorul Neon FTS (animaxia-neon-fts):
+     7→ *    bară de filtre avansate (nume, an, gen, categorie, actor cu autocomplete,
+     8→ *    studio, sortare, notă minimă), badge live „⚡ Neon FTS · Xms · N rezultate
+     9→ *    · p95 Yms”, chips cu filtrele active, paginare 24/pagină și panoul
+    10→ *    „Verifică link înainte de adăugare” (registru anti-duplicat Neon).
+    11→ *  - Tab-urile externe (Anime / Filme & TV) rămân pe sursele live Jikan/TMDB.
+    12→ *  - Căsuța mare are debounce 400ms și autocomplete prefix+trigram din Neon.
+    13→ */
+    14→
+    15→import { useEffect, useRef, useState } from 'react';
+    16→import {
+    17→  AlertTriangle,
+    18→  CheckCircle2,
+    19→  ChevronDown,
+    20→  ExternalLink,
+    21→  History,
+    22→  Link2,
+    23→  Loader2,
+    24→  Search,
+    25→  SearchX,
+    26→  ShieldCheck,
+    27→  Sparkles,
+    28→  X,
+    29→  Zap,
+    30→} from 'lucide-react';
+    31→import { toast } from 'sonner';
+    32→import { Button } from '@/components/ui/button';
+    33→import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+    34→import { Input } from '@/components/ui/input';
+    35→import { Label } from '@/components/ui/label';
+    36→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    37→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    38→import { ApiError, api, animeToItem, dbToItem, mediaToItem } from '@/lib/animaxia/api';
+    39→import { useApi, type UseApiResult } from '@/lib/animaxia/hooks';
+    40→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    41→import type { IngestCheckResponse, NormalizedItem, SearchAdvancedResponse } from '@/lib/animaxia/types';
+    42→import { ContentCard } from '../content-card';
+    43→import { Container, PageHeader } from '../section';
+    44→import { EmptyState, ErrorState, LoadingCards, RatingBadge, TypeBadge } from '../states';
+    45→import { Pagination } from '../pagination';
+    46→import { cn } from '@/lib/utils';
+    47→
+    48→type SearchTab = 'library' | 'anime' | 'media';
+    49→
+    50→/* ------------------ TS2b: căutări recente (localStorage) ------------------ */
+    51→
+    52→const RECENT_SEARCHES_KEY = 'animaxia:recent-searches';
+    53→const RECENT_SEARCHES_MAX = 8;
+    54→
+    55→function readRecentSearches(): string[] {
+    56→  try {
+    57→    const raw = window.localStorage.getItem(RECENT_SEARCHES_KEY);
+    58→    const list = raw ? (JSON.parse(raw) as unknown) : [];
+    59→    if (!Array.isArray(list)) return [];
+    60→    return list
+    61→      .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+    62→      .slice(0, RECENT_SEARCHES_MAX);
+    63→  } catch {
+    64→    return [];
+    65→  }
+    66→}
+    67→
+    68→function writeRecentSearches(list: string[]): void {
+    69→  try {
+    70→    window.localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(list.slice(0, RECENT_SEARCHES_MAX)));
+    71→  } catch {
+    72→    /* private mode — istoricul nu persistă */
+    73→  }
+    74→}
+    75→
+    76→function rememberRecentSearch(current: string[], term: string): string[] {
+    77→  const trimmed = term.trim();
+    78→  if (!trimmed) return current;
+    79→  return [trimmed, ...current.filter((r) => r.toLowerCase() !== trimmed.toLowerCase())].slice(
+    80→    0,
+    81→    RECENT_SEARCHES_MAX,
+    82→  );
+    83→}
+    84→
+    85→const TAB_LABELS: Record<SearchTab, string> = {
+    86→  library: 'Bibliotecă',
+    87→  anime: 'Anime',
+    88→  media: 'Filme & TV',
+    89→};
+    90→
+    91→interface Suggestion {
+    92→  id: number;
+    93→  title: string;
+    94→  type: string;
+    95→  thumbnail: string | null;
+    96→  rating: number | null;
+    97→}
+    98→
+    99→const PAGE_LIMIT = 24;
+   100→
+   101→/* --------------------------- library filter state --------------------------- */
+   102→
+   103→interface LibraryFilters {
+   104→  year: string; // 'any' | '2024' | …
+   105→  genre: string; // 'any' | 'Action' | …
+   106→  category: string; // 'any' | 'movie' | …
+   107→  actor: string; // free text
+   108→  studio: string; // free text
+   109→  sort: 'score' | 'year' | 'rating' | 'title';
+   110→  minRating: string; // 'any' | '6' | '7' | '8' | '9'
+   111→}
+   112→
+   113→const EMPTY_FILTERS: LibraryFilters = {
+   114→  year: 'any',
+   115→  genre: 'any',
+   116→  category: 'any',
+   117→  actor: '',
+   118→  studio: '',
+   119→  sort: 'score',
+   120→  minRating: 'any',
+   121→};
+   122→
+   123→const MIN_RATINGS = [
+   124→  { value: 'any', label: 'Orice notă' },
+   125→  { value: '6', label: '6+' },
+   126→  { value: '7', label: '7+' },
+   127→  { value: '8', label: '8+' },
+   128→  { value: '9', label: '9+' },
+   129→] as const;
+   130→
+   131→const SORTS = [
+   132→  { value: 'score', label: 'Relevanță' },
+   133→  { value: 'year', label: 'An' },
+   134→  { value: 'rating', label: 'Notă' },
+   135→  { value: 'title', label: 'Titlu' },
+   136→] as const;
+   137→
+   138→function activeFilterChips(filters: LibraryFilters): { key: keyof LibraryFilters; label: string }[] {
+   139→  const chips: { key: keyof LibraryFilters; label: string }[] = [];
+   140→  if (filters.year !== 'any') chips.push({ key: 'year', label: `An: ${filters.year}` });
+   141→  if (filters.genre !== 'any') chips.push({ key: 'genre', label: `Gen: ${filters.genre}` });
+   142→  if (filters.category !== 'any') chips.push({ key: 'category', label: `Categorie: ${filters.category}` });
+   143→  if (filters.actor.trim()) chips.push({ key: 'actor', label: `Actor: ${filters.actor.trim()}` });
+   144→  if (filters.studio.trim()) chips.push({ key: 'studio', label: `Studio: ${filters.studio.trim()}` });
+   145→  if (filters.minRating !== 'any') chips.push({ key: 'minRating', label: `Notă ≥ ${filters.minRating}` });
+   146→  return chips;
+   147→}
+   148→
+   149→/* --------------------------------- the view -------------------------------- */
+   150→
+   151→export function SearchView({ route }: { route: AppRoute }) {
+   152→  const q = route.query.get('q')?.trim() || '';
+   153→  const [input, setInput] = useState(q);
+   154→  const [activeTab, setActiveTab] = useState<SearchTab>('library');
+   155→
+   156→  /* TS2b: căutări recente — încărcate după montare (localStorage e doar client). */
+   157→  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+   158→
+   159→  useEffect(() => {
+   160→    const timer = setTimeout(() => setRecentSearches(readRecentSearches()), 0);
+   161→    return () => clearTimeout(timer);
+   162→  }, []);
+   163→
+   164→  /* Every executed search (URL q — submit, debounce sau navbar) is recorded. */
+   165→  useEffect(() => {
+   166→    if (!q) return;
+   167→    const timer = setTimeout(() => {
+   168→      setRecentSearches((prev) => {
+   169→        const next = rememberRecentSearch(prev, q);
+   170→        writeRecentSearches(next);
+   171→        return next;
+   172→      });
+   173→    }, 0);
+   174→    return () => clearTimeout(timer);
+   175→  }, [q]);
+   176→
+   177→  function removeRecentSearch(term: string) {
+   178→    setRecentSearches((prev) => {
+   179→      const next = prev.filter((r) => r !== term);
+   180→      writeRecentSearches(next);
+   181→      return next;
+   182→    });
+   183→  }
+   184→
+   185→  function clearRecentSearches() {
+   186→    setRecentSearches([]);
+   187→    writeRecentSearches([]);
+   188→  }
+   189→
+   190→  /* Keep the box in sync when the URL query changes. */
+   191→  useEffect(() => {
+   192→    setInput(q);
+   193→  }, [q]);
+   194→
+   195→  /* Live search: debounce 400 ms, navigate only when the query really changed. */
+   196→  useEffect(() => {
+   197→    const trimmed = input.trim();
+   198→    if (trimmed === q) return;
+   199→    const timer = setTimeout(() => {
+   200→      navigate(trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : '/search');
+   201→    }, 400);
+   202→    return () => clearTimeout(timer);
+   203→  }, [input, q]);
+   204→
+   205→  /* External tabs still search live providers with the URL query. */
+   206→  const externalRes = useApi(
+   207→    `search-${activeTab}-${q}`,
+   208→    async (): Promise<{ items: NormalizedItem[]; total: number }> => {
+   209→      if (activeTab === 'anime') {
+   210→        const res = await api.animeSearch(q);
+   211→        return { items: res.data.map(animeToItem), total: res.data.length };
+   212→      }
+   213→      const res = await api.moviesSearch(q);
+   214→      return { items: res.data.map(mediaToItem), total: res.data.length };
+   215→    },
+   216→    { enabled: q.length > 0 && activeTab !== 'library' },
+   217→  );
+   218→
+   219→  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+   220→    event.preventDefault();
+   221→    const trimmed = input.trim();
+   222→    if (trimmed) {
+   223→      /* TS2b: înregistrează căutarea și la submit direct (acoperă re-căutarea
+   224→         aceluiași termen, când q din URL nu se schimbă și efectul nu rulează). */
+   225→      setRecentSearches((prev) => {
+   226→        const next = rememberRecentSearch(prev, trimmed);
+   227→        writeRecentSearches(next);
+   228→        return next;
+   229→      });
+   230→    }
+   231→    navigate(trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : '/search');
+   232→  };
+   233→
+   234→  /* ----------------------------- autocomplete ----------------------------- */
+   235→
+   236→  const searchBoxRef = useRef<HTMLDivElement>(null);
+   237→  const [acOpen, setAcOpen] = useState(false);
+   238→  const [acItems, setAcItems] = useState<Suggestion[]>([]);
+   239→  const [acLoading, setAcLoading] = useState(false);
+   240→  const [acHighlight, setAcHighlight] = useState(-1);
+   241→
+   242→  /* Debounced autocomplete fetch while the dropdown is open (Neon prefix+trigram). */
+   243→  const prefetchedRef = useRef<Set<string>>(new Set()); // FAZA 29-P: hover-prefetch (o singură dată per titlu)
+   244→
+   245→  /* FAZA 29-P: la hover pe o sugestie, încălzim în fundal căutarea completă —
+   246→   * la click rezultatul vine din cache accel în ~2ms în loc de ~600ms. */
+   247→  const prefetchSuggestion = (title: string) => {
+   248→    if (!title || prefetchedRef.current.has(title)) return;
+   249→    prefetchedRef.current.add(title);
+   250→    /* Semnătura EXACTĂ pe care o va cere search-view la click (sort=score,
+   251→     * limit=24, page=1) — altfel warming-ul ar încălzi o cheie nefolosită. */
+   252→    void api.searchPrefetch({ q: title, sort: 'score', limit: PAGE_LIMIT, page: 1 });
+   253→  };
+   254→
+   255→  useEffect(() => {
+   256→    const query = input.trim();
+   257→    if (!acOpen || query.length < 1) {
+   258→      setAcItems([]);
+   259→      setAcLoading(false);
+   260→      setAcHighlight(-1);
+   261→      return;
+   262→    }
+   263→    setAcLoading(true);
+   264→    let cancelled = false;
+   265→    const timer = setTimeout(async () => {
+   266→      try {
+   267→        const res = await api.searchAutocomplete(query);
+   268→        if (!cancelled) setAcItems(res.suggestions);
+   269→      } catch {
+   270→        if (!cancelled) setAcItems([]);
+   271→      } finally {
+   272→        if (!cancelled) setAcLoading(false);
+   273→      }
+   274→    }, 300);
+   275→    return () => {
+   276→      cancelled = true;
+   277→      clearTimeout(timer);
+   278→    };
+   279→  }, [input, acOpen]);
+   280→
+   281→  /* Close on click-outside. */
+   282→  useEffect(() => {
+   283→    if (!acOpen) return undefined;
+   284→    const onDown = (e: MouseEvent) => {
+   285→      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) {
+   286→        setAcOpen(false);
+   287→      }
+   288→    };
+   289→    document.addEventListener('mousedown', onDown);
+   290→    return () => document.removeEventListener('mousedown', onDown);
+   291→  }, [acOpen]);
+   292→
+   293→  function pickSuggestion(s: Suggestion) {
+   294→    /* TS2b: și click-ul pe un rezultat înregistrează interogarea căutată. */
+   295→    const term = input.trim();
+   296→    if (term) {
+   297→      setRecentSearches((prev) => {
+   298→        const next = rememberRecentSearch(prev, term);
+   299→        writeRecentSearches(next);
+   300→        return next;
+   301→      });
+   302→    }
+   303→    setInput('');
+   304→    setAcOpen(false);
+   305→    setAcItems([]);
+   306→    navigate(`/content/${s.id}`);
+   307→  }
+   308→
+   309→  function handleAcKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+   310→    if (!acOpen) return;
+   311→    if (e.key === 'Escape') {
+   312→      e.preventDefault();
+   313→      setAcOpen(false);
+   314→      return;
+   315→    }
+   316→    if (!acItems.length) return;
+   317→    if (e.key === 'ArrowDown') {
+   318→      e.preventDefault();
+   319→      const next = (acHighlight + 1) % acItems.length;
+   320→      setAcHighlight(next);
+   321→      prefetchSuggestion(acItems[next]?.title ?? ''); // FAZA 29-P: warming predictiv și la tastatură
+   322→    } else if (e.key === 'ArrowUp') {
+   323→      e.preventDefault();
+   324→      const next = acHighlight <= 0 ? acItems.length - 1 : acHighlight - 1;
+   325→      setAcHighlight(next);
+   326→      prefetchSuggestion(acItems[next]?.title ?? ''); // FAZA 29-P: warming predictiv și la tastatură
+   327→    } else if (e.key === 'Enter' && acHighlight >= 0 && acItems[acHighlight]) {
+   328→      e.preventDefault();
+   329→      pickSuggestion(acItems[acHighlight]);
+   330→    }
+   331→  }
+   332→
+   333→  const showDropdown = acOpen && input.trim().length >= 1;
+   334→
+   335→  return (
+   336→    <Container className="space-y-8 py-8 sm:py-10">
+   337→      <PageHeader
+   338→        title="Căutare"
+   339→        subtitle="O căsuță, toate sursele — biblioteca ta Neon (motor FTS), MyAnimeList și TMDB."
+   340→      />
+   341→
+   342→      <form onSubmit={submit} role="search" aria-label="Caută pe Animaxia" className="flex flex-col gap-3 sm:flex-row">
+   343→        <div className="relative flex-1" ref={searchBoxRef}>
+   344→          <Search
+   345→            className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-zinc-500"
+   346→            aria-hidden
+   347→          />
+   348→          <Input
+   349→            value={input}
+   350→            onChange={(event) => {
+   351→              setInput(event.target.value);
+   352→              setAcOpen(true);
+   353→              setAcHighlight(-1);
+   354→            }}
+   355→            onFocus={() => setAcOpen(true)}
+   356→            onKeyDown={handleAcKeyDown}
+   357→            placeholder="Caută anime, filme, seriale…"
+   358→            aria-label="Text de căutat"
+   359→            aria-autocomplete="list"
+   360→            aria-expanded={showDropdown}
+   361→            aria-controls={showDropdown ? 'search-suggestions' : undefined}
+   362→            className="h-12 rounded-xl border-white/10 bg-white/[0.04] pl-12 pr-11 text-base text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   363→          />
+   364→          {input ? (
+   365→            <button
+   366→              type="button"
+   367→              onClick={() => setInput('')}
+   368→              aria-label="Golește căutarea"
+   369→              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1.5 text-zinc-500 transition hover:bg-white/10 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   370→            >
+   371→              <X className="h-4 w-4" aria-hidden />
+   372→            </button>
+   373→          ) : null}
+   374→
+   375→          {/* Autocomplete dropdown (Neon prefix + trigram) */}
+   376→          {showDropdown && (
+   377→            <div
+   378→              id="search-suggestions"
+   379→              role="listbox"
+   380→              aria-label="Sugestii de căutare"
+   381→              className="custom-scrollbar absolute inset-x-0 top-full z-20 mt-2 max-h-80 overflow-y-auto rounded-xl border border-white/10 bg-[#12121c] shadow-2xl shadow-black/60"
+   382→            >
+   383→              {acLoading ? (
+   384→                <div className="flex items-center gap-2 px-4 py-3 text-sm text-zinc-500">
+   385→                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Caut…
+   386→                </div>
+   387→              ) : acItems.length === 0 ? (
+   388→                <p className="px-4 py-3 text-sm text-zinc-500">Nicio sugestie</p>
+   389→              ) : (
+   390→                acItems.map((s, i) => (
+   391→                  <button
+   392→                    key={s.id}
+   393→                    type="button"
+   394→                    role="option"
+   395→                    aria-selected={acHighlight === i}
+   396→                    onMouseEnter={() => {
+   397→                      setAcHighlight(i);
+   398→                    }}
+   399→                    onMouseOver={() => {
+   400→                      prefetchSuggestion(s.title); // FAZA 29-P: predictive warming (mouseover = delegat fiabil)
+   401→                    }}
+   402→                    onFocus={() => {
+   403→                      prefetchSuggestion(s.title); // FAZA 29-P: și la navigarea cu tastatura
+   404→                    }}
+   405→                    onClick={() => pickSuggestion(s)}
+   406→                    className={cn(
+   407→                      'flex w-full items-center gap-3 px-3 py-2.5 text-left transition',
+   408→                      acHighlight === i ? 'bg-white/[0.06]' : 'hover:bg-white/[0.06]',
+   409→                    )}
+   410→                  >
+   411→                    {s.thumbnail ? (
+   412→                      <img
+   413→                        src={s.thumbnail}
+   414→                        alt=""
+   415→                        loading="lazy"
+   416→                        className="h-10 w-8 shrink-0 rounded object-cover"
+   417→                      />
+   418→                    ) : (
+   419→                      <span className="grid h-10 w-8 shrink-0 place-items-center rounded bg-gradient-to-br from-white/10 to-white/[0.03]">
+   420→                        <Search className="h-3.5 w-3.5 text-zinc-600" aria-hidden />
+   421→                      </span>
+   422→                    )}
+   423→                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">{s.title}</span>
+   424→                    {s.rating != null ? <RatingBadge value={s.rating} /> : null}
+   425→                    <TypeBadge type={s.type} />
+   426→                  </button>
+   427→                ))
+   428→              )}
+   429→            </div>
+   430→          )}
+   431→        </div>
+   432→        <Button
+   433→          type="submit"
+   434→          className="h-12 rounded-xl bg-rose-600 px-7 text-base font-bold text-white hover:bg-rose-500"
+   435→        >
+   436→          Caută
+   437→        </Button>
+   438→      </form>
+   439→
+   440→      {/* TS2b: căutări recente — doar când nu există niciun termen activ. */}
+   441→      {!q && input.trim() === '' && recentSearches.length > 0 && (
+   442→        <section aria-label="Căutări recente" className="space-y-2.5">
+   443→          <div className="flex items-center justify-between gap-3">
+   444→            <h2 className="flex items-center gap-2 text-sm font-bold text-zinc-300">
+   445→              <History className="h-4 w-4 text-rose-400" aria-hidden />
+   446→              Căutări recente
+   447→            </h2>
+   448→            <button
+   449→              type="button"
+   450→              onClick={clearRecentSearches}
+   451→              className="text-xs font-semibold text-zinc-500 transition hover:text-rose-300"
+   452→            >
+   453→              Golește istoricul
+   454→            </button>
+   455→          </div>
+   456→          <div className="flex flex-wrap gap-2">
+   457→            {recentSearches.map((term) => (
+   458→              <span
+   459→                key={term}
+   460→                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] pl-3.5 pr-1.5 text-sm text-zinc-300"
+   461→              >
+   462→                <button
+   463→                  type="button"
+   464→                  onClick={() => navigate(`/search?q=${encodeURIComponent(term)}`)}
+   465→                  className="font-medium transition hover:text-rose-300"
+   466→                >
+   467→                  {term}
+   468→                </button>
+   469→                <button
+   470→                  type="button"
+   471→                  onClick={() => removeRecentSearch(term)}
+   472→                  aria-label={`Elimină „${term}” din istoric`}
+   473→                  className="grid h-6 w-6 place-items-center rounded-full text-zinc-500 transition hover:bg-rose-500/20 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   474→                >
+   475→                  <X className="h-3.5 w-3.5" aria-hidden />
+   476→                </button>
+   477→              </span>
+   478→            ))}
+   479→          </div>
+   480→        </section>
+   481→      )}
+   482→
+   483→      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as SearchTab)}>
+   484→        <TabsList className="h-10 w-full justify-start gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   485→          {(['library', 'anime', 'media'] as const).map((tab) => (
+   486→            <TabsTrigger
+   487→              key={tab}
+   488→              value={tab}
+   489→              className="px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white data-[state=active]:shadow-rose-900/40 sm:px-5"
+   490→            >
+   491→              {TAB_LABELS[tab]}
+   492→            </TabsTrigger>
+   493→          ))}
+   494→        </TabsList>
+   495→
+   496→        <TabsContent value="library" className="pt-6">
+   497→          <LibrarySearchPanel q={q} />
+   498→        </TabsContent>
+   499→
+   500→        {(['anime', 'media'] as const).map((tab) => (
+   501→          <TabsContent key={tab} value={tab} className="pt-6">
+   502→            {q ? (
+   503→              <ResultsBlock label={TAB_LABELS[tab]} q={q} res={externalRes} />
+   504→            ) : (
+   505→              <EmptyState
+   506→                icon={<SearchX className="h-6 w-6" aria-hidden />}
+   507→                title="Caută pe Animaxia"
+   508→                message="Scrie un titlu mai sus — căutăm live pe MyAnimeList și TMDB."
+   509→              />
+   510→            )}
+   511→          </TabsContent>
+   512→        ))}
+   513→      </Tabs>
+   514→    </Container>
+   515→  );
+   516→}
+   517→
+   518→/* ----------------------------- local helpers ------------------------------ */
+   519→
+   520→function ResultsBlock({
+   521→  label,
+   522→  q,
+   523→  res,
+   524→}: {
+   525→  label: string;
+   526→  q: string;
+   527→  res: UseApiResult<{ items: NormalizedItem[]; total: number }>;
+   528→}) {
+   529→  if (res.error && !res.loading && !res.data) {
+   530→    return <ErrorState message={res.error} onRetry={res.refetch} />;
+   531→  }
+   532→  const items = res.data?.items ?? [];
+   533→  const total = res.data?.total ?? 0;
+   534→  return (
+   535→    <div className="space-y-4">
+   536→      {!res.loading && res.data ? (
+   537→        <p className="text-sm text-zinc-500">
+   538→          <span className="font-semibold text-zinc-200">
+   539→            {total > items.length ? `${items.length} din ${total}` : items.length}
+   540→          </span>{' '}
+   541→          {items.length === 1 && total <= 1 ? 'rezultat' : 'rezultate'} pentru{' '}
+   542→          <span className="font-semibold text-zinc-200">„{q}”</span> în {label}
+   543→        </p>
+   544→      ) : null}
+   545→      {res.loading ? (
+   546→        <LoadingCards count={12} />
+   547→      ) : (
+   548→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+   549→          {items.map((item) => (
+   550→            <ContentCard key={item.key} item={item} />
+   551→          ))}
+   552→        </div>
+   553→      )}
+   554→    </div>
+   555→  );
+   556→}
+   557→
+   558→/* ------------------- Library tab — Neon FTS advanced search ------------------ */
+   559→
+   560→function LibrarySearchPanel({ q }: { q: string }) {
+   561→  const [filters, setFilters] = useState<LibraryFilters>(EMPTY_FILTERS);
+   562→  const [page, setPage] = useState(1);
+   563→
+   564→  const filterKey = `${q}|${JSON.stringify(filters)}`;
+   565→  const [lastKey, setLastKey] = useState(filterKey);
+   566→  if (lastKey !== filterKey) {
+   567→    setLastKey(filterKey);
+   568→    setPage(1);
+   569→  }
+   570→
+   571→  const hasFilters =
+   572→    filters.year !== 'any' ||
+   573→    filters.genre !== 'any' ||
+   574→    filters.category !== 'any' ||
+   575→    filters.actor.trim() !== '' ||
+   576→    filters.studio.trim() !== '' ||
+   577→    filters.minRating !== 'any';
+   578→  const enabled = Boolean(q) || hasFilters;
+   579→
+   580→  /* Facets for the filter bar + empty-state genre suggestions. */
+   581→  const facetsRes = useApi('search-filters-options', () => api.searchFilters());
+   582→  const facets = facetsRes.data;
+   583→
+   584→  /* The search itself — every filter change triggers a fresh query.
+   585→   * FAZA 29-P: accel-first — stratul de cache/warming (identic ca răspuns);
+   586→   * fallback transparent pe searchAdvanced doar dacă accel lipsește (404/502
+   587→   * sau rețea). Erorile legitime ale pipeline-ului (429/503/504) trec mai departe
+   588→   * ca înainte — NU se face double-request pe rate-limit. */
+   589→  const searchKey = `neon-search:${filterKey}:${page}`;
+   590→  const results = useApi(
+   591→    searchKey,
+   592→    () => {
+   593→      const accelFilters = {
+   594→        q: q || undefined,
+   595→        year: filters.year !== 'any' ? filters.year : undefined,
+   596→        genre: filters.genre !== 'any' ? filters.genre : undefined,
+   597→        category: filters.category !== 'any' ? filters.category : undefined,
+   598→        actor: filters.actor.trim() || undefined,
+   599→        studio: filters.studio.trim() || undefined,
+   600→        minRating: filters.minRating !== 'any' ? Number(filters.minRating) : undefined,
+   601→        sort: filters.sort,
+   602→        limit: PAGE_LIMIT,
+   603→        page,
+   604→      };
+   605→      return api.searchAccelLookup(accelFilters).catch((err: unknown) => {
+   606→        const status = err instanceof ApiError ? err.status : 0;
+   607→        if (status === 0 || status === 404 || status === 502) {
+   608→          /* fallback transparent — accel indisponibil; răspuns identic, fără accel */
+   609→          return api.searchAdvanced(accelFilters) as Promise<
+   610→            SearchAdvancedResponse & { accel?: 'hit' | 'miss'; originTook?: number }
+   611→          >;
+   612→        }
+   613→        throw err;
+   614→      });
+   615→    },
+   616→    { enabled },
+   617→  );
+   618→
+   619→  /* Engine status — fetched on mount and refreshed on every new search. */
+   620→  const engine = useApi(`search-engine-status:${searchKey}`, () => api.searchStatus());
+   621→
+   622→  const chips = activeFilterChips(filters);
+   623→  const total = results.data?.total ?? 0;
+   624→  const totalPages = Math.max(1, Math.ceil(total / PAGE_LIMIT));
+   625→  const rows = results.data?.data ?? [];
+   626→
+   627→  const setFilter = <K extends keyof LibraryFilters>(key: K, value: LibraryFilters[K]) =>
+   628→    setFilters((prev) => ({ ...prev, [key]: value }));
+   629→
+   630→  const genreSuggestions = (facets?.genres ?? []).slice(0, 8);
+   631→
+   632→  return (
+   633→    <div className="space-y-5">
+   634→      {/* ------------------------ advanced filter bar ------------------------ */}
+   635→      <form
+   636→        onSubmit={(e) => {
+   637→          e.preventDefault();
+   638→          /* Search is live (debounce + filters) — the button simply confirms the
+   639→             current name input immediately. */
+   640→          const trimmed = q;
+   641→          navigate(trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : '/search');
+   642→        }}
+   643→        aria-label="Filtre avansate bibliotecă"
+   644→        className="space-y-4 rounded-xl border border-white/10 bg-white/[0.03] p-4 sm:p-5"
+   645→      >
+   646→        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   647→          <div className="space-y-2">
+   648→            <Label htmlFor="flt-year">An</Label>
+   649→            <Select value={filters.year} onValueChange={(v) => setFilter('year', v)}>
+   650→              <SelectTrigger id="flt-year" className="w-full border-white/10 bg-black/40">
+   651→                <SelectValue placeholder="Orice an" />
+   652→              </SelectTrigger>
+   653→              <SelectContent className="max-h-72 border-white/10 bg-[#12121a]">
+   654→                <SelectItem value="any">Orice an</SelectItem>
+   655→                {(facets?.years ?? []).map((y) => (
+   656→                  <SelectItem key={y} value={String(y)}>
+   657→                    {y}
+   658→                  </SelectItem>
+   659→                ))}
+   660→              </SelectContent>
+   661→            </Select>
+   662→          </div>
+   663→          <div className="space-y-2">
+   664→            <Label htmlFor="flt-genre">Gen</Label>
+   665→            <Select value={filters.genre} onValueChange={(v) => setFilter('genre', v)}>
+   666→              <SelectTrigger id="flt-genre" className="w-full border-white/10 bg-black/40">
+   667→                <SelectValue placeholder="Orice gen" />
+   668→              </SelectTrigger>
+   669→              <SelectContent className="max-h-72 border-white/10 bg-[#12121a]">
+   670→                <SelectItem value="any">Orice gen</SelectItem>
+   671→                {(facets?.genres ?? []).map((g) => (
+   672→                  <SelectItem key={g.value} value={g.value}>
+   673→                    {g.value} · {g.count}
+   674→                  </SelectItem>
+   675→                ))}
+   676→              </SelectContent>
+   677→            </Select>
+   678→          </div>
+   679→          <div className="space-y-2">
+   680→            <Label htmlFor="flt-category">Categorie</Label>
+   681→            <Select value={filters.category} onValueChange={(v) => setFilter('category', v)}>
+   682→              <SelectTrigger id="flt-category" className="w-full border-white/10 bg-black/40">
+   683→                <SelectValue placeholder="Orice categorie" />
+   684→              </SelectTrigger>
+   685→              <SelectContent className="max-h-72 border-white/10 bg-[#12121a]">
+   686→                <SelectItem value="any">Orice categorie</SelectItem>
+   687→                {(facets?.categories ?? []).map((c) => (
+   688→                  <SelectItem key={c.value} value={c.value}>
+   689→                    {c.value} · {c.count}
+   690→                  </SelectItem>
+   691→                ))}
+   692→              </SelectContent>
+   693→            </Select>
+   694→          </div>
+   695→          <div className="space-y-2">
+   696→            <Label htmlFor="flt-sort">Sortare</Label>
+   697→            <Select value={filters.sort} onValueChange={(v) => setFilter('sort', v as LibraryFilters['sort'])}>
+   698→              <SelectTrigger id="flt-sort" className="w-full border-white/10 bg-black/40">
+   699→                <SelectValue placeholder="Relevanță" />
+   700→              </SelectTrigger>
+   701→              <SelectContent className="border-white/10 bg-[#12121a]">
+   702→                {SORTS.map((s) => (
+   703→                  <SelectItem key={s.value} value={s.value}>
+   704→                    {s.label}
+   705→                  </SelectItem>
+   706→                ))}
+   707→              </SelectContent>
+   708→            </Select>
+   709→          </div>
+   710→
+   711→          <ActorInput
+   712→            actors={facets?.actors ?? []}
+   713→            value={filters.actor}
+   714→            onChange={(v) => setFilter('actor', v)}
+   715→          />
+   716→          <div className="space-y-2">
+   717→            <Label htmlFor="flt-studio">Studio</Label>
+   718→            <Input
+   719→              id="flt-studio"
+   720→              value={filters.studio}
+   721→              onChange={(e) => setFilter('studio', e.target.value)}
+   722→              placeholder="ex. Walt Disney"
+   723→              className="border-white/10 bg-black/40"
+   724→            />
+   725→          </div>
+   726→          <div className="space-y-2">
+   727→            <Label htmlFor="flt-rating">Notă minimă</Label>
+   728→            <Select value={filters.minRating} onValueChange={(v) => setFilter('minRating', v)}>
+   729→              <SelectTrigger id="flt-rating" className="w-full border-white/10 bg-black/40">
+   730→                <SelectValue placeholder="Orice notă" />
+   731→              </SelectTrigger>
+   732→              <SelectContent className="border-white/10 bg-[#12121a]">
+   733→                {MIN_RATINGS.map((r) => (
+   734→                  <SelectItem key={r.value} value={r.value}>
+   735→                    {r.label}
+   736→                  </SelectItem>
+   737→                ))}
+   738→              </SelectContent>
+   739→            </Select>
+   740→          </div>
+   741→          <div className="flex items-end gap-2">
+   742→            <Button type="submit" className="h-10 flex-1 bg-rose-600 font-bold hover:bg-rose-500">
+   743→              <Search className="h-4 w-4" aria-hidden /> Caută
+   744→            </Button>
+   745→            <Button
+   746→              type="button"
+   747→              variant="outline"
+   748→              onClick={() => setFilters(EMPTY_FILTERS)}
+   749→              disabled={!hasFilters}
+   750→              className="h-10 flex-1 border-white/15 bg-white/5 font-semibold text-zinc-200 hover:bg-white/10 hover:text-white"
+   751→            >
+   752→              <X className="h-4 w-4" aria-hidden /> Resetează filtrele
+   753→            </Button>
+   754→          </div>
+   755→        </div>
+   756→      </form>
+   757→
+   758→      {/* -------------------- "verify link before adding" -------------------- */}
+   759→      <DedupCheckPanel />
+   760→
+   761→      {/* ------------------------- engine + meta line ------------------------ */}
+   762→      {enabled && (
+   763→        <div className="flex flex-wrap items-center gap-2">
+   764→          <span
+   765→            title={`Motor: ${results.data?.engine ?? engine.data?.engine ?? 'animaxia-neon-fts'}`}
+   766→            className="inline-flex items-center gap-1.5 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-1 text-xs font-bold text-fuchsia-300"
+   767→          >
+   768→            <Zap className="h-3.5 w-3.5" aria-hidden />
+   769→            Neon FTS
+   770→            {results.data ? ` · ${results.data.took}ms` : ''}
+   771→            {results.data ? ` · ${results.data.total} ${results.data.total === 1 ? 'rezultat' : 'rezultate'}` : ''}
+   772→            {engine.data ? ` · p95 ${engine.data.latency.p95Ms}ms` : ''}
+   773→          </span>
+   774→          {results.data?.accel === 'hit' ? (
+   775→            <span
+   776→              title={`Servit din cache-ul accel FAZA 29-P în ${results.data.took}ms (execuția originală pipeline: ${results.data.originTook ?? '?'}ms)`}
+   777→              className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-300"
+   778→            >
+   779→              <Zap className="h-3.5 w-3.5" aria-hidden />
+   780→              Accel · {(results.data.took ?? 0) < 5 ? 'instant' : `${results.data.took}ms`}
+   781→            </span>
+   782→          ) : null}
+   783→          {chips.map((chip) => (
+   784→            <button
+   785→              key={chip.key}
+   786→              type="button"
+   787→              onClick={() => {
+   788→                if (chip.key === 'actor' || chip.key === 'studio') setFilter(chip.key, '');
+   789→                else setFilter(chip.key, 'any');
+   790→              }}
+   791→              className="group inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-semibold text-zinc-300 transition hover:border-rose-500/40 hover:text-rose-300"
+   792→              aria-label={`Elimină filtrul ${chip.label}`}
+   793→            >
+   794→              {chip.label}
+   795→              <X className="h-3 w-3 text-zinc-500 transition group-hover:text-rose-400" aria-hidden />
+   796→            </button>
+   797→          ))}
+   798→        </div>
+   799→      )}
+   800→
+   801→      {/* ------------------------------ results ------------------------------ */}
+   802→      {!enabled ? (
+   803→        <EmptyState
+   804→          icon={<SearchX className="h-6 w-6" aria-hidden />}
+   805→          title="Caută în biblioteca ta Neon"
+   806→          message="Scrie un nume mai sus sau alege un filtru — motorul FTS caută în titluri, genuri și descrieri."
+   807→          action={
+   808→            genreSuggestions.length > 0 ? (
+   809→              <div className="flex max-w-lg flex-wrap justify-center gap-1.5">
+   810→                {genreSuggestions.map((g) => (
+   811→                  <button
+   812→                    key={g.value}
+   813→                    type="button"
+   814→                    onClick={() => setFilter('genre', g.value)}
+   815→                    className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-300 transition hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-300"
+   816→                  >
+   817→                    {g.value}
+   818→                    <span className="ml-1 text-[10px] font-semibold text-zinc-500">{g.count}</span>
+   819→                  </button>
+   820→                ))}
+   821→              </div>
+   822→            ) : undefined
+   823→          }
+   824→        />
+   825→      ) : results.error && !results.loading && !results.data ? (
+   826→        <ErrorState message={results.error} onRetry={results.refetch} />
+   827→      ) : results.loading && !results.data ? (
+   828→        <LoadingCards count={12} />
+   829→      ) : rows.length === 0 ? (
+   830→        <EmptyState
+   831→          icon={<SearchX className="h-6 w-6" aria-hidden />}
+   832→          title={q ? `Nimic găsit pentru „${q}”` : 'Niciun rezultat pentru aceste filtre'}
+   833→          message="Încearcă alt cuvânt, dezactivează un filtru — sau pornește de la un gen popular:"
+   834→          action={
+   835→            genreSuggestions.length > 0 ? (
+   836→              <div className="flex max-w-lg flex-wrap justify-center gap-1.5">
+   837→                {genreSuggestions.map((g) => (
+   838→                  <button
+   839→                    key={g.value}
+   840→                    type="button"
+   841→                    onClick={() => setFilter('genre', g.value)}
+   842→                    className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-300 transition hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-300"
+   843→                  >
+   844→                    {g.value}
+   845→                    <span className="ml-1 text-[10px] font-semibold text-zinc-500">{g.count}</span>
+   846→                  </button>
+   847→                ))}
+   848→              </div>
+   849→            ) : undefined
+   850→          }
+   851→        />
+   852→      ) : (
+   853→        <>
+   854→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+   855→            {rows.map((row) => (
+   856→              <div key={`neon-${row.id}`} className="relative">
+   857→                <ContentCard item={dbToItem(row)} />
+   858→                {q && row._score > 0 ? (
+   859→                  <span
+   860→                    title={`Scor relevanță ${row._score.toFixed(2)}`}
+   861→                    className="absolute right-2 top-9 z-10 inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-black/70 px-2 py-0.5 text-[10px] font-bold text-rose-300 backdrop-blur"
+   862→                  >
+   863→                    <Sparkles className="h-2.5 w-2.5" aria-hidden />
+   864→                    {row._score.toFixed(1)}
+   865→                  </span>
+   866→                ) : null}
+   867→              </div>
+   868→            ))}
+   869→          </div>
+   870→          <Pagination page={page} totalPages={totalPages} onPage={setPage} />
+   871→        </>
+   872→      )}
+   873→    </div>
+   874→  );
+   875→}
+   876→
+   877→/* ------------------------- actor input w/ autocomplete ---------------------- */
+   878→
+   879→function ActorInput({
+   880→  actors,
+   881→  value,
+   882→  onChange,
+   883→}: {
+   884→  actors: { value: string; count: number }[];
+   885→  value: string;
+   886→  onChange: (value: string) => void;
+   887→}) {
+   888→  const [open, setOpen] = useState(false);
+   889→  const wrapRef = useRef<HTMLDivElement>(null);
+   890→
+   891→  useEffect(() => {
+   892→    if (!open) return undefined;
+   893→    const onDown = (e: MouseEvent) => {
+   894→      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+   895→    };
+   896→    document.addEventListener('mousedown', onDown);
+   897→    return () => document.removeEventListener('mousedown', onDown);
+   898→  }, [open]);
+   899→
+   900→  const query = value.trim().toLowerCase();
+   901→  const matches = query
+   902→    ? actors.filter((a) => a.value.toLowerCase().includes(query)).slice(0, 6)
+   903→    : actors.slice(0, 6);
+   904→
+   905→  return (
+   906→    <div className="space-y-2" ref={wrapRef}>
+   907→      <Label htmlFor="flt-actor">Actor</Label>
+   908→      <div className="relative">
+   909→        <Input
+   910→          id="flt-actor"
+   911→          value={value}
+   912→          onChange={(e) => {
+   913→            onChange(e.target.value);
+   914→            setOpen(true);
+   915→          }}
+   916→          onFocus={() => setOpen(true)}
+   917→          placeholder="ex. Dwayne Johnson"
+   918→          className="border-white/10 bg-black/40"
+   919→          aria-autocomplete="list"
+   920→          aria-expanded={open && matches.length > 0}
+   921→        />
+   922→        {open && matches.length > 0 ? (
+   923→          <div className="custom-scrollbar absolute inset-x-0 top-full z-20 mt-1 max-h-48 overflow-y-auto rounded-xl border border-white/10 bg-[#12121c] shadow-2xl shadow-black/60">
+   924→            {matches.map((a) => (
+   925→              <button
+   926→                key={a.value}
+   927→                type="button"
+   928→                onMouseDown={(e) => e.preventDefault()}
+   929→                onClick={() => {
+   930→                  onChange(a.value);
+   931→                  setOpen(false);
+   932→                }}
+   933→                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-zinc-300 transition hover:bg-white/[0.06] hover:text-zinc-100"
+   934→              >
+   935→                <span className="truncate">{a.value}</span>
+   936→                <span className="shrink-0 text-[10px] font-semibold text-zinc-600">{a.count}</span>
+   937→              </button>
+   938→            ))}
+   939→          </div>
+   940→        ) : null}
+   941→      </div>
+   942→    </div>
+   943→  );
+   944→}
+   945→
+   946→/* ------------------- dedup panel: verify link before adding ------------------ */
+   947→
+   948→function DedupCheckPanel() {
+   949→  const [open, setOpen] = useState(false);
+   950→  const [url, setUrl] = useState('');
+   951→  const [checking, setChecking] = useState(false);
+   952→  const [registering, setRegistering] = useState(false);
+   953→  const [result, setResult] = useState<IngestCheckResponse | null>(null);
+   954→  const [error, setError] = useState<string | null>(null);
+   955→
+   956→  const check = async (e: React.FormEvent) => {
+   957→    e.preventDefault();
+   958→    const trimmed = url.trim();
+   959→    if (!trimmed) return;
+   960→    setChecking(true);
+   961→    setError(null);
+   962→    setResult(null);
+   963→    try {
+   964→      const res = await api.ingestCheck(trimmed);
+   965→      setResult(res);
+   966→    } catch (err) {
+   967→      setError(err instanceof Error ? err.message : 'Verificarea a eșuat');
+   968→    } finally {
+   969→      setChecking(false);
+   970→    }
+   971→  };
+   972→
+   973→  const register = async () => {
+   974→    const trimmed = url.trim();
+   975→    if (!trimmed) return;
+   976→    setRegistering(true);
+   977→    try {
+   978→      const res = await api.ingestRegister({ url: trimmed, addedBy: 'manual' });
+   979→      if (res.registered) {
+   980→        toast.success('Link înregistrat în Neon', { description: res.source.url });
+   981→      } else {
+   982→        toast.warning('Linkul există deja în registru', { description: `${res.source.hits} accesări înregistrate.` });
+   983→      }
+   984→      setResult({ ok: true, exists: true, duplicate: true, source: res.source, content: null });
+   985→    } catch (err) {
+   986→      toast.error('Înregistrarea a eșuat', {
+   987→        description: err instanceof Error ? err.message : 'Încearcă din nou peste un minut.',
+   988→      });
+   989→    } finally {
+   990→      setRegistering(false);
+   991→    }
+   992→  };
+   993→
+   994→  const fmtDate = (iso: string) => {
+   995→    try {
+   996→      return new Date(iso).toLocaleDateString('ro-RO', { day: 'numeric', month: 'short', year: 'numeric' });
+   997→    } catch {
+   998→      return iso;
+   999→    }
+  1000→  };
+  1001→
+  1002→  return (
+  1003→    <Collapsible open={open} onOpenChange={setOpen} className="rounded-xl border border-white/10 bg-white/[0.02]">
+  1004→      <CollapsibleTrigger className="flex w-full items-center gap-2.5 px-4 py-3 text-left text-sm font-semibold text-zinc-300 transition hover:bg-white/[0.04] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60">
+  1005→        <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
+  1006→        <span className="flex-1">Ai un link de adăugat? Verifică duplicat</span>
+  1007→        <span className="hidden text-xs font-normal text-zinc-500 sm:inline">registru global Neon · anti-duplicat</span>
+  1008→        <ChevronDown className={cn('h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200', open && 'rotate-180')} aria-hidden />
+  1009→      </CollapsibleTrigger>
+  1010→      <CollapsibleContent>
+  1011→        <div className="space-y-3 border-t border-white/10 px-4 py-4">
+  1012→          <form onSubmit={check} className="flex flex-col gap-2 sm:flex-row">
+  1013→            <div className="relative flex-1">
+  1014→              <Link2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden />
+  1015→              <Input
+  1016→                value={url}
+  1017→                onChange={(e) => {
+  1018→                  setUrl(e.target.value);
+  1019→                  setResult(null);
+  1020→                  setError(null);
+  1021→                }}
+  1022→                placeholder="Lipește linkul: YouTube, MP4, HLS, DASH, embed…"
+  1023→                aria-label="Link de verificat"
+  1024→                className="h-10 border-white/10 bg-black/40 pl-9 text-sm"
+  1025→              />
+  1026→            </div>
+  1027→            <Button
+  1028→              type="submit"
+  1029→              disabled={!url.trim() || checking}
+  1030→              className="h-10 bg-rose-600 font-bold hover:bg-rose-500"
+  1031→            >
+  1032→              {checking ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" aria-hidden /> : <Search className="mr-1.5 h-4 w-4" aria-hidden />}
+  1033→              Verifică
+  1034→            </Button>
+  1035→          </form>
+  1036→
+  1037→          {error ? (
+  1038→            <div className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200" role="alert">
+  1039→              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+  1040→              <span>{error}</span>
+  1041→            </div>
+  1042→          ) : null}
+  1043→
+  1044→          {result?.exists && result.source ? (
+  1045→            <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 sm:flex-row sm:items-center">
+  1046→              <div className="flex items-start gap-2 text-sm text-amber-200">
+  1047→                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+  1048→                <span>
+  1049→                  <span className="font-bold">Link deja în Neon</span>
+  1050→                  {' — '}
+  1051→                  {result.source.kind} · adăugat {fmtDate(result.source.createdat)} · {result.source.hits}{' '}
+  1052→                  {result.source.hits === 1 ? 'accesare' : 'accesări'}
+  1053→                  <span className="block break-all font-mono text-[11px] text-amber-300/70">{result.source.url}</span>
+  1054→                </span>
+  1055→              </div>
+  1056→              <div className="flex shrink-0 gap-2 sm:ml-auto">
+  1057→                {result.source.contentid != null ? (
+  1058→                  <Button
+  1059→                    type="button"
+  1060→                    size="sm"
+  1061→                    onClick={() => navigate(`/content/${result.source?.contentid}`)}
+  1062→                    className="h-8 bg-amber-600 text-xs font-bold text-white hover:bg-amber-500"
+  1063→                  >
+  1064→                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+  1065→                    Deschide conținutul
+  1066→                  </Button>
+  1067→                ) : null}
+  1068→              </div>
+  1069→            </div>
+  1070→          ) : null}
+  1071→
+  1072→          {result && !result.exists ? (
+  1073→            <div className="flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 sm:flex-row sm:items-center">
+  1074→              <div className="flex items-start gap-2 text-sm text-emerald-200">
+  1075→                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+  1076→                <span>
+  1077→                  <span className="font-bold">Link nou</span> — poate fi adăugat fără duplicat.
+  1078→                  <span className="block text-[11px] text-emerald-300/70">Nu există în registru Neon · urlhash unic</span>
+  1079→                </span>
+  1080→              </div>
+  1081→              <Button
+  1082→                type="button"
+  1083→                size="sm"
+  1084→                onClick={() => void register()}
+  1085→                disabled={registering}
+  1086→                className="h-8 bg-emerald-600 text-xs font-bold text-white hover:bg-emerald-500 sm:ml-auto"
+  1087→              >
+  1088→                {registering ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+  1089→                Înregistrează în Neon
+  1090→              </Button>
+  1091→            </div>
+  1092→          ) : null}
+  1093→        </div>
+  1094→      </CollapsibleContent>
+  1095→    </Collapsible>
+  1096→  );
+  1097→}
+  1098→

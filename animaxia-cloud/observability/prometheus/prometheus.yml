@@ -1,0 +1,136 @@
+# =============================================================================
+# Animaxia Cloud — Prometheus scrape configuration (BLUEPRINT §11)
+# =============================================================================
+# Mounted into the `prometheus` container by deploy/docker/docker-compose.observability.yml:
+#   * this file  -> /etc/prometheus/prometheus.yml
+#   * rules dir  -> /etc/prometheus/rules/  (animaxia-alerts.yml)
+#
+# Target hostnames are Docker DNS service names — they match the compose
+# service names from deploy/docker/docker-compose.yml, because both files are
+# merged onto the same `animaxia` bridge network:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Every Animaxia microservice exposes `GET /metrics` (Prometheus text format,
+# zero-dep exporter in common/metrics.js, gated by METRICSENABLED).
+#
+# KUBERNETES NOTE — this file is for the local docker stack only. On Kubernetes
+# the Deployments in deploy/k8s/ already carry the canonical scrape annotations
+# (prometheus.io/scrape: "true", prometheus.io/port: "<port>",
+# prometheus.io/path: /metrics), so run a Prometheus Operator ServiceMonitor /
+# PodMonitor against those instead (see observability/README.md → "Kubernetes
+# notes"). Bundling kube-prometheus into the repo is future work.
+# =============================================================================
+
+global:
+  scrape_interval: 15s       # BLUEPRINT §11 default cadence
+  evaluation_interval: 15s   # alert + recording rule evaluation cadence
+
+# Alerting + recording rules (read-only mount of observability/prometheus/rules/).
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# No Alertmanager yet — firing alerts surface in the Prometheus UI (/alerts)
+# and via the recording-rule panels in Grafana. Wiring Alertmanager
+# (+ notification channels) is future work; see observability/README.md.
+
+scrape_configs:
+  # ── Animaxia microservices — one job per service ───────────────────────────
+  # Job names intentionally match `animaxia-.*`: the AnimaxiaServiceDown alert
+  # keys off that prefix. Keep the pattern if you add jobs.
+
+  - job_name: animaxia-gateway
+    static_configs:
+      - targets: ["gateway-service:8080"]
+
+  - job_name: animaxia-auth
+    static_configs:
+      - targets: ["auth-service:4001"]
+
+  - job_name: animaxia-content
+    static_configs:
+      - targets: ["content-service:4002"]
+
+  - job_name: animaxia-ai
+    static_configs:
+      - targets: ["ai-service:4003"]
+
+  - job_name: animaxia-analytics
+    static_configs:
+      - targets: ["analytics-service:4004"]
+
+  - job_name: animaxia-search
+    static_configs:
+      - targets: ["search-service:4005"]
+
+  - job_name: animaxia-premium
+    static_configs:
+      - targets: ["premium-service:4006"]
+
+  - job_name: animaxia-social
+    static_configs:
+      - targets: ["social-service:4007"]
+
+  - job_name: animaxia-mobile
+    static_configs:
+      - targets: ["mobile-service:4008"]
+
+  - job_name: animaxia-queue
+    static_configs:
+      - targets: ["queue-service:4009"]
+
+  # ── OTel Collector — OTLP→Prometheus exporter (:8889, internal only) ───────
+  # The services currently ship OTLP *traces* through the collector
+  # (OTELSENDPOINT → http://otel-collector:4318/v1/traces → Tempo), so this
+  # target stays quiet until something starts exporting OTLP *metrics*. It is
+  # wired here so that path works out of the box (metrics pipeline:
+  # otlp receiver → memory_limiter + batch → prometheus exporter :8889).
+  # Port 8889 is NOT published to the host — only reachable inside the network.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # ── Prometheus self-monitoring ─────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── HOST-DEV PROFILE (commented) ───────────────────────────────────────────
+  # When the 10 services run directly on the host (`bun run dev` at the repo
+  # root) instead of in Docker, point jobs at host.docker.internal:
+  #   * Docker Desktop (macOS/Windows): resolves out of the box.
+  #   * Linux: add to the prometheus service in docker-compose.observability.yml:
+  #       extra_hosts:
+  #         - "host.docker.internal:host-gateway"
+  #
+  #   - job_name: animaxia-gateway-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:8080"]
+  #   - job_name: animaxia-auth-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4001"]
+  #   - job_name: animaxia-content-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4002"]
+  #   - job_name: animaxia-ai-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4003"]
+  #   - job_name: animaxia-analytics-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4004"]
+  #   - job_name: animaxia-search-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4005"]
+  #   - job_name: animaxia-premium-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4006"]
+  #   - job_name: animaxia-social-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4007"]
+  #   - job_name: animaxia-mobile-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4008"]
+  #   - job_name: animaxia-queue-host
+  #     static_configs:
+  #       - targets: ["host.docker.internal:4009"]
+  # (Remember to also drop the `-host` suffix from the job regex, or extend the
+  #  AnimaxiaServiceDown selector to `animaxia-.*(-host)?`.)

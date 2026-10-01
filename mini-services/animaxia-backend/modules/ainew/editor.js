@@ -3,7 +3,7 @@
  * descriere liberă („thrillere coreene lungi") într-un playlist REAL din
  * catalog. Interpretare z-ai (JSON lenient) cu fallback DETERMINIST pe
  * dicționar cuvinte-cheie→gen; selectia SQL reală pe metadata->genres și
- * title ILIKE; salvare file-based data/ainew/playlists/<userId>.json
+ * title LIKE; salvare file-based data/ainew/playlists/<userId>.json
  * (max 20 playlist-uri per user, id uuid) — zero schemă DB.
  */
 
@@ -180,17 +180,17 @@ export async function editorGenerate({ description, limit = 12, userId = null })
     candidates = await rows(
       `SELECT id, title, type, thumbnail, metadata FROM content
         WHERE (
-          ${interpreted.genres.length > 0 ? `metadata->'genres' ?| $1::text[] OR` : ''}
-          ${interpreted.keywords.length > 0 ? `title ILIKE ANY($2::text[]) OR` : ''}
+          ${interpreted.genres.length > 0 ? `EXISTS (SELECT 1 FROM json_each(metadata->'genres') g JOIN json_each($1) f ON lower(g.value)=lower(f.value)) OR` : ''}
+          ${interpreted.keywords.length > 0 ? `EXISTS (SELECT 1 FROM json_each($2) k WHERE lower(title) LIKE lower(k.value)) OR` : ''}
           false
         )
-        ${interpreted.types.length > 0 ? 'AND type = ANY($3::text[])' : ''}
+        ${interpreted.types.length > 0 ? 'AND type IN (SELECT value FROM json_each($3))' : ''}
         ORDER BY (metadata->>'rating') DESC NULLS LAST, id ASC
         LIMIT $4`,
       [
-        interpreted.genres.length > 0 ? interpreted.genres : ['__none__'],
-        interpreted.keywords.length > 0 ? interpreted.keywords.map((k) => `%${k}%`) : ['%__none__%'],
-        interpreted.types.length > 0 ? interpreted.types : ['movie', 'tv', 'anime', 'video', 'mined'],
+        JSON.stringify(interpreted.genres.length > 0 ? interpreted.genres : ['__none__']),
+        JSON.stringify(interpreted.keywords.length > 0 ? interpreted.keywords.map((k) => `%${k}%`) : ['%__none__%']),
+        JSON.stringify(interpreted.types.length > 0 ? interpreted.types : ['movie', 'tv', 'anime', 'video', 'mined']),
         safeLimit * 2,
       ],
     );

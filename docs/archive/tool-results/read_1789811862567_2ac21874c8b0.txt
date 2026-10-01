@@ -1,0 +1,608 @@
+     1→/**
+     2→ * modules/ops/metrics.js — FAZA 9 (Ops & Observability) unified metrics
+     3→ * registry for the Animaxia monolith.
+     4→ *
+     5→ * Design: pure in-memory counters / latency histograms / gauges + a pull-based
+     6→ * collector mechanism. The express middleware observes requests without
+     7→ * altering them (finish-hook); collectors read live state from existing
+     8→ * modules (db / cache / provider breakers / llm-core / vector-service) at
+     9→ * scrape time, so no hot path is touched.
+    10→ *
+    11→ * Exposed endpoints (wired in server.js):
+    12→ *   GET /api/metrics              — Prometheus text format (version=0.0.4)
+    13→ *   GET /api/metrics?format=json  — structured snapshot (dashboards, synthetics)
+    14→ *
+    15→ * Metric contract (canonical doc: animaxia-ops/metrics/METRICS.md):
+    16→ *   animaxia_http_requests_total{method,route,status}            counter
+    17→ *   animaxia_http_request_latency_ms_{bucket|sum|count}{method,route} histogram (ms)
+    18→ *   animaxia_http_server_errors_total{method,route}              counter (5xx)
+    19→ *   animaxia_quota_responses_total{route}                        counter (402 on /api/ai*)
+    20→ *   animaxia_db_connected / animaxia_db_pool_{total,idle,waiting} gauges
+    21→ *   animaxia_cache_{hits,misses}_total / animaxia_cache_hit_ratio gauges
+    22→ *   animaxia_provider_circuit_state{provider}                    gauge (0 closed/1 half/2 open)
+    23→ *   animaxia_ai_{calls,errors,degraded}_total                    gauges from llm-core ring
+    24→ *   animaxia_ai_tokens_total{direction}                          gauge
+    25→ *   animaxia_ai_latency_{p50,p95}_ms                             gauges
+    26→ *   animaxia_vector_backend_info{backend}                        gauge (=1 active backend)
+    27→ *   animaxia_uptime_seconds / animaxia_process_memory_rss_bytes  gauges
+    28→ *
+    29→ * FAZA 16 (Search Rate Management — Task 16-2, 'searchrate' collector
+    30→ * namespace, additive): the per-user pacing layer in front of the FAZA 15
+    31→ * queue:
+    32→ *   animaxia_search_rate_enabled / _per_user_ms / _cooldown_ms   gauges
+    33→ *   animaxia_search_rate_limit_hits                              counter (spec)
+    34→ *   animaxia_search_cooldown_active                              counter (spec)
+    35→ *   animaxia_search_spam_blocked                                 counter (spec)
+    36→ *   animaxia_search_burst_events                                 counter (spec)
+    37→ *   animaxia_search_burst_active / _burst_window_ms /
+    38→ *   _burst_max_per_window / _burst_arrivals_per_s                gauges
+    39→ *   animaxia_search_rate_admitted_total / _completed_total       counters
+    40→ *   animaxia_search_rate_tracked_users                           gauge
+    41→ *   animaxia_search_rate_{admitted,blocked}_by_shard{shard}      counters (sparse)
+    42→ *
+    43→ * FAZA 13 (sharding — Task 13-5, 'shards' collector namespace, additive — the
+    44→ * FAZA 9 unlabeled animaxia_db_pool_* lines above remain for existing
+    45→ * dashboards; the shard-labeled gauges are emitted ALONGSIDE them):
+    46→ *   animaxia_db_shard_pool_{total,idle,waiting}{shard,branch,mode} gauges
+    47→ *   animaxia_db_shard_connected{shard,branch} / _healthy{shard,branch} gauges
+    48→ *   animaxia_db_shard_queries_total{shard} / _errors_total{shard}  counters
+    49→ *   animaxia_search_cluster_enabled / _queries_total / _errors_total /
+    50→ *     _coalesced_total / _nodes_healthy / _nodes_total / _latency_p50_ms /
+    51→ *     _latency_p95_ms                                              gauge/counter set
+    52→ *   animaxia_search_cluster_node_{healthy,docs,latency_ms}{shard}   per-node gauges
+    53→ *   animaxia_vector_cluster_enabled / _queries_total / _errors_total /
+    54→ *     _upserts_total / _nodes_healthy / _nodes_total / _latency_p50_ms /
+    55→ *     _latency_p95_ms                                              gauge/counter set
+    56→ *   animaxia_vector_cluster_node_{healthy,docs,latency_ms}{shard}   per-node gauges
+    57→ *
+    58→ * Route labels are normalized (numeric segments → :id, max 4 segments) to keep
+    59→ * label cardinality bounded. Zero dependencies. Additive observability only.
+    60→ */
+    61→
+    62→const BUCKETS_MS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+    63→const MAX_ROUTE_SEGMENTS = 4;
+    64→
+    65→/** Prometheus label-value escaping (backslash, quote, newline). */
+    66→function esc(v) {
+    67→  return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    68→}
+    69→
+    70→/** Sorted, rendered label block: {k1="v1",k2="v2"} or '' when empty. */
+    71→function labelStr(labels = {}) {
+    72→  const keys = Object.keys(labels).sort();
+    73→  if (keys.length === 0) return '';
+    74→  return `{${keys.map((k) => `${k}="${esc(labels[k])}"`).join(',')}}`;
+    75→}
+    76→
+    77→/** Label block with one extra label appended (histogram buckets). */
+    78→function labelStrWith(labels, extraKey, extraValue) {
+    79→  const keys = Object.keys(labels).sort();
+    80→  const parts = keys.map((k) => `${k}="${esc(labels[k])}"`);
+    81→  parts.push(`${extraKey}="${esc(extraValue)}"`);
+    82→  return `{${parts.join(',')}}`;
+    83→}
+    84→
+    85→/** Per-series histogram accumulator. */
+    86→function emptyHist() {
+    87→  return { count: 0, sum: 0, buckets: new Array(BUCKETS_MS.length + 1).fill(0) };
+    88→}
+    89→
+    90→/** Numeric path segments → :id, cap segment count (label cardinality guard). */
+    91→export function normalizeRoute(url = '') {
+    92→  const path = String(url).split('?')[0].split('#')[0];
+    93→  const segs = path.split('/').filter(Boolean).slice(0, MAX_ROUTE_SEGMENTS);
+    94→  const norm = segs.map((s) => (/^\d+$/.test(s) ? ':id' : s));
+    95→  return norm.length === 0 ? '/' : `/${norm.join('/')}`;
+    96→}
+    97→
+    98→class MetricsRegistry {
+    99→  constructor() {
+   100→    this.counters = new Map(); // name -> Map<labelKey, {labels, value}>
+   101→    this.gauges = new Map(); // name -> Map<labelKey, {labels, value}>
+   102→    this.hists = new Map(); // name -> Map<labelKey, {labels, ...emptyHist}>
+   103→    this.collectors = new Map(); // ns -> () => object|Promise<object>
+   104→    this.startedAt = Date.now();
+   105→  }
+   106→
+   107→  /* ------------------------------------------------------------ primitives - */
+   108→
+   109→  inc(name, labels = {}, value = 1) {
+   110→    if (!this.counters.has(name)) this.counters.set(name, new Map());
+   111→    const key = labelStr(labels);
+   112→    const slot = this.counters.get(name).get(key) || { labels, value: 0 };
+   113→    slot.value += value;
+   114→    this.counters.get(name).set(key, slot);
+   115→  }
+   116→
+   117→  gauge(name, labels = {}, value = 0) {
+   118→    if (!this.gauges.has(name)) this.gauges.set(name, new Map());
+   119→    this.gauges.get(name).set(labelStr(labels), { labels, value });
+   120→  }
+   121→
+   122→  /** Observe a latency in milliseconds into a bounded histogram. */
+   123→  observe(name, labels = {}, ms = 0) {
+   124→    if (!this.hists.has(name)) this.hists.set(name, new Map());
+   125→    const key = labelStr(labels);
+   126→    const h = this.hists.get(name).get(key) || { labels, ...emptyHist() };
+   127→    h.count += 1;
+   128→    h.sum += ms;
+   129→    let placed = false;
+   130→    for (let i = 0; i < BUCKETS_MS.length; i += 1) {
+   131→      if (ms <= BUCKETS_MS[i]) {
+   132→        h.buckets[i] += 1;
+   133→        placed = true;
+   134→        break;
+   135→      }
+   136→    }
+   137→    if (!placed) h.buckets[BUCKETS_MS.length] += 1; // +Inf bucket
+   138→    this.hists.get(name).set(key, h);
+   139→  }
+   140→
+   141→  /** Register a pull collector: () => plain object (sync or async). */
+   142→  attachPull(ns, fn) {
+   143→    this.collectors.set(ns, fn);
+   144→  }
+   145→
+   146→  /* ------------------------------------------------------------ middleware - */
+   147→
+   148→  /**
+   149→   * Express middleware — counts every request once it finishes. Placed with
+   150→   * the other global middleware so it observes responses from every mounted
+   151→   * router, including later 404s and error responses. Observability failures
+   152→   * are swallowed: metrics must never break a response.
+   153→   */
+   154→  middleware() {
+   155→    return (req, res, next) => {
+   156→      const started = process.hrtime.bigint();
+   157→      res.on('finish', () => {
+   158→        try {
+   159→          const ms = Number(process.hrtime.bigint() - started) / 1e6;
+   160→          const route = normalizeRoute(req.originalUrl || req.url);
+   161→          const method = req.method;
+   162→          const status = String(res.statusCode);
+   163→          this.inc('animaxia_http_requests_total', { method, route, status });
+   164→          this.observe('animaxia_http_request_latency_ms', { method, route }, ms);
+   165→          if (res.statusCode >= 500) {
+   166→            this.inc('animaxia_http_server_errors_total', { method, route });
+   167→          }
+   168→          if (res.statusCode === 402 && route.startsWith('/api/ai')) {
+   169→            this.inc('animaxia_quota_responses_total', { route });
+   170→          }
+   171→        } catch {
+   172→          /* never break the response path */
+   173→        }
+   174→      });
+   175→      next();
+   176→    };
+   177→  }
+   178→
+   179→  /* ------------------------------------------------------------- collectors - */
+   180→
+   181→  async collect() {
+   182→    const out = {};
+   183→    for (const [ns, fn] of this.collectors) {
+   184→      try {
+   185→        out[ns] = await fn();
+   186→      } catch {
+   187→        out[ns] = { error: 'collector_failed' };
+   188→      }
+   189→    }
+   190→    return out;
+   191→  }
+   192→
+   193→  /* -------------------------------------------------------------- snapshots - */
+   194→
+   195→  /** Structured snapshot for ?format=json consumers (dashboards / synthetics). */
+   196→  async snapshot() {
+   197→    const routes = {};
+   198→    const reqMap = this.counters.get('animaxia_http_requests_total');
+   199→    const latMap = this.hists.get('animaxia_http_request_latency_ms');
+   200→    if (reqMap) {
+   201→      for (const { labels, value } of reqMap.values()) {
+   202→        const rk = labels.route;
+   203→        routes[rk] = routes[rk] || { requests: 0, errors5xx: 0 };
+   204→        routes[rk].requests += value;
+   205→        if (Number(labels.status) >= 500) routes[rk].errors5xx += value;
+   206→      }
+   207→    }
+   208→    if (latMap) {
+   209→      for (const { labels, count, sum } of latMap.values()) {
+   210→        const rk = labels.route;
+   211→        routes[rk] = routes[rk] || { requests: 0, errors5xx: 0 };
+   212→        routes[rk].avgMs = count > 0 ? Math.round(sum / count) : 0;
+   213→      }
+   214→    }
+   215→    const totalReqs = Object.values(routes).reduce((a, r) => a + r.requests, 0);
+   216→    const totalErrs = Object.values(routes).reduce((a, r) => a + r.errors5xx, 0);
+   217→
+   218→    const counters = {};
+   219→    for (const [name, slots] of this.counters) {
+   220→      counters[name] = [...slots.values()].map(({ labels, value }) => ({ labels, value }));
+   221→    }
+   222→
+   223→    return {
+   224→      service: 'animaxia-backend',
+   225→      uptimeSec: Math.floor(process.uptime()),
+   226→      generatedAt: new Date().toISOString(),
+   227→      http: {
+   228→        totalRequests: totalReqs,
+   229→        serverErrors: totalErrs,
+   230→        errorRate: totalReqs > 0 ? Number((totalErrs / totalReqs).toFixed(4)) : 0,
+   231→        routes,
+   232→      },
+   233→      counters,
+   234→      collectors: await this.collect(),
+   235→      process: { memoryRssBytes: process.memoryUsage().rss },
+   236→    };
+   237→  }
+   238→
+   239→  /* -------------------------------------------------------- prometheus text - */
+   240→
+   241→  /** Render the registry + standard collectors as Prometheus text format. */
+   242→  async renderPrometheus() {
+   243→    const lines = [];
+   244→    const emit = (line) => lines.push(line);
+   245→
+   246→    for (const [name, slots] of this.counters) {
+   247→      emit(`# TYPE ${name} counter`);
+   248→      for (const { labels, value } of slots.values()) emit(`${name}${labelStr(labels)} ${value}`);
+   249→    }
+   250→    for (const [name, slots] of this.gauges) {
+   251→      emit(`# TYPE ${name} gauge`);
+   252→      for (const { labels, value } of slots.values()) emit(`${name}${labelStr(labels)} ${value}`);
+   253→    }
+   254→    for (const [name, slots] of this.hists) {
+   255→      emit(`# TYPE ${name} histogram`);
+   256→      for (const h of slots.values()) {
+   257→        let cum = 0;
+   258→        for (let i = 0; i < BUCKETS_MS.length; i += 1) {
+   259→          cum += h.buckets[i];
+   260→          emit(`${name}_bucket${labelStrWith(h.labels, 'le', BUCKETS_MS[i])} ${cum}`);
+   261→        }
+   262→        emit(`${name}_bucket${labelStrWith(h.labels, 'le', '+Inf')} ${h.count}`);
+   263→        emit(`${name}_sum${labelStr(h.labels)} ${Math.round(h.sum * 100) / 100}`);
+   264→        emit(`${name}_count${labelStr(h.labels)} ${h.count}`);
+   265→      }
+   266→    }
+   267→
+   268→    /* standard pull collectors → gauges (namespaces fixed by the FAZA 9 contract) */
+   269→    const c = await this.collect();
+   270→    if (c.db && !c.db.error) {
+   271→      emit('# TYPE animaxia_db_connected gauge');
+   272→      emit(`animaxia_db_connected ${c.db.connected ? 1 : 0}`);
+   273→      emit('# TYPE animaxia_db_pool_total gauge');
+   274→      emit(`animaxia_db_pool_total ${c.db.pool?.total ?? 0}`);
+   275→      emit('# TYPE animaxia_db_pool_idle gauge');
+   276→      emit(`animaxia_db_pool_idle ${c.db.pool?.idle ?? 0}`);
+   277→      emit('# TYPE animaxia_db_pool_waiting gauge');
+   278→      emit(`animaxia_db_pool_waiting ${c.db.pool?.waiting ?? 0}`);
+   279→      emit('# TYPE animaxia_db_driver_info gauge');
+   280→      emit(`animaxia_db_driver_info{driver="${esc(c.db.driver)}"} 1`);
+   281→    }
+   282→    if (c.cache && !c.cache.error) {
+   283→      emit('# TYPE animaxia_cache_hits_total counter');
+   284→      emit(`animaxia_cache_hits_total ${c.cache.hits ?? 0}`);
+   285→      emit('# TYPE animaxia_cache_misses_total counter');
+   286→      emit(`animaxia_cache_misses_total ${c.cache.misses ?? 0}`);
+   287→      emit('# TYPE animaxia_cache_keys gauge');
+   288→      emit(`animaxia_cache_keys ${c.cache.keys ?? 0}`);
+   289→      emit('# TYPE animaxia_cache_hit_ratio gauge');
+   290→      emit(`animaxia_cache_hit_ratio ${c.cache.hitRate ?? 0}`);
+   291→    }
+   292→    if (Array.isArray(c.providers)) {
+   293→      emit('# TYPE animaxia_provider_circuit_state gauge');
+   294→      const stateNum = { closed: 0, 'half-open': 1, open: 2 };
+   295→      for (const p of c.providers) {
+   296→        emit(`animaxia_provider_circuit_state{provider="${esc(p.name)}"} ${stateNum[p.state] ?? 0}`);
+   297→      }
+   298→    }
+   299→    if (c.ai && !c.ai.error) {
+   300→      const u = c.ai.usage || {};
+   301→      emit('# TYPE animaxia_ai_calls_total gauge');
+   302→      emit(`animaxia_ai_calls_total ${u.totalCalls ?? 0}`);
+   303→      emit('# TYPE animaxia_ai_calls_today gauge');
+   304→      emit(`animaxia_ai_calls_today ${u.callsToday ?? 0}`);
+   305→      emit('# TYPE animaxia_ai_errors_total gauge');
+   306→      emit(`animaxia_ai_errors_total ${u.errors ?? 0}`);
+   307→      emit('# TYPE animaxia_ai_degraded_total gauge');
+   308→      emit(`animaxia_ai_degraded_total ${u.degradedCalls ?? 0}`);
+   309→      emit('# TYPE animaxia_ai_tokens_total gauge');
+   310→      emit(`animaxia_ai_tokens_total{direction="prompt"} ${u.tokens?.prompt ?? 0}`);
+   311→      emit(`animaxia_ai_tokens_total{direction="completion"} ${u.tokens?.completion ?? 0}`);
+   312→      emit('# TYPE animaxia_ai_latency_p50_ms gauge');
+   313→      emit(`animaxia_ai_latency_p50_ms ${u.latency?.p50 ?? 0}`);
+   314→      emit('# TYPE animaxia_ai_latency_p95_ms gauge');
+   315→      emit(`animaxia_ai_latency_p95_ms ${u.latency?.p95 ?? 0}`);
+   316→      if (u.byProvider && typeof u.byProvider === 'object') {
+   317→        emit('# TYPE animaxia_ai_calls_by_provider gauge');
+   318→        for (const [prov, n] of Object.entries(u.byProvider)) {
+   319→          emit(`animaxia_ai_calls_by_provider{provider="${esc(prov)}"} ${n}`);
+   320→        }
+   321→      }
+   322→    }
+   323→    if (c.vector && !c.vector.error) {
+   324→      emit('# TYPE animaxia_vector_backend_info gauge');
+   325→      emit(`animaxia_vector_backend_info{backend="${esc(c.vector.backend ?? 'unknown')}"} 1`);
+   326→      if (c.vector.counts && typeof c.vector.counts.content === 'number') {
+   327→        emit('# TYPE animaxia_vector_documents gauge');
+   328→        emit(`animaxia_vector_documents{kind="content"} ${c.vector.counts.content}`);
+   329→      }
+   330→    }
+   331→
+   332→    /* FAZA 13 (sharding — Task 13-5): per-shard DB pools + search/vector
+   333→     * cluster gauges. Emitted only when the 'shards' collector answered;
+   334→     * each sub-part (pools/search/searchHealth/vector/vectorHealth) can
+   335→     * individually degrade to {error:'collector_failed'} without breaking
+   336→     * the rest of the scrape. */
+   337→    if (c.shards && !c.shards.error) {
+   338→      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+   339→      const pools = Array.isArray(c.shards.pools) && !c.shards.pools.error ? c.shards.pools : [];
+   340→      if (pools.length > 0) {
+   341→        emit('# TYPE animaxia_db_shard_pool_total gauge');
+   342→        emit('# TYPE animaxia_db_shard_pool_idle gauge');
+   343→        emit('# TYPE animaxia_db_shard_pool_waiting gauge');
+   344→        emit('# TYPE animaxia_db_shard_connected gauge');
+   345→        emit('# TYPE animaxia_db_shard_healthy gauge');
+   346→        for (const p of pools) {
+   347→          const lb = `shard="${esc(p.shardid)}",branch="${esc(p.branch)}"`;
+   348→          emit(`animaxia_db_shard_pool_total{${lb},mode="${esc(p.mode)}"} ${num(p.pool?.total)}`);
+   349→          emit(`animaxia_db_shard_pool_idle{${lb},mode="${esc(p.mode)}"} ${num(p.pool?.idle)}`);
+   350→          emit(`animaxia_db_shard_pool_waiting{${lb},mode="${esc(p.mode)}"} ${num(p.pool?.waiting)}`);
+   351→          emit(`animaxia_db_shard_connected{${lb}} ${p.connected === true ? 1 : 0}`);
+   352→          // main-mode registry entries do not track a separate 'healthy' flag
+   353→          // (db.js listShardPools) — they mirror the main pool connection.
+   354→          const healthy = p.healthy === undefined ? (p.connected === true ? 1 : 0) : p.healthy === true ? 1 : 0;
+   355→          emit(`animaxia_db_shard_healthy{${lb}} ${healthy}`);
+   356→        }
+   357→        emit('# TYPE animaxia_db_shard_queries_total counter');
+   358→        emit('# TYPE animaxia_db_shard_errors_total counter');
+   359→        for (const p of pools) {
+   360→          emit(`animaxia_db_shard_queries_total{shard="${esc(p.shardid)}"} ${num(p.stats?.queries)}`);
+   361→          emit(`animaxia_db_shard_errors_total{shard="${esc(p.shardid)}"} ${num(p.stats?.errors)}`);
+   362→        }
+   363→      }
+   364→
+   365→      /* search cluster — ops counters/latency + per-node health (docs/latency) */
+   366→      if (c.shards.search && !c.shards.search.error) {
+   367→        const s = c.shards.search;
+   368→        emit('# TYPE animaxia_search_cluster_enabled gauge');
+   369→        emit(`animaxia_search_cluster_enabled ${s.enabled === true ? 1 : 0}`);
+   370→        emit('# TYPE animaxia_search_cluster_queries_total counter');
+   371→        emit(`animaxia_search_cluster_queries_total ${num(s.queries)}`);
+   372→        emit('# TYPE animaxia_search_cluster_errors_total counter');
+   373→        emit(`animaxia_search_cluster_errors_total ${num(s.errors)}`);
+   374→        emit('# TYPE animaxia_search_cluster_coalesced_total counter');
+   375→        emit(`animaxia_search_cluster_coalesced_total ${num(s.coalesced)}`);
+   376→        emit('# TYPE animaxia_search_cluster_nodes_healthy gauge');
+   377→        emit(`animaxia_search_cluster_nodes_healthy ${num(s.nodesHealthy)}`);
+   378→        emit('# TYPE animaxia_search_cluster_nodes_total gauge');
+   379→        emit(`animaxia_search_cluster_nodes_total ${num(s.nodesTotal)}`);
+   380→        emit('# TYPE animaxia_search_cluster_latency_p50_ms gauge');
+   381→        emit(`animaxia_search_cluster_latency_p50_ms ${num(s.latencyP50Ms)}`);
+   382→        emit('# TYPE animaxia_search_cluster_latency_p95_ms gauge');
+   383→        emit(`animaxia_search_cluster_latency_p95_ms ${num(s.latencyP95Ms)}`);
+   384→      }
+   385→      const searchNodes =
+   386→        c.shards.searchHealth && !c.shards.searchHealth.error && Array.isArray(c.shards.searchHealth.nodes)
+   387→          ? c.shards.searchHealth.nodes
+   388→          : [];
+   389→      if (searchNodes.length > 0) {
+   390→        emit('# TYPE animaxia_search_cluster_node_healthy gauge');
+   391→        emit('# TYPE animaxia_search_cluster_node_docs gauge');
+   392→        emit('# TYPE animaxia_search_cluster_node_latency_ms gauge');
+   393→        for (const n of searchNodes) {
+   394→          emit(`animaxia_search_cluster_node_healthy{shard="${esc(n.shardid)}"} ${n.healthy === true ? 1 : 0}`);
+   395→          emit(`animaxia_search_cluster_node_docs{shard="${esc(n.shardid)}"} ${num(n.docs)}`);
+   396→          emit(`animaxia_search_cluster_node_latency_ms{shard="${esc(n.shardid)}"} ${num(n.latencyMs)}`);
+   397→        }
+   398→      }
+   399→
+   400→      /* vector cluster — same set (queries/errors/upserts) + per-node gauges */
+   401→      if (c.shards.vector && !c.shards.vector.error) {
+   402→        const v = c.shards.vector;
+   403→        emit('# TYPE animaxia_vector_cluster_enabled gauge');
+   404→        emit(`animaxia_vector_cluster_enabled ${v.enabled === true ? 1 : 0}`);
+   405→        emit('# TYPE animaxia_vector_cluster_queries_total counter');
+   406→        emit(`animaxia_vector_cluster_queries_total ${num(v.queries)}`);
+   407→        emit('# TYPE animaxia_vector_cluster_errors_total counter');
+   408→        emit(`animaxia_vector_cluster_errors_total ${num(v.errors)}`);
+   409→        emit('# TYPE animaxia_vector_cluster_upserts_total counter');
+   410→        emit(`animaxia_vector_cluster_upserts_total ${num(v.upserts)}`);
+   411→        emit('# TYPE animaxia_vector_cluster_nodes_healthy gauge');
+   412→        emit(`animaxia_vector_cluster_nodes_healthy ${num(v.nodesHealthy)}`);
+   413→        emit('# TYPE animaxia_vector_cluster_nodes_total gauge');
+   414→        emit(`animaxia_vector_cluster_nodes_total ${num(v.nodesTotal)}`);
+   415→        emit('# TYPE animaxia_vector_cluster_latency_p50_ms gauge');
+   416→        emit(`animaxia_vector_cluster_latency_p50_ms ${num(v.latencyP50Ms)}`);
+   417→        emit('# TYPE animaxia_vector_cluster_latency_p95_ms gauge');
+   418→        emit(`animaxia_vector_cluster_latency_p95_ms ${num(v.latencyP95Ms)}`);
+   419→      }
+   420→      const vectorNodes =
+   421→        c.shards.vectorHealth && !c.shards.vectorHealth.error && Array.isArray(c.shards.vectorHealth.nodes)
+   422→          ? c.shards.vectorHealth.nodes
+   423→          : [];
+   424→      if (vectorNodes.length > 0) {
+   425→        emit('# TYPE animaxia_vector_cluster_node_healthy gauge');
+   426→        emit('# TYPE animaxia_vector_cluster_node_docs gauge');
+   427→        emit('# TYPE animaxia_vector_cluster_node_latency_ms gauge');
+   428→        for (const n of vectorNodes) {
+   429→          emit(`animaxia_vector_cluster_node_healthy{shard="${esc(n.shardid)}"} ${n.healthy === true ? 1 : 0}`);
+   430→          emit(`animaxia_vector_cluster_node_docs{shard="${esc(n.shardid)}"} ${num(n.docs)}`);
+   431→          emit(`animaxia_vector_cluster_node_latency_ms{shard="${esc(n.shardid)}"} ${num(n.latencyMs)}`);
+   432→        }
+   433→      }
+   434→    }
+   435→
+   436→    /* FAZA 15 (Search Flow Control): the 'searchflow' collector namespace —
+   437→     * animaxia_search_* series documenting the admission layer between the
+   438→     * search routes and Neon (queue + priority lanes + windowed dispatch).
+   439→     * Each part degrades independently; the scrape never breaks. */
+   440→    if (c.searchflow && !c.searchflow.error) {
+   441→      const f = c.searchflow;
+   442→      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+   443→      emit('# TYPE animaxia_search_flow_enabled gauge');
+   444→      emit(`animaxia_search_flow_enabled ${f.queueEnabled === true ? 1 : 0}`);
+   445→      emit('# TYPE animaxia_search_queue_length gauge');
+   446→      emit(`animaxia_search_queue_length ${num(f.queueLength)}`);
+   447→      emit('# TYPE animaxia_search_queue_by_priority gauge');
+   448→      for (const p of ['high', 'normal', 'low']) {
+   449→        emit(`animaxia_search_queue_by_priority{priority="${p}"} ${num(f.priorities?.[p])}`);
+   450→      }
+   451→      emit('# TYPE animaxia_search_inflight gauge');
+   452→      emit(`animaxia_search_inflight ${num(f.inflight)}`);
+   453→      emit('# TYPE animaxia_search_window_interval gauge');
+   454→      emit(`animaxia_search_window_interval ${num(f.windowIntervalMs)}`);
+   455→      emit('# TYPE animaxia_search_window_batch_size gauge');
+   456→      emit(`animaxia_search_window_batch_size ${num(f.windowBatchSize)}`);
+   457→      emit('# TYPE animaxia_search_dropped_requests counter');
+   458→      emit(`animaxia_search_dropped_requests ${num(f.dropped)}`);
+   459→      emit('# TYPE animaxia_search_timedout_requests counter');
+   460→      emit(`animaxia_search_timedout_requests ${num(f.timedOut)}`);
+   461→      emit('# TYPE animaxia_search_processed_total counter');
+   462→      emit(`animaxia_search_processed_total ${num(f.processed)}`);
+   463→      emit('# TYPE animaxia_search_processed_by_priority counter');
+   464→      for (const p of ['high', 'normal', 'low']) {
+   465→        emit(`animaxia_search_processed_by_priority{priority="${p}"} ${num(f.processedByPriority?.[p])}`);
+   466→      }
+   467→      emit('# TYPE animaxia_search_wait_ms_p50 gauge');
+   468→      emit(`animaxia_search_wait_ms_p50 ${num(f.waitP50Ms)}`);
+   469→      emit('# TYPE animaxia_search_wait_ms_p95 gauge');
+   470→      emit(`animaxia_search_wait_ms_p95 ${num(f.waitP95Ms)}`);
+   471→      emit('# TYPE animaxia_search_processing_rate gauge');
+   472→      emit(`animaxia_search_processing_rate ${num(f.processingRate)}`);
+   473→      emit('# TYPE animaxia_search_queue_high_water gauge');
+   474→      emit(`animaxia_search_queue_high_water ${num(f.queueHighWater)}`);
+   475→      emit('# TYPE animaxia_search_queue_capacity gauge');
+   476→      emit(`animaxia_search_queue_capacity ${num(f.queueCap)}`);
+   477→      emit('# TYPE animaxia_search_max_concurrent gauge');
+   478→      emit(`animaxia_search_max_concurrent ${num(f.maxConcurrent)}`);
+   479→      /* per-shard attribution (sparse: only shards with queue or inflight
+   480→       * activity emit series — bounded, FAZA 13 per-shard precedent). */
+   481→      if (Array.isArray(f.perShard)) {
+   482→        const active = f.perShard.filter((s) => num(s.queueLength) > 0 || num(s.inflight) > 0);
+   483→        if (active.length > 0) {
+   484→          emit('# TYPE animaxia_search_queue_by_shard gauge');
+   485→          emit('# TYPE animaxia_search_inflight_by_shard gauge');
+   486→          for (const s of active) {
+   487→            emit(`animaxia_search_queue_by_shard{shard="${esc(s.shardid)}"} ${num(s.queueLength)}`);
+   488→            emit(`animaxia_search_inflight_by_shard{shard="${esc(s.shardid)}"} ${num(s.inflight)}`);
+   489→          }
+   490→        }
+   491→      }
+   492→    }
+   493→
+   494→    /* FAZA 16 (Search Rate Management): the 'searchrate' collector namespace —
+   495→     * animaxia_search_rate_* / cooldown / spam / burst series documenting the
+   496→     * per-user pacing layer in front of the FAZA 15 flow queue. Each part
+   497→     * degrades independently; the scrape never breaks. */
+   498→    if (c.searchrate && !c.searchrate.error) {
+   499→      const r = c.searchrate;
+   500→      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+   501→      emit('# TYPE animaxia_search_rate_enabled gauge');
+   502→      emit(`animaxia_search_rate_enabled ${r.enabled === true ? 1 : 0}`);
+   503→      emit('# TYPE animaxia_search_rate_per_user_ms gauge');
+   504→      emit(`animaxia_search_rate_per_user_ms ${num(r.perUserMs)}`);
+   505→      emit('# TYPE animaxia_search_rate_cooldown_ms gauge');
+   506→      emit(`animaxia_search_rate_cooldown_ms ${num(r.cooldownMs)}`);
+   507→      emit('# TYPE animaxia_search_rate_limit_hits counter');
+   508→      emit(`animaxia_search_rate_limit_hits ${num(r.rateLimitHits)}`);
+   509→      emit('# TYPE animaxia_search_cooldown_active counter');
+   510→      emit(`animaxia_search_cooldown_active ${num(r.cooldownBlocks)}`);
+   511→      emit('# TYPE animaxia_search_spam_blocked counter');
+   512→      emit(`animaxia_search_spam_blocked ${num(r.spamBlocked)}`);
+   513→      emit('# TYPE animaxia_search_burst_events counter');
+   514→      emit(`animaxia_search_burst_events ${num(r.burstEvents)}`);
+   515→      emit('# TYPE animaxia_search_burst_active gauge');
+   516→      emit(`animaxia_search_burst_active ${r.burstActive === true ? 1 : 0}`);
+   517→      emit('# TYPE animaxia_search_burst_window_ms gauge');
+   518→      emit(`animaxia_search_burst_window_ms ${num(r.burstWindowMs)}`);
+   519→      emit('# TYPE animaxia_search_burst_max_per_window gauge');
+   520→      emit(`animaxia_search_burst_max_per_window ${num(r.burstMaxPerWindow)}`);
+   521→      emit('# TYPE animaxia_search_burst_arrivals_per_s gauge');
+   522→      emit(`animaxia_search_burst_arrivals_per_s ${num(r.burstArrivalsPerS)}`);
+   523→      emit('# TYPE animaxia_search_rate_admitted_total counter');
+   524→      emit(`animaxia_search_rate_admitted_total ${num(r.admitted)}`);
+   525→      emit('# TYPE animaxia_search_rate_completed_total counter');
+   526→      emit(`animaxia_search_rate_completed_total ${num(r.completed)}`);
+   527→      emit('# TYPE animaxia_search_rate_tracked_users gauge');
+   528→      emit(`animaxia_search_rate_tracked_users ${num(r.trackedUsers)}`);
+   529→      /* per-shard attribution (sparse: only shards with activity emit series). */
+   530→      if (Array.isArray(r.perShard)) {
+   531→        const active = r.perShard.filter((s) => num(s.admitted) > 0 || num(s.rateLimited) > 0 || num(s.cooldownActive) > 0 || num(s.spamBlocked) > 0);
+   532→        if (active.length > 0) {
+   533→          emit('# TYPE animaxia_search_rate_admitted_by_shard counter');
+   534→          emit('# TYPE animaxia_search_rate_blocked_by_shard counter');
+   535→          for (const s of active) {
+   536→            const blocked = num(s.rateLimited) + num(s.cooldownActive) + num(s.spamBlocked);
+   537→            emit(`animaxia_search_rate_admitted_by_shard{shard="${esc(s.shardid)}"} ${num(s.admitted)}`);
+   538→            emit(`animaxia_search_rate_blocked_by_shard{shard="${esc(s.shardid)}"} ${blocked}`);
+   539→          }
+   540→        }
+   541→      }
+   542→    }
+   543→
+   544→    emit('# TYPE animaxia_uptime_seconds gauge');
+   545→    emit(`animaxia_uptime_seconds ${Math.floor(process.uptime())}`);
+   546→    emit('# TYPE animaxia_process_memory_rss_bytes gauge');
+   547→    emit(`animaxia_process_memory_rss_bytes ${process.memoryUsage().rss}`);
+   548→
+   549→    return `${lines.join('\n')}\n`;
+   550→  }
+   551→
+   552→  /** Test/ops helper — wipe the in-memory series (collectors stay attached). */
+   553→  reset() {
+   554→    this.counters.clear();
+   555→    this.gauges.clear();
+   556→    this.hists.clear();
+   557→    this.startedAt = Date.now();
+   558→  }
+   559→}
+   560→
+   561→export const metrics = new MetricsRegistry();
+   562→
+   563→/**
+   564→ * Wire the standard FAZA 9 pull collectors from dependencies the server already
+   565→ * imports (db / cache / provider breakers / llm-core / vector-service).
+   566→ * Called once from server.js — keeps the wiring to a single line.
+   567→ */
+   568→export function registerStandardCollectors(deps) {
+   569→  metrics.attachPull('db', () => ({ ...deps.driverInfo(), pool: deps.poolStats() }));
+   570→  metrics.attachPull('cache', () => deps.cacheStats());
+   571→  metrics.attachPull('providers', () => deps.breakerStats());
+   572→  metrics.attachPull('ai', () => ({ provider: deps.llmProviderStatus(), usage: deps.llmUsageStats() }));
+   573→  metrics.attachPull('vector', () => deps.vectorStatus().catch(() => ({ backend: 'unavailable' })));
+   574→  return metrics;
+   575→}
+   576→
+   577→/**
+   578→ * Wire the FAZA 13 (sharding — Task 13-5) pull collector: the 'shards'
+   579→ * namespace feeding animaxia_db_shard_* / animaxia_search_cluster_* /
+   580→ * animaxia_vector_cluster_* series. Called once from server.js right after
+   581→ * registerStandardCollectors — additive, the FAZA 9 namespaces are untouched.
+   582→ *
+   583→ * Each sub-call is individually try/caught: a failing cluster/pool registry
+   584→ * degrades to { error: 'collector_failed' } for that part only, so a broken
+   585→ * cluster never breaks the whole scrape (renderPrometheus skips errored parts).
+   586→ */
+   587→export function registerShardingCollectors(deps) {
+   588→  metrics.attachPull('shards', async () => {
+   589→    const part = async (fn) => {
+   590→      try {
+   591→        return await fn();
+   592→      } catch {
+   593→        return { error: 'collector_failed' };
+   594→      }
+   595→    };
+   596→    return {
+   597→      pools: await part(() => Promise.resolve(deps.listShardPools())),
+   598→      search: await part(() => Promise.resolve(deps.searchClusterOpsSnapshot())),
+   599→      searchHealth: await part(() => deps.searchClusterHealth()),
+   600→      vector: await part(() => Promise.resolve(deps.vectorClusterOpsSnapshot())),
+   601→      vectorHealth: await part(() => deps.vectorClusterHealth()),
+   602→    };
+   603→  });
+   604→  return metrics;
+   605→}
+   606→
+   607→export default metrics;
+   608→

@@ -1,0 +1,224 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "uid": "faza23-player",
+  "title": "FAZA 23 · Player FAZA 17/21",
+  "description": "Player-ul: resume events (FAZA 21), subtitrări WebVTT, erori de redare, lanțul de fallback (FAZA 17). SURSĂ ONESTĂ: animaxia_player_* sosesc prin OTLP /v1/metrics (SPA/agentul 23-b) — până la prima valoare reală familiile sunt 0 (labels {source:\"pending\"}).",
+  "tags": [
+    "animaxia",
+    "faza23",
+    "observability"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Resume events",
+      "type": "timeseries",
+      "description": "Continuarea redării (watchhistory FAZA 21).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "sum(animaxia_player_resume_events_total)",
+          "legendFormat": "resume",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Subtitrări WebVTT — requests",
+      "type": "timeseries",
+      "description": "GET /api/player/subtitles/content/:id/subtitles.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "sum(animaxia_player_subtitle_requests_total)",
+          "legendFormat": "subtitles",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Playback errors",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "sum(animaxia_player_playback_errors_total)",
+          "legendFormat": "errors",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Fallback chain",
+      "type": "timeseries",
+      "description": "Lanțul FAZA 17 (direct → mirror → transcodat → offline).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "sum(animaxia_player_fallback_chain_total)",
+          "legendFormat": "total",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "sum by (reason) (animaxia_player_fallback_chain_total)",
+          "legendFormat": "{{reason}}",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Sursă de date",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "animaxia-prometheus-global",
+          "value": "animaxia-prometheus-global"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "timepicker": {},
+  "weekStart": ""
+}

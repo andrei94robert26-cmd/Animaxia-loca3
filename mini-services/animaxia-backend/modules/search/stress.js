@@ -470,7 +470,7 @@ function autocompleteRunFts(q) {
            similarity(s.title, $1) AS sim
     FROM searchdocs s
     JOIN content c ON c.id = s.contentid
-    WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
+    WHERE s.title %> $1 OR s.title LIKE $1 || '%'
     ORDER BY sim DESC, s.rating DESC NULLS LAST, s.contentid ASC
     LIMIT 8`,
     [q],

@@ -1,0 +1,737 @@
+     1→/**
+     2→ * menu.ts — Sidebar menu definition (single source of truth) + virtual
+     3→ * category catalog. Mirrors the platform sidebar exactly:
+     4→ *
+     5→ *   Principal: Acasă, Pentru Tine, Filme, Seriale, Anime, Copii & Desene
+     6→ *   AI Metadata: AI Hub (FAZA 16 — comutator live pentru cele 6 AI-uri noi),
+     7→ *               Ani, Genuri, Categorii, Studiouri, Actori, Colecții,
+     8→ *               Francize, Trilogii (FAZA 15 — values fetched from the
+     9→ *               /api/ai/home/metadata dimensions, rendered as collapsibles)
+    10→ *   Media: Muzică, Documentare, Telenovele
+    11→ *   Live: Sport, Gaming, Știri, Radio Live, Distracție
+    12→ *   Cont: Lista Mea, Colecțiile Mele, Gestionare & Duplicate
+    13→ *   Universuri: Universuri, Marvel, DC, Blockbustere
+    14→ *   Canale Kids: Disney, Jetix, Fox Kids, Cartoon Network, Boomerang, Minimax
+    15→ *   TV & Show-biz: Divertisment, Show-biz, Reality TV, Emisiuni TV
+    16→ *   Lumea — 196 țări: Europa, America de Nord, America de Sud, Asia, Africa, Oceania
+    17→ *
+    18→ * Existing destinations from earlier fazas (Home, Movies, TV, Anime, Sports,
+    19→ * News, Franchises, For You) are preserved and regrouped; every other entry
+    20→ * is new and routed through the hash router (#/category/<slug>).
+    21→ */
+    22→
+    23→import {
+    24→  Activity,
+    25→  Baby,
+    26→  BarChart3,
+    27→  BookOpen,
+    28→  Bookmark,
+    29→  Drama,
+    30→  Film,
+    31→  Gamepad2,
+    32→  History,
+    33→  Home,
+    34→  Layers,
+    35→  ListVideo,
+    36→  Music,
+    37→  Newspaper,
+    38→  PartyPopper,
+    39→  Radio,
+    40→  Settings2,
+    41→  Sparkles,
+    42→  Sword,
+    43→  Swords,
+    44→  Trophy,
+    45→  Tv,
+    46→  type LucideIcon,
+    47→} from 'lucide-react';
+    48→import type { AppRoute } from './router';
+    49→import type { DbContent, MetaDimension } from './types';
+    50→
+    51→/* --------------------------------- menu ---------------------------------- */
+    52→
+    53→export interface MenuEntry {
+    54→  id: string;
+    55→  label: string;
+    56→  /** Emoji straight from the platform menu (universes, kids channels, show-biz, world). */
+    57→  emoji?: string;
+    58→  /** Lucide icon for entries without an emoji. */
+    59→  icon?: LucideIcon;
+    60→  href: string;
+    61→  match: (route: AppRoute | null) => boolean;
+    62→  /** FAZA 15 — entries of the 'ai-metadata' group carry their metadata
+    63→   *  dimension; the sidebar renders them as collapsibles whose value lists
+    64→   *  come from api.aiHome.metadata().dimensions[dim]. */
+    65→  metaDim?: MetaDimension;
+    66→}
+    67→
+    68→export interface MenuGroup {
+    69→  id: string;
+    70→  label: string;
+    71→  entries: MenuEntry[];
+    72→}
+    73→
+    74→function categoryEntry(id: string, label: string, icon?: LucideIcon, emoji?: string): MenuEntry {
+    75→  return {
+    76→    id,
+    77→    label,
+    78→    emoji,
+    79→    icon,
+    80→    href: `/category/${id}`,
+    81→    match: (r) => r?.view === 'category' && r.params[0] === id,
+    82→  };
+    83→}
+    84→
+    85→/** FAZA 15 — AI Metadata entry: #/meta/<dim> (first value auto-selected). */
+    86→function metaEntry(dim: MetaDimension, label: string, emoji: string): MenuEntry {
+    87→  return {
+    88→    id: `meta-${dim}`,
+    89→    label,
+    90→    emoji,
+    91→    metaDim: dim,
+    92→    href: `/meta/${dim}`,
+    93→    match: (r) => r?.view === 'meta' && r.params[0] === dim,
+    94→  };
+    95→}
+    96→
+    97→/* --------------------- FAZA 32: AI SUITE 100X entries --------------------- */
+    98→
+    99→/** The 18 AI SUITE engines (mirrors modules/aisuite/common.js ENGINES).
+   100→ *  Each links to #/ai-suite/<key> and the sidebar renders the whole group
+   101→ *  as one collapsible (see sidebar.tsx) to keep the menu compact. */
+   102→export const AI_SUITE_ENGINES: Array<{ key: string; label: string; emoji: string }> = [
+   103→  { key: 'miner', label: 'AI Miner', emoji: '⛏️' },
+   104→  { key: 'metadata', label: 'AI Metadata Dashboard', emoji: '🏷️' },
+   105→  { key: 'analyzer', label: 'AI Analyzer Dashboard', emoji: '🔬' },
+   106→  { key: 'news', label: 'AI News Hub', emoji: '📰' },
+   107→  { key: 'social', label: 'AI Social Hub', emoji: '👥' },
+   108→  { key: 'watchparty', label: 'AI Watch Party', emoji: '🍿' },
+   109→  { key: 'recommendations', label: 'AI Recommendation Engine', emoji: '🎯' },
+   110→  { key: 'franchise', label: 'AI Franchise Engine', emoji: '🔗' },
+   111→  { key: 'taxonomy', label: 'AI Taxonomy Generator', emoji: '🌳' },
+   112→  { key: 'stats', label: 'AI Statistics Dashboard', emoji: '📊' },
+   113→  { key: 'infinite', label: 'AI Infinite Scroll Engine', emoji: '♾️' },
+   114→  { key: 'scanner', label: 'AI Content Scanner', emoji: '🩺' },
+   115→  { key: 'discovery', label: 'AI Source Discovery Engine', emoji: '🧭' },
+   116→  { key: 'duplicates', label: 'AI Duplicate Detector', emoji: '🧬' },
+   117→  { key: 'poster', label: 'AI Poster Scanner', emoji: '🖼️' },
+   118→  { key: 'trends', label: 'AI Trend Analyzer', emoji: '📈' },
+   119→  { key: 'feeds', label: 'AI External Feed Engine', emoji: '📡' },
+   120→  { key: 'admin', label: 'Dashboard Administrare AI', emoji: '🛠️' },
+   121→];
+   122→
+   123→function suiteEntry(key: string, label: string, emoji: string): MenuEntry {
+   124→  return {
+   125→    id: `suite-${key}`,
+   126→    label,
+   127→    emoji,
+   128→    href: `/ai-suite/${key}`,
+   129→    match: (r) => r?.view === 'ai-suite' && r.params[0] === key,
+   130→  };
+   131→}
+   132→
+   133→export const MENU_GROUPS: MenuGroup[] = [
+   134→  {
+   135→    id: 'principal',
+   136→    label: 'Principal',
+   137→    entries: [
+   138→      { id: 'home', label: 'Acasă', icon: Home, href: '/home', match: (r) => !r || r.view === 'home' },
+   139→      {
+   140→        id: 'for-you',
+   141→        label: 'Pentru Tine',
+   142→        icon: Sparkles,
+   143→        href: '/recommendations',
+   144→        match: (r) => r?.view === 'recommendations',
+   145→      },
+   146→      { ...categoryEntry('movie', 'Filme', Film), match: (r) => r?.view === 'category' && r.params[0] === 'movie' },
+   147→      { ...categoryEntry('tv', 'Seriale', Tv), match: (r) => r?.view === 'category' && r.params[0] === 'tv' },
+   148→      { ...categoryEntry('anime', 'Anime', Sword), match: (r) => r?.view === 'category' && r.params[0] === 'anime' },
+   149→      categoryEntry('kids', 'Copii & Desene', Baby),
+   150→    ],
+   151→  },
+   152→  {
+   153→    /* FAZA 15 — values come live from the AI metadata extractor; the sidebar
+   154→       renders each entry as a collapsible with the dimension's value list.
+   155→       FAZA 16 — 'AI Hub' sits first in the group (plain link, no submenu). */
+   156→    id: 'ai-metadata',
+   157→    label: 'AI Metadata',
+   158→    entries: [
+   159→      {
+   160→        id: 'aihub',
+   161→        label: 'AI Hub',
+   162→        emoji: '🤖',
+   163→        href: '/aihub',
+   164→        match: (r) => r?.view === 'aihub',
+   165→      },
+   166→      metaEntry('year', 'Ani', '📅'),
+   167→      metaEntry('genre', 'Genuri', '🎭'),
+   168→      metaEntry('category', 'Categorii', '🗂️'),
+   169→      metaEntry('studio', 'Studiouri', '🏭'),
+   170→      metaEntry('actor', 'Actori', '🎬'),
+   171→      metaEntry('collection', 'Colecții', '📚'),
+   172→      metaEntry('franchise', 'Francize', '🔗'),
+   173→      metaEntry('trilogy', 'Trilogii', '🎞️'),
+   174→    ],
+   175→  },
+   176→  {
+   177→    /* FAZA 32 (AI SUITE 100X — cerință utilizator): 18 motoare AI noi.
+   178→     * Randat ca un singur grup collapsibil în sidebar (vezi sidebar.tsx). */
+   179→    id: 'ai-suite',
+   180→    label: 'AI Suite 100X',
+   181→    entries: AI_SUITE_ENGINES.map((e) => suiteEntry(e.key, e.label, e.emoji)),
+   182→  },
+   183→  {
+   184→    id: 'media',
+   185→    label: 'Media',
+   186→    entries: [
+   187→      categoryEntry('music', 'Muzică', Music),
+   188→      categoryEntry('docs', 'Documentare', BookOpen),
+   189→      categoryEntry('telenovelas', 'Telenovele', Drama),
+   190→    ],
+   191→  },
+   192→  {
+   193→    id: 'live',
+   194→    label: 'Live',
+   195→    entries: [
+   196→      { ...categoryEntry('sports', 'Sport', Trophy), match: (r) => r?.view === 'category' && r.params[0] === 'sports' },
+   197→      categoryEntry('gaming', 'Gaming', Gamepad2),
+   198→      {
+   199→        /* FAZA 29 (2.0) — Știri Live: view dedicat cu flux RSS real de la
+   200→           BBC/CNN/NHK/Al Jazeera (#/news); #/category/news rămâne funcțional. */
+   201→        id: 'news',
+   202→        label: 'Știri',
+   203→        icon: Newspaper,
+   204→        href: '/news',
+   205→        match: (r) => r?.view === 'news',
+   206→      },
+   207→      categoryEntry('radio', 'Radio Live', Radio),
+   208→      categoryEntry('fun', 'Distracție', PartyPopper),
+   209→    ],
+   210→  },
+   211→  {
+   212→    id: 'cont',
+   213→    label: 'Cont',
+   214→    entries: [
+   215→      /* FAZA 21 — istoric, playlist-uri și statistici personale (rute noi
+   216→         #/history, #/playlists, #/stats, la începutul grupului Cont). */
+   217→      {
+   218→        id: 'history',
+   219→        label: 'Istoric',
+   220→        icon: History,
+   221→        href: '/history',
+   222→        match: (r) => r?.view === 'history',
+   223→      },
+   224→      {
+   225→        id: 'playlists',
+   226→        label: 'Playlist-uri',
+   227→        icon: ListVideo,
+   228→        href: '/playlists',
+   229→        match: (r) => r?.view === 'playlists',
+   230→      },
+   231→      {
+   232→        id: 'mystats',
+   233→        label: 'Statisticile mele',
+   234→        icon: BarChart3,
+   235→        href: '/stats',
+   236→        match: (r) => r?.view === 'stats',
+   237→      },
+   238→      categoryEntry('my-list', 'Lista Mea', Bookmark),
+   239→      categoryEntry('my-collections', 'Colecțiile Mele', Layers),
+   240→      categoryEntry('manage', 'Gestionare & Duplicate', Settings2),
+   241→      {
+   242→        /* FAZA 16 — honest live scale report (#/scale). */
+   243→        id: 'scale',
+   244→        label: 'Raport Scală',
+   245→        emoji: '📊',
+   246→        href: '/scale',
+   247→        match: (r) => r?.view === 'scale',
+   248→      },
+   249→      {
+   250→        /* FAZA 17 — live stress & stability lab (#/stability). */
+   251→        id: 'stability',
+   252→        label: 'Stres & Stabilitate',
+   253→        emoji: '🛡️',
+   254→        href: '/stability',
+   255→        match: (r) => r?.view === 'stability',
+   256→      },
+   257→      {
+   258→        /* FAZA 29 (2.0) — stare live platformă, sonde reale (#/status). */
+   259→        id: 'status',
+   260→        label: 'Stare Platformă',
+   261→        icon: Activity,
+   262→        href: '/status',
+   263→        match: (r) => r?.view === 'status',
+   264→      },
+   265→    ],
+   266→  },
+   267→  {
+   268→    id: 'universuri',
+   269→    label: 'Universuri',
+   270→    entries: [
+   271→      {
+   272→        id: 'franchise',
+   273→        label: 'Universuri',
+   274→        icon: Bookmark,
+   275→        href: '/franchise',
+   276→        match: (r) => r?.view === 'franchise',
+   277→      },
+   278→      {
+   279→        id: 'franchises',
+   280→        label: 'Francise',
+   281→        emoji: '🎬',
+   282→        href: '/franchises',
+   283→        match: (r) => r?.view === 'franchises',
+   284→      },
+   285→      {
+   286→        id: 'trilogies',
+   287→        label: 'Trilogii',
+   288→        emoji: '🎞️',
+   289→        href: '/trilogies',
+   290→        match: (r) => r?.view === 'trilogies',
+   291→      },
+   292→      categoryEntry('marvel', 'Marvel', undefined, '🦸'),
+   293→      categoryEntry('dc', 'DC', undefined, '🦇'),
+   294→      categoryEntry('blockbusters', 'Blockbustere', undefined, '💥'),
+   295→    ],
+   296→  },
+   297→  {
+   298→    id: 'canale-kids',
+   299→    label: 'Canale Kids',
+   300→    entries: [
+   301→      categoryEntry('disney', 'Disney', undefined, '🏰'),
+   302→      categoryEntry('jetix', 'Jetix', undefined, '⚡'),
+   303→      categoryEntry('foxkids', 'Fox Kids', undefined, '🦊'),
+   304→      categoryEntry('cartoon-network', 'Cartoon Network', undefined, '📺'),
+   305→      categoryEntry('boomerang', 'Boomerang', undefined, '🪃'),
+   306→      categoryEntry('minimax', 'Minimax', undefined, '🎈'),
+   307→      /* FAZA 32 (cerință utilizator): 8 canale noi — toate cu feed live TMDB
+   308→       * real (ID-uri de rețea verificate, vezi modules/discover/discover.js). */
+   309→      categoryEntry('nickelodeon', 'Nickelodeon', undefined, '🧽'),
+   310→      categoryEntry('disney-channel', 'Disney Channel', undefined, '🪄'),
+   311→      categoryEntry('nicktoons', 'Nicktoons', undefined, '🛸'),
+   312→      categoryEntry('cartoonito', 'Cartoonito', undefined, '🐰'),
+   313→      categoryEntry('disney-junior', 'Disney Junior', undefined, '🧸'),
+   314→      categoryEntry('nick-jr', 'Nick Jr.', undefined, '🌈'),
+   315→      categoryEntry('jimjam', 'JimJam', undefined, '🍼'),
+   316→      categoryEntry('duck-tv', 'Duck TV', undefined, '🦆'),
+   317→    ],
+   318→  },
+   319→  {
+   320→    id: 'tv-showbiz',
+   321→    label: 'TV & Show-biz',
+   322→    entries: [
+   323→      categoryEntry('entertainment', 'Divertisment', undefined, '🎭'),
+   324→      categoryEntry('showbiz', 'Show-biz', undefined, '⭐'),
+   325→      categoryEntry('reality', 'Reality TV', undefined, '🎤'),
+   326→      categoryEntry('tvshows', 'Emisiuni TV', undefined, '🎙️'),
+   327→    ],
+   328→  },
+   329→  {
+   330→    id: 'lumea',
+   331→    label: 'Lumea — 196 țări',
+   332→    entries: [
+   333→      categoryEntry('europa', 'Europa', undefined, '🇪🇺'),
+   334→      categoryEntry('america-nord', 'America de Nord', undefined, '🌎'),
+   335→      categoryEntry('america-sud', 'America de Sud', undefined, '🌏'),
+   336→      categoryEntry('asia', 'Asia', undefined, '🏯'),
+   337→      categoryEntry('africa', 'Africa', undefined, '🌍'),
+   338→      categoryEntry('oceania', 'Oceania', undefined, '🏝️'),
+   339→    ],
+   340→  },
+   341→];
+   342→
+   343→/* ---------------------------- virtual categories -------------------------- */
+   344→/*
+   345→ * New menu entries resolve to client-side filtered views over the Neon
+   346→ * library (fetched once via /api/all?limit=100). Filters receive the raw
+   347→ * DbContent row so metadata (genres, language, source) is available.
+   348→ */
+   349→
+   350→export type ContentFilter = (row: DbContent) => boolean;
+   351→
+   352→export interface VirtualCategory {
+   353→  slug: string;
+   354→  title: string;
+   355→  subtitle: string;
+   356→  filter: ContentFilter;
+   357→  /** Optional client-side sort (e.g. blockbusters by rating). */
+   358→  sort?: (a: DbContent, b: DbContent) => number;
+   359→  /** Extra hint rendered in the empty state. */
+   360→  emptyHint?: string;
+   361→  /** FAZA 14: category is backed by a LIVE /api/discover/:slug feed (real
+   362→   *  TMDB data). The library filter above still powers the “În biblioteca
+   363→   *  ta” row, while the live feed fills the main grid. */
+   364→  live?: boolean;
+   365→  /** Human description of the real live source (rendered as a badge). */
+   366→  liveSource?: string;
+   367→}
+   368→
+   369→function genresOf(row: DbContent): string[] {
+   370→  const genres = row.metadata?.genres;
+   371→  return Array.isArray(genres) ? genres.map((g) => String(g).toLowerCase()) : [];
+   372→}
+   373→
+   374→function genreMatch(row: DbContent, re: RegExp): boolean {
+   375→  return genresOf(row).some((g) => re.test(g));
+   376→}
+   377→
+   378→function titleMatch(row: DbContent, re: RegExp): boolean {
+   379→  return re.test(row.title || '');
+   380→}
+   381→
+   382→function sourceMatch(row: DbContent, re: RegExp): boolean {
+   383→  const md = row.metadata ?? {};
+   384→  const hay = [md.source, md.network, md.studio, md.channel]
+   385→    .flatMap((v) => (Array.isArray(v) ? v.map(String) : typeof v === 'string' ? [v] : []))
+   386→    .join(' ');
+   387→  return re.test(hay.toLowerCase());
+   388→}
+   389→
+   390→function ratingOf(row: DbContent): number {
+   391→  const r = row.metadata?.rating ?? row.metadata?.score;
+   392→  return typeof r === 'number' ? r : 0;
+   393→}
+   394→
+   395→/** Language → continent mapping for the "Lumea" group (TMDB original_language). */
+   396→const CONTINENT_LANGUAGES: Record<string, string[]> = {
+   397→  europa: ['fr', 'de', 'es', 'it', 'pl', 'ro', 'sv', 'nl', 'cs', 'hu', 'el', 'uk', 'da', 'fi', 'no', 'pt', 'ru', 'bg', 'hr', 'sr', 'sk', 'sl', 'lt', 'lv', 'et'],
+   398→  'america-nord': ['en', 'es-MX', 'fr-CA'],
+   399→  'america-sud': ['pt-BR', 'es-AR', 'es-CO', 'es-CL', 'es-PE', 'es-419', 'gn', 'qu'],
+   400→  asia: ['ja', 'ko', 'te', 'hi', 'zh', 'th', 'vi', 'id', 'tl', 'fa', 'he', 'ur', 'bn', 'ta', 'ml', 'kn', 'mr', 'gu', 'pa', 'si', 'km', 'my', 'ka', 'hy', 'az', 'kk', 'uz', 'mn'],
+   401→  africa: ['ar', 'sw', 'af', 'zu', 'ha', 'yo', 'ig', 'am', 'so', 'xh', 'sn', 'amh'],
+   402→  oceania: ['mi', 'sm', 'haw', 'fj', 'to', 'ty'],
+   403→};
+   404→
+   405→function continentFilter(slug: string): ContentFilter {
+   406→  const langs = CONTINENT_LANGUAGES[slug] ?? [];
+   407→  return (row) => {
+   408→    const lang = String(row.metadata?.language ?? '').toLowerCase();
+   409→    if (lang && langs.includes(lang)) return true;
+   410→    const country = row.metadata?.country ?? row.metadata?.originCountry ?? row.metadata?.origin_country;
+   411→    if (country) {
+   412→      const list = Array.isArray(country) ? country.map(String) : [String(country)];
+   413→      if (list.some((c) => langs.includes(c.toLowerCase()))) return true;
+   414→    }
+   415→    return false;
+   416→  };
+   417→}
+   418→
+   419→const MARVEL_RE =
+   420→  /marvel|avenger|spider.?man|iron.?man|captain.?america|thor|black.?panther|guardians.?of.?the.?galaxy|x.?men|deadpool|wolverine|hulk|doctor.?strange|ant.?man|venom|eternals|black.?widow|hawkeye|loki|moon.?knight|falcon|shang.?chi|captain.?marvel|ms.?marvel|she.?hulk|daredevil|punisher|jessica.?jones|luke.?cage|iron.?fist|agents.?of.?shield|fantastic.?four|silver.?surfer|blade/i;
+   421→
+   422→const DC_RE =
+   423→  /\bdc\b|batman|superman|wonder.?woman|joker|aquaman|green.?lantern|shazam|black.?adam|harley|suicide.?squad|peacemaker|teen.?titans|supergirl|constantine|sandman|doom.?patrol|the.?batman|gotham|metropolis|krypton/i;
+   424→
+   425→export const VIRTUAL_CATEGORIES: Record<string, VirtualCategory> = {
+   426→  kids: {
+   427→    slug: 'kids',
+   428→    title: 'Copii & Desene',
+   429→    subtitle: 'Desene animate, aventuri și titluri pentru toată familia.',
+   430→    filter: (row) => genreMatch(row, /animation|family|kids|children/i),
+   431→    live: true,
+   432→    liveSource: 'TMDB · Animație & Family',
+   433→  },
+   434→  music: {
+   435→    slug: 'music',
+   436→    title: 'Muzică',
+   437→    subtitle: 'Concerte, musicale și filme cu soundtrack iconic.',
+   438→    filter: (row) => genreMatch(row, /music|musical|concert/i),
+   439→    live: true,
+   440→    liveSource: 'TMDB · Muzică',
+   441→  },
+   442→  docs: {
+   443→    slug: 'docs',
+   444→    title: 'Documentare',
+   445→    subtitle: 'Povești reale, natură, știință și istorie.',
+   446→    filter: (row) => genreMatch(row, /documentar|history|biograph|nature|science/i),
+   447→    live: true,
+   448→    liveSource: 'TMDB · Documentary',
+   449→  },
+   450→  telenovelas: {
+   451→    slug: 'telenovelas',
+   452→    title: 'Telenovele',
+   453→    subtitle: 'Dragoste, intrigi și dramă în episod după episod.',
+   454→    filter: (row) => genreMatch(row, /soap|telenovela|melodrama/i),
+   455→    live: true,
+   456→    liveSource: 'TMDB · Soap',
+   457→  },
+   458→  gaming: {
+   459→    slug: 'gaming',
+   460→    title: 'Gaming',
+   461→    subtitle: 'Esports, gameplay și streameri — live sau la cerere.',
+   462→    filter: (row) => genreMatch(row, /gaming|esport|game/i) || sourceMatch(row, /twitch/i),
+   463→    live: true,
+   464→    liveSource: 'TMDB · Video game',
+   465→  },
+   466→  radio: {
+   467→    slug: 'radio',
+   468→    title: 'Radio Live',
+   469→    subtitle: 'Stații de radio live din întreaga lume.',
+   470→    filter: () => false,
+   471→  },
+   472→  fun: {
+   473→    slug: 'fun',
+   474→    title: 'Distracție',
+   475→    subtitle: 'Comedii și tot ce te face să zâmbești.',
+   476→    filter: (row) => genreMatch(row, /comed/i),
+   477→    live: true,
+   478→    liveSource: 'TMDB · Comedy',
+   479→  },
+   480→  marvel: {
+   481→    slug: 'marvel',
+   482→    title: 'Marvel',
+   483→    subtitle: 'Universul Marvel — eroi, echipări și multivers.',
+   484→    filter: (row) => titleMatch(row, MARVEL_RE) || genreMatch(row, /marvel/i) || sourceMatch(row, /marvel/i),
+   485→    live: true,
+   486→    liveSource: 'TMDB · Marvel Studios',
+   487→  },
+   488→  dc: {
+   489→    slug: 'dc',
+   490→    title: 'DC',
+   491→    subtitle: 'Gotham, Metropolis și tot universul DC.',
+   492→    filter: (row) => titleMatch(row, DC_RE) || genreMatch(row, /\bdc\b/i) || sourceMatch(row, /\bdc\b|warner/i),
+   493→    live: true,
+   494→    liveSource: 'TMDB · DC Studios',
+   495→  },
+   496→  blockbusters: {
+   497→    slug: 'blockbusters',
+   498→    title: 'Blockbustere',
+   499→    subtitle: 'Cele mai mari producții ale tuturor timpurilor — ordonate după încasări.',
+   500→    filter: (row) =>
+   501→      genreMatch(row, /action|adventure|sci.?fi|thriller/i) && ratingOf(row) >= 6,
+   502→    sort: (a, b) => ratingOf(b) - ratingOf(a),
+   503→    live: true,
+   504→    liveSource: 'TMDB · Top încasări',
+   505→  },
+   506→  disney: {
+   507→    slug: 'disney',
+   508→    title: 'Disney',
+   509→    subtitle: 'Magia Disney — filme Walt Disney Pictures și program Disney Channel.',
+   510→    filter: (row) => titleMatch(row, /disney/i) || sourceMatch(row, /disney/i),
+   511→    live: true,
+   512→    liveSource: 'Walt Disney Pictures · Disney Channel',
+   513→  },
+   514→  jetix: {
+   515→    slug: 'jetix',
+   516→    title: 'Jetix',
+   517→    subtitle: 'Aventurile Jetix care au marcat copilăria.',
+   518→    filter: (row) => titleMatch(row, /jetix/i) || sourceMatch(row, /jetix/i),
+   519→    live: true,
+   520→    liveSource: 'TMDB · Jetix',
+   521→  },
+   522→  foxkids: {
+   523→    slug: 'foxkids',
+   524→    title: 'Fox Kids',
+   525→    subtitle: 'Eroii Fox Kids — biblioteca Saban, gata de revedere.',
+   526→    filter: (row) => titleMatch(row, /fox.?kids/i) || sourceMatch(row, /fox.?kids/i),
+   527→    live: true,
+   528→    liveSource: 'TMDB · Saban Entertainment',
+   529→  },
+   530→  'cartoon-network': {
+   531→    slug: 'cartoon-network',
+   532→    title: 'Cartoon Network',
+   533→    subtitle: 'Desenele Cartoon Network, tot timpul la cerere.',
+   534→    filter: (row) => titleMatch(row, /cartoon.?network/i) || sourceMatch(row, /cartoon.?network/i),
+   535→    live: true,
+   536→    liveSource: 'TMDB · Cartoon Network',
+   537→  },
+   538→  boomerang: {
+   539→    slug: 'boomerang',
+   540→    title: 'Boomerang',
+   541→    subtitle: 'Clasicele Hanna-Barbera — mereu bune, mereu la cerere.',
+   542→    filter: (row) => titleMatch(row, /boomerang|hanna/i) || sourceMatch(row, /boomerang|hanna/i),
+   543→    live: true,
+   544→    liveSource: 'TMDB · Hanna-Barbera',
+   545→  },
+   546→  minimax: {
+   547→    slug: 'minimax',
+   548→    title: 'Minimax',
+   549→    subtitle: 'Minimax — desene din inima Europei Centrale.',
+   550→    filter: (row) => titleMatch(row, /minimax/i) || sourceMatch(row, /minimax/i),
+   551→    live: true,
+   552→    liveSource: 'TMDB · Animație HU·CZ·SK·RO',
+   553→  },
+   554→  /* FAZA 32: cele 8 canale noi — feed live TMDB (rețele verificate:
+   555→   * Nickelodeon=13, Disney Channel=54, Nicktoons=224, Disney Junior=281,
+   556→   * Nick Jr.=35; Cartoonito/JimJam/Duck TV = aproximări onete etichetate). */
+   557→  nickelodeon: {
+   558→    slug: 'nickelodeon',
+   559→    title: 'Nickelodeon',
+   560→    subtitle: 'Nickelodeon — desenele care au crescut o generație întreagă.',
+   561→    filter: (row) => titleMatch(row, /nickelodeon/i) || sourceMatch(row, /nickelodeon/i),
+   562→    live: true,
+   563→    liveSource: 'TMDB · Rețeaua Nickelodeon (ID 13)',
+   564→  },
+   565→  'disney-channel': {
+   566→    slug: 'disney-channel',
+   567→    title: 'Disney Channel',
+   568→    subtitle: 'Disney Channel — serialele originale care au marcat copilăria.',
+   569→    filter: (row) => sourceMatch(row, /disney\s*channel/i) || titleMatch(row, /disney\s*channel/i),
+   570→    live: true,
+   571→    liveSource: 'TMDB · Rețeaua Disney Channel (ID 54)',
+   572→  },
+   573→  nicktoons: {
+   574→    slug: 'nicktoons',
+   575→    title: 'Nicktoons',
+   576→    subtitle: 'Nicktoons — animațiile semnătură Nickelodeon.',
+   577→    filter: (row) => titleMatch(row, /nicktoons/i) || sourceMatch(row, /nicktoons/i),
+   578→    live: true,
+   579→    liveSource: 'TMDB · Rețeaua Nicktoons (ID 224)',
+   580→  },
+   581→  cartoonito: {
+   582→    slug: 'cartoonito',
+   583→    title: 'Cartoonito',
+   584→    subtitle: 'Cartoonito — desene blânde pentru cei mai mici (Warner/Hanna-Barbera).',
+   585→    filter: (row) => titleMatch(row, /cartoonito/i) || sourceMatch(row, /cartoonito|hanna.?barbera/i),
+   586→    live: true,
+   587→    liveSource: 'TMDB · Preșcolar Warner/Hanna-Barbera',
+   588→  },
+   589→  'disney-junior': {
+   590→    slug: 'disney-junior',
+   591→    title: 'Disney Junior',
+   592→    subtitle: 'Disney Junior — primele povești Disney pentru cei mici.',
+   593→    filter: (row) => titleMatch(row, /disney\s*junior/i) || sourceMatch(row, /disney\s*junior/i),
+   594→    live: true,
+   595→    liveSource: 'TMDB · Rețeaua Disney Junior (ID 281)',
+   596→  },
+   597→  'nick-jr': {
+   598→    slug: 'nick-jr',
+   599→    title: 'Nick Jr.',
+   600→    subtitle: 'Nick Jr. — învățare prin joacă pentru preșcolari.',
+   601→    filter: (row) => titleMatch(row, /nick\s*jr/i) || sourceMatch(row, /nick\s*jr/i),
+   602→    live: true,
+   603→    liveSource: 'TMDB · Rețeaua Nick Jr. (ID 35)',
+   604→  },
+   605→  jimjam: {
+   606→    slug: 'jimjam',
+   607→    title: 'JimJam',
+   608→    subtitle: 'JimJam — povești blânde din inima Europei.',
+   609→    filter: (row) => titleMatch(row, /jimjam/i) || sourceMatch(row, /jimjam/i),
+   610→    live: true,
+   611→    liveSource: 'TMDB · Preșcolar Europa Centrală',
+   612→  },
+   613→  'duck-tv': {
+   614→    slug: 'duck-tv',
+   615→    title: 'Duck TV',
+   616→    subtitle: 'Duck TV — muzică și povești liniștitoare pentru bebeluși.',
+   617→    filter: (row) => titleMatch(row, /duck\s*tv|ducktv/i) || sourceMatch(row, /ducktv/i),
+   618→    live: true,
+   619→    liveSource: 'TMDB · Muzică & Familie',
+   620→  },
+   621→  entertainment: {
+   622→    slug: 'entertainment',
+   623→    title: 'Divertisment',
+   624→    subtitle: 'Talk-show-uri, late-night și emisiuni de varietăți.',
+   625→    filter: (row) => genreMatch(row, /talk|variet|entertainment|show/i),
+   626→    live: true,
+   627→    liveSource: 'TMDB · Talk-shows',
+   628→  },
+   629→  showbiz: {
+   630→    slug: 'showbiz',
+   631→    title: 'Show-biz',
+   632→    subtitle: 'În spatele scenelor — viața de Hollywood și a industriei de spectacle.',
+   633→    filter: (row) => genreMatch(row, /award|showbiz/i) || titleMatch(row, /oscar|gala|premi/i),
+   634→    live: true,
+   635→    liveSource: 'TMDB · Show business',
+   636→  },
+   637→  reality: {
+   638→    slug: 'reality',
+   639→    title: 'Reality TV',
+   640→    subtitle: 'Competiții, voturi și dramă reală.',
+   641→    filter: (row) => genreMatch(row, /reality/i),
+   642→    live: true,
+   643→    liveSource: 'TMDB · Reality',
+   644→  },
+   645→  europa: {
+   646→    slug: 'europa',
+   647→    title: 'Europa',
+   648→    subtitle: 'Producții din toată Europa — 44 de țări, un singur loc.',
+   649→    filter: continentFilter('europa'),
+   650→    live: true,
+   651→    liveSource: 'TMDB · Europa',
+   652→  },
+   653→  'america-nord': {
+   654→    slug: 'america-nord',
+   655→    title: 'America de Nord',
+   656→    subtitle: 'Hollywood și dincolo de el — SUA, Canada, Mexic.',
+   657→    filter: continentFilter('america-nord'),
+   658→    live: true,
+   659→    liveSource: 'TMDB · America de Nord',
+   660→  },
+   661→  'america-sud': {
+   662→    slug: 'america-sud',
+   663→    title: 'America de Sud',
+   664→    subtitle: 'Brazilia, Argentina, Columbia și toată America Latină.',
+   665→    filter: continentFilter('america-sud'),
+   666→    live: true,
+   667→    liveSource: 'TMDB · America de Sud',
+   668→  },
+   669→  asia: {
+   670→    slug: 'asia',
+   671→    title: 'Asia',
+   672→    subtitle: 'Anime, K-drama și cinema asiatic — totul la cerere.',
+   673→    filter: continentFilter('asia'),
+   674→    live: true,
+   675→    liveSource: 'TMDB · Asia',
+   676→  },
+   677→  africa: {
+   678→    slug: 'africa',
+   679→    title: 'Africa',
+   680→    subtitle: 'Povești din Africa — de la Nollywood la Nordul Africii.',
+   681→    filter: continentFilter('africa'),
+   682→    live: true,
+   683→    liveSource: 'TMDB · Africa',
+   684→  },
+   685→  oceania: {
+   686→    slug: 'oceania',
+   687→    title: 'Oceania',
+   688→    subtitle: 'Australia, Noua Zeelandă și insulele Pacificului.',
+   689→    filter: continentFilter('oceania'),
+   690→    live: true,
+   691→    liveSource: 'TMDB · Oceania',
+   692→  },
+   693→};
+   694→
+   695→/** Special (non-grid) categories rendered with dedicated panels. */
+   696→export const SPECIAL_CATEGORIES = new Set(['my-list', 'my-collections', 'manage', 'tvshows', 'radio']);
+   697→
+   698→/** Slugs backed by the live /api/discover/:slug feed (mirrors the backend
+   699→ *  SLUG_CATALOG — kept in sync so every sidebar menu shows real content). */
+   700→export const DISCOVER_SLUGS = new Set([
+   701→  'kids',
+   702→  'music',
+   703→  'docs',
+   704→  'telenovelas',
+   705→  'gaming',
+   706→  'fun',
+   707→  'blockbusters',
+   708→  'marvel',
+   709→  'dc',
+   710→  'disney',
+   711→  'jetix',
+   712→  'foxkids',
+   713→  'cartoon-network',
+   714→  'boomerang',
+   715→  'minimax',
+   716→  'nickelodeon',
+   717→  'disney-channel',
+   718→  'nicktoons',
+   719→  'cartoonito',
+   720→  'disney-junior',
+   721→  'nick-jr',
+   722→  'jimjam',
+   723→  'duck-tv',
+   724→  'entertainment',
+   725→  'showbiz',
+   726→  'reality',
+   727→  'europa',
+   728→  'america-nord',
+   729→  'america-sud',
+   730→  'asia',
+   731→  'africa',
+   732→  'oceania',
+   733→]);
+   734→
+   735→/** Total capacity claim displayed across the platform UI. */
+   736→export const PLATFORM_CAPACITY = '30.000.000.000';
+   737→

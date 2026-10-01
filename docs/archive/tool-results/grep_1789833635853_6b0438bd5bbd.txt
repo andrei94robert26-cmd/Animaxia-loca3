@@ -1,0 +1,252 @@
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:106:      const list = await api.playerHubPlaylists();
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:112:        capped.map((p) => api.playerHubPlaylistDetail(p.id).catch(() => null)),
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:168:        const res = await api.playerHubAddPlaylistItem(playlistId, contentId);
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:193:        const created = await api.playerHubCreatePlaylist(clean);
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:194:        await api.playerHubAddPlaylistItem(created.playlist.id, contentId);
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:210:        await api.playerHubRemovePlaylistItem(activeQueue.id, cid);
+/home/z/my-project/src/components/animaxia/player/endgame-recommendations.tsx:8: * Recomandările sunt 100% REALE: sursa este platform.aiPersonalPlayer(contentId)
+/home/z/my-project/src/components/animaxia/player/endgame-recommendations.tsx:33:  const ai = useApi(`player-ai-${contentId}`, () => platform.aiPersonalPlayer(contentId));
+/home/z/my-project/src/components/animaxia/player/player-controls.tsx:338:  const subs = useApi(
+/home/z/my-project/src/components/animaxia/player/player-controls.tsx:340:    () => api.playerHubSubtitles(contentId as number),
+/home/z/my-project/src/components/animaxia/views/mobile-view.tsx:193:  const player = useApi(`mobile-player-${item.id}`, () => platform.mobilePlayer(item.id));
+/home/z/my-project/src/components/animaxia/views/mobile-view.tsx:602:  const home = useApi('mobile:home', () => platform.mobileHome());
+/home/z/my-project/src/components/animaxia/views/mobile-view.tsx:603:  const config = useApi('mobile:config', () => platform.mobileConfig());
+/home/z/my-project/src/components/animaxia/views/feed-view.tsx:134:  const feed = useApi(
+/home/z/my-project/src/components/animaxia/views/feed-view.tsx:136:    () => (kind === 'global' ? platform.globalFeed() : platform.personalFeed()),
+/home/z/my-project/src/components/animaxia/views/feed-view.tsx:160:        kind === 'global' ? await platform.globalFeed(activeCursor) : await platform.personalFeed(activeCursor);
+/home/z/my-project/src/components/animaxia/views/recommendations-view.tsx:32:  const topAnime = useApi('rec-anime-top', () => api.animeTop());
+/home/z/my-project/src/components/animaxia/views/recommendations-view.tsx:33:  const topMovies = useApi('rec-movies-top', () => api.moviesTop());
+/home/z/my-project/src/components/animaxia/views/recommendations-view.tsx:34:  const popularTv = useApi('rec-tv-popular', () => api.tvPopular());
+/home/z/my-project/src/components/animaxia/views/recommendations-view.tsx:35:  const fresh = useApi('rec-fresh', () => api.all({ limit: 14, sort: 'createdat' }));
+/home/z/my-project/src/components/animaxia/views/recommendations-view.tsx:41:      const res = await api.animeRandom();
+/home/z/my-project/src/components/animaxia/views/franchise-view.tsx:60:  const libRes = useApi(`fr-lib-${q}`, () => api.all({ search: q, limit: 24 }));
+/home/z/my-project/src/components/animaxia/views/franchise-view.tsx:61:  const animeRes = useApi(`fr-anime-${q}`, () => api.animeSearch(q));
+/home/z/my-project/src/components/animaxia/views/franchise-view.tsx:62:  const mediaRes = useApi(`fr-media-${q}`, () => api.moviesSearch(q));
+/home/z/my-project/src/components/animaxia/views/meta-view.tsx:52:  const metaRes = useApi('ai-home-metadata', () => api.aiHome.metadata());
+/home/z/my-project/src/components/animaxia/views/meta-view.tsx:65:  const browseRes = useApi(
+/home/z/my-project/src/components/animaxia/views/meta-view.tsx:67:    () => api.aiHome.browse(dim, value, page),
+/home/z/my-project/src/components/animaxia/views/franchise-hub-view.tsx:160:  const res = useApi(
+/home/z/my-project/src/components/animaxia/views/franchise-hub-view.tsx:162:    () => (variant === 'franchises' ? api.franchises() : api.trilogies()),
+/home/z/my-project/src/components/animaxia/views/history-view.tsx:9: * Hub FAZA 19) + api.playerHubStatus() pentru badge-ul de hub.
+/home/z/my-project/src/components/animaxia/views/history-view.tsx:207:  const history = useApi(
+/home/z/my-project/src/components/animaxia/views/history-view.tsx:209:    () => platform.history(HISTORY_LIMIT),
+/home/z/my-project/src/components/animaxia/views/history-view.tsx:213:  const hub = useApi('faza21-history-hubstatus', () => api.playerHubStatus());
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:264:  const list = useApi(`admin-content-${type}-${page}`, () =>
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:265:    api.all({ type: type === 'all' ? undefined : type, page, limit: 10 }),
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:271:      await api.deleteContent(c.id);
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:477:      const res = await api.miner({
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:811:      const res = await api.seed();
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:838:            <a href="/animaxia-platform.zip" download>
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:993:  const stats = useApi(`admin-ai-stats-${isAdmin}`, () => platform.aiAdminStats(), {
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:996:  const prompts = useApi(`admin-ai-prompts-${isAdmin}`, () => platform.aiAdminPrompts(8), {
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:999:  const errors = useApi(`admin-ai-errors-${isAdmin}`, () => platform.aiAdminErrors(8), {
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:1303:  const health = useApi('admin-health', () => api.health());
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:369:  const status = useApi('ai-status', () => platform.aiStatus());
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:372:  const cloud = useApi('ai-cloud-status', () => platform.aiCloudStatus());
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:494:      const res = await platform.aiRecommendations(8);
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:624:      const res = await platform.aiSummarize(selected.id);
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:733:      const res = await platform.aiDescribe({ title: trimmed, type, genres: genreList.length ? genreList : undefined });
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:916:      const res = await platform.aiChat(selected.id, text);
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1045:  const home = useApi(`ai-personal-home-${user?.id ?? 'anon'}`, () => platform.aiPersonalHome(), {
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1419:      const res: AiAssistantResponse = await platform.aiAssistant(text, history);
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1656:      setResult(await platform.aiRagRecommend({ query: query.trim() || undefined, limit }));
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1793:      setResult(await platform.aiRagSummarize(selected.id));
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1878:      setResult(await platform.aiRagExplain(selected.id, question.trim() || undefined));
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:2019:      const res = await platform.aiRagChat(selected.id, text, history);
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:2151:  const tools = useApi('ai-tools', () => platform.aiTools());
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:2206:      setResult(await platform.aiToolRun(tool.name, parsed));
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:332:  const player = useApi(`player-${id}`, () => api.player(id), { enabled: validId });
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:498:    platform.recordView(id, 'view').catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:508:    platform.recordView(id, 'play').catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:514:    platform.recordView(id, 'play').catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:518:    platform.recordView(id, 'complete').catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:608:    api.playerHubSaveProgress(id, sec).catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:625:        api.playerHubSaveProgress(id, Math.floor(t)).catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:687:      await api.miner({
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:713:      const res = await api.playerExternal(url);
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:841:      api.playerHubSaveProgress(id, Math.floor(t)).catch(() => {});
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:1282:  const ai = useApi(`player-ai-${contentId}`, () => platform.aiPersonalPlayer(contentId), { enabled });
+/home/z/my-project/src/components/animaxia/views/stats-view.tsx:214:  const bundle = useApi('faza21-stats', () =>
+/home/z/my-project/src/components/animaxia/views/stats-view.tsx:215:    Promise.all([api.hubStats(), api.hubScale(), api.hubFeed()]).then(
+/home/z/my-project/src/components/animaxia/views/playlists-view.tsx:82:  const detail = useApi(
+/home/z/my-project/src/components/animaxia/views/playlists-view.tsx:84:    () => api.playerHubPlaylistDetail(playlist.id),
+/home/z/my-project/src/components/animaxia/views/playlists-view.tsx:95:      await api.playerHubDeletePlaylist(playlist.id);
+/home/z/my-project/src/components/animaxia/views/playlists-view.tsx:265:  const playlists = useApi(
+/home/z/my-project/src/components/animaxia/views/playlists-view.tsx:267:    () => api.playerHubPlaylists(),
+/home/z/my-project/src/components/animaxia/views/scale-report-view.tsx:169: *  (api.platform.globalFeed({limit:1}).stats): logical 30B space, real
+/home/z/my-project/src/components/animaxia/views/scale-report-view.tsx:172:  const feed = useApi('scale-global30b', () => api.platform.globalFeed({ limit: 1 }));
+/home/z/my-project/src/components/animaxia/views/scale-report-view.tsx:244:  const report = useApi(`scale-report-${tick}`, () => api.scaleReport());
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:37:  const allRes = useApi('home-all', () => api.all({ limit: 16 }));
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:39:  const libraryRes = useApi('home-library-full', () => api.all({ limit: 100 }));
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:40:  const trendingRes = useApi('home-trending', () => api.moviesTrending('day'));
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:41:  const tvRes = useApi('home-tv', () => api.tvTrending('day'));
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:42:  const animeRes = useApi('home-anime', () => api.animeTop());
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:43:  const newsRes = useApi('home-news', () => api.news('all', 6));
+/home/z/my-project/src/components/animaxia/views/home-view.tsx:44:  const healthRes = useApi('home-health', () => api.health());
+/home/z/my-project/src/components/animaxia/views/global-30b-view.tsx:209:  const res = useApi(
+/home/z/my-project/src/components/animaxia/views/global-30b-view.tsx:212:      api.platform.globalFeed({
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:212:  const externalRes = useApi(
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:216:        const res = await api.animeSearch(q);
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:219:      const res = await api.moviesSearch(q);
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:260:        const res = await api.searchAutocomplete(query);
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:552:  const facetsRes = useApi('search-filters-options', () => api.searchFilters());
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:559:  const results = useApi(
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:563:        const res = await api.searchAdvanced({
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:616:  const engine = useApi(`search-engine-status:${searchKey}`, () => api.searchStatus());
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:970:      const res = await api.ingestCheck(trimmed);
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:984:      const res = await api.ingestRegister({ url: trimmed, addedBy: 'manual' });
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:405:  const plans = useApi('premium-plans', () => platform.plans());
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:406:  const premiumMe = useApi(`premium-me-${user?.id ?? 'anon'}`, () => platform.premiumMe(), {
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:426:        const res = await platform.confirmCheckout(returnSession);
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:454:      const res = await platform.checkout(plan.key);
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:468:      const res = await platform.confirmCheckout(sessionId);
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:482:      await platform.cancelSubscription();
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:221:  const feed = useApi(`social-feed-v2-${user ? `u${user.id}` : 'anon'}`, () =>
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:222:    user ? social.feed() : social.publicFeed(),
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:245:      const res = user ? await social.feed(activeCursor) : await social.publicFeed(activeCursor);
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:386:  const people = useApi(
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:388:    () => social.people(debouncedQ || undefined, 12),
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:391:  const following = useApi(`social-following-${user?.id ?? 'anon'}`, () => social.following(), { enabled: !!user });
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:412:      await (next ? social.follow(u.id) : social.unfollow(u.id));
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:606:  const profile = useApi(`social-profile-${userId ?? 0}`, () => social.userProfile(userId as number), {
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:797:  const reviews = useApi('social-recent-reviews', () => social.recentReviews(20));
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:821:      const res = await social.likeReview(id);
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:912:  const parties = useApi('social-parties', () => social.parties(20));
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:938:      const res = await social.joinByCode(clean);
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:959:      await social.partyJoin(p.id);
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1143:      const res = await social.createParty({ contentId: content.id });
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1227:  const home = useApi(`social-ai-home-${user?.id ?? 'anon'}`, () => social.aiHome(), { enabled: !!user });
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:156:  const db = useApi(`content-${ref}`, () => api.content(Number(ref)), { enabled: isNumeric });
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:158:  const ext = useApi(
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:162:        ? api.animeById(extId as string)
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:164:          ? api.tvById(extId as string)
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:165:          : api.movieById(extId as string),
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:226:  const more = useApi(
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:228:    () => api.all({ type: content.type, limit: 13 }),
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:250:      const res = await social.createParty({ contentId: content.id });
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:259:  const watchlist = useApi(`watchlist-${user?.id ?? 'anon'}`, () => platform.watchlist(), {
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:274:        await platform.addWatchlist(content.id);
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:277:        await platform.removeWatchlist(content.id);
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:297:    platform.recordView(content.id, 'view').catch(() => {
+/home/z/my-project/src/components/animaxia/views/content-view.tsx:586:      const res = await api.upsertContent({
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:155:  const snap = useApi(`platform-stability-${tick}`, () => api.platform.stability());
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:352:      const res = await api.platform.stressRun({
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:633:  const res = useApi(`virtual-30b-${seed}-${cursor || 'start'}`, () =>
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:634:    api.platform.virtualCatalog({ cursor: cursor || undefined, seed, limit: VIRTUAL_LIMIT }),
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:131:      const res = await platform.uploadAvatar(dataUrl);
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:330:  const recent = useApi('profile-history-5', () => platform.history(5));
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:400:  const watchlist = useApi('profile-watchlist', () => platform.watchlist());
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:406:      await platform.removeWatchlist(contentId);
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:466:  const history = useApi('profile-history-30', () => platform.history(30));
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:608:      const res = await platform.putPreferences({ types, genres, franchises });
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:705:  const profile = useApi('profile-me', () => platform.profile(), { enabled: Boolean(user) });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:78:  const statusRes = useApi('ai-hub-status', () => api.aiHubStatus());
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:301:  const scan = useApi('hub-curator-scan', () => api.curatorScan(), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:308:      const res = await api.curatorEnrich({ missing: true, limit: 5 });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:462:  const forecast = useApi(`hub-forecast-${window}`, () => api.trendsForecast(window), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:555:  const status = useApi('hub-semantic-status', () => api.semanticStatus(), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:558:  const [results, setResults] = useState<Awaited<ReturnType<typeof api.semanticQuery>> | null>(null);
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:568:      const res = await api.semanticQuery(trimmed, 12);
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:656:  const health = useApi('hub-watchdog-health', () => api.watchdogHealth(), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:745:  const suggestions = useApi('hub-marathon-suggestions', () => api.marathonSuggestions(), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:756:      const res = await api.marathonCreate(key);
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:846:  const status = useApi('hub-translate-status', () => api.translateStatus(), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:847:  const titles = useApi('hub-translate-titles', () => api.all({ limit: 50 }), { enabled: active });
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:860:      const res = await api.translateContent(Number(contentId), lang);
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:128:  const listRes = useApi(
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:130:    () => api.all({ type: type === 'all' ? undefined : type, page, limit: 24 }),
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:135:  const virtualRes = useApi(`cat-virtual-${type}`, () => api.all({ limit: 100 }), { enabled: isVirtual });
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:144:  const liveRes = useApi(`cat-live-${type}-${page}`, () => api.discover(type, page), { enabled: isLive });
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:150:  const stripRes = useApi(
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:153:      if (type === 'movie') return (await api.moviesTrending('day')).data.map(mediaToItem);
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:154:      if (type === 'tv') return (await api.tvPopular()).data.map(mediaToItem);
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:155:      return (await api.animeSeason()).data.map(animeToItem);
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:160:  const newsRes = useApi(`cat-news-${newsSource}`, () => api.news(newsSource, 24), { enabled: isNews });
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:162:  const standingsRes = useApi(`fb-standings-${competition}`, () => api.footballStandings(competition), {
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:165:  const matchesRes = useApi(`fb-matches-${competition}`, () => api.footballMatches(competition, 10), {
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:168:  const f1StandingsRes = useApi('f1-standings', () => api.f1Standings(), {
+/home/z/my-project/src/components/animaxia/views/category-view.tsx:171:  const f1ScheduleRes = useApi('f1-schedule', () => api.f1Schedule(), {
+/home/z/my-project/src/components/animaxia/auth-provider.tsx:40:        const res = await platform.me();
+/home/z/my-project/src/components/animaxia/auth-provider.tsx:45:            const res = await platform.me();
+/home/z/my-project/src/components/animaxia/auth-provider.tsx:63:    const res = await platform.login({ email, password });
+/home/z/my-project/src/components/animaxia/auth-provider.tsx:70:    const res = await platform.register({ email, username, password });
+/home/z/my-project/src/components/animaxia/auth-provider.tsx:79:      if (refresh) await platform.logout(refresh);
+/home/z/my-project/src/components/animaxia/auth-provider.tsx:89:      const res = await platform.me();
+/home/z/my-project/src/components/animaxia/category-panels.tsx:47:  const listRes = useApi(
+/home/z/my-project/src/components/animaxia/category-panels.tsx:49:    () => platform.watchlist(),
+/home/z/my-project/src/components/animaxia/category-panels.tsx:186:    () => api.all({ search: pickerQuery || undefined, limit: 12 }),
+/home/z/my-project/src/components/animaxia/category-panels.tsx:369:  const listRes = useApi('manage-all', () => api.all({ limit: 100, sort: 'newest' }));
+/home/z/my-project/src/components/animaxia/category-panels.tsx:386:      await api.deleteContent(row.id);
+/home/z/my-project/src/components/animaxia/category-panels.tsx:514:  const scheduleRes = useApi('tvshows-schedule', () => api.tvSchedule());
+/home/z/my-project/src/components/animaxia/category-panels.tsx:573:  return useApi(key, fetcher, { enabled });
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:197:      const res = await api.aiHome.feed(n, PAGE_SIZE);
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:194:      const res = await platform.aiSummarize(contentId);
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:311:      const res = await platform.aiRagChat(contentId, text, history);
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:445:      setResult(await platform.aiRagExplain(contentId));
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:562:  const rec = useApi(`ai-similar-${contentId}`, () => platform.aiRagRecommend({ query: title, limit: 6 }));
+/home/z/my-project/src/components/animaxia/home-panels.tsx:97:      const res = await api.ingestCheck(trimmed);
+/home/z/my-project/src/components/animaxia/home-panels.tsx:127:      const result = await api.miner({ url: trimmed });
+/home/z/my-project/src/components/animaxia/home-panels.tsx:305:  const feedRes = useApi('home-social-feed', () => social.publicFeed(undefined, 8));
+/home/z/my-project/src/components/animaxia/home-panels.tsx:476:      await api.health();
+/home/z/my-project/src/components/animaxia/home-panels.tsx:658:  const statsRes = useApi(since ? `ai-home-stats:${since}` : 'ai-home-stats', () =>
+/home/z/my-project/src/components/animaxia/home-panels.tsx:659:    api.aiHome.stats(since ?? undefined),
+/home/z/my-project/src/components/animaxia/home-panels.tsx:789:  const taxRes = useApi('ai-home-taxonomy', () => api.aiHome.taxonomy());
+/home/z/my-project/src/components/animaxia/home-panels.tsx:790:  const narrationRes = useApi('ai-home-taxonomy-narration', () => api.aiHome.narration());
+/home/z/my-project/src/components/animaxia/home-panels.tsx:798:      await api.aiHome.metadataRefresh();
+/home/z/my-project/src/components/animaxia/home-panels.tsx:800:      const fresh = await api.aiHome.taxonomy().catch(() => null);
+/home/z/my-project/src/components/animaxia/home-panels.tsx:990:  const metaRes = useApi('ai-home-metadata-panel', () => api.aiHome.metadata());
+/home/z/my-project/src/components/animaxia/home-panels.tsx:997:      const r = await api.aiHome.metadataRefresh();
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:89:  const detail = useApi(`social-party-${partyId}`, () => social.partyDetail(partyId), { enabled: validId });
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:119:  const player = useApi(`party-player-${contentId}`, () => api.player(contentId), { enabled: contentId > 0 });
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:178:    social.partyJoin(partyId).catch(() => {
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:468:      await social.partyLeave(partyId);
+/home/z/my-project/src/components/animaxia/sidebar.tsx:49:  const metaRes = useApi('ai-home-metadata-sidebar', () => api.aiHome.metadata());
+/home/z/my-project/src/components/animaxia/sidebar.tsx:59:      const health = await api.health();
+/home/z/my-project/src/components/animaxia/sidebar.tsx:388:      const health = await api.health();
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:51:  const reviews = useApi(
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:53:    () => social.contentReviews(contentId),
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:80:      const res = await social.likeReview(review.id);
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:103:      setDigest(await social.reviewDigest(contentId));
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:140:      const res = await social.upsertReview({
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:161:      await social.deleteReview(ownReview.id);
+/home/z/my-project/src/components/animaxia/admin/admin-search-flow-tab.tsx:373:  const flow = useApi('admin-search-flow', () => api.searchFlow());
+/home/z/my-project/src/components/animaxia/admin/admin-search-opt-tab.tsx:384:  const opt = useApi('admin-search-opt', () => api.searchOpt());
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:389:  const stress = useApi('admin-search-full', () => api.searchStress());
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:390:  const flow = useApi('admin-search-full-flow', () => api.searchFlow());
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:391:  const rate = useApi('admin-search-full-rate', () => api.searchRate());
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:392:  const opt = useApi('admin-search-full-opt', () => api.searchOpt());
+/home/z/my-project/src/components/animaxia/admin/admin-shards-tab.tsx:267:  const shards = useApi('admin-shards-status', () => fetchShards());
+/home/z/my-project/src/components/animaxia/admin/admin-search-rate-tab.tsx:303:  const rate = useApi('admin-search-rate', () => api.searchRate());
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:108:  const summary = useApi('tenant-billing-summary', () => tenantApi.billingSummary());
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:434:  const detail = useApi(`tenant-detail-${slug}`, () => tenantApi.detail(slug));
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:661:  const invoices = useApi('tenant-billing-invoices', () => tenantApi.billingInvoices());
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:716:  const status = useApi('tenant-ai-status', () => tenantApi.aiStatus());
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:752:  const list = useApi('tenants-list', () => tenantApi.list(), { enabled: isAdmin });
+/home/z/my-project/src/components/animaxia/admin/admin-analytics-tab.tsx:118:  const overview = useApi(
+/home/z/my-project/src/components/animaxia/admin/admin-workers-tab.tsx:160:  const status = useApi(`admin:workers:status:${isAdmin}`, () => platform.workerStatus(), {
+/home/z/my-project/src/components/animaxia/admin/admin-workers-tab.tsx:163:  const jobs = useApi(`admin:workers:jobs:${isAdmin}`, () => platform.workerJobs(), {
+/home/z/my-project/src/components/animaxia/admin/admin-workers-tab.tsx:185:      const res = await platform.workerRefresh(source);
+/home/z/my-project/src/components/animaxia/admin/admin-workers-tab.tsx:200:      const res = await platform.workerThumbnails({ missing: true });
+/home/z/my-project/src/components/animaxia/admin/admin-security-tab.tsx:136:  const status = useApi(`admin:security:status:${isAdmin}`, () => platform.securityStatus(), {
+/home/z/my-project/src/components/animaxia/admin/admin-security-tab.tsx:145:      const res = await platform.auditLog(PAGE_SIZE, offset);
+/home/z/my-project/src/components/animaxia/admin/admin-miner-tab.tsx:309:  const jobs = useApi('miner-jobs', () => minerApi.jobs({ limit: 25 }), { enabled: true });
+/home/z/my-project/src/components/animaxia/admin/admin-miner-tab.tsx:589:  const status = useApi('miner-status', () => minerApi.status());
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:166:      const res = await api.playerHubAttachSubtitle(contentId, {
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:176:          const fresh = await api.playerHubSubtitles(contentId);
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:197:      const res = await api.playerHubSubtitles(contentId);
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:211:      await api.playerHubDeleteSubtitle(contentId, trackId);
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:418:  const status = useApi(`admin:playerhub:status:${isAdmin}`, () => api.playerHubStatus(), {
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:421:  const stats = useApi(`admin:playerhub:stats:${isAdmin}`, () => api.playerHubStats(), {
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:424:  const continueWatching = useApi(
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:426:    () => api.playerHubContinueWatching(),
+/home/z/my-project/src/components/animaxia/footer.tsx:52:            <a href="/animaxia-platform.zip" download className="mt-4 inline-block">
+/home/z/my-project/src/components/animaxia/footer.tsx:122:                  href="/animaxia-platform.zip"
+/home/z/my-project/src/components/animaxia/content-card.tsx:99:      void api.aiHome
+/home/z/my-project/src/components/animaxia/content-social.tsx:4: * content-social.tsx — "Community" section for a library title: like/dislike
+/home/z/my-project/src/components/animaxia/content-social.tsx:46:/** Gateway URL for a platform path (same convention as platform.ts). */
+/home/z/my-project/src/components/animaxia/content-social.tsx:97:  const likes = useApi(`content-likes-${contentId}-${user?.id ?? 'anon'}-${reload}`, async (): Promise<VoteCounts> => {
+/home/z/my-project/src/components/animaxia/content-social.tsx:106:    return platform.contentLikes(contentId);
+/home/z/my-project/src/components/animaxia/content-social.tsx:127:      const res = await platform.likeContent(contentId, next);
+/home/z/my-project/src/components/animaxia/content-social.tsx:139:  const comments = useApi(
+
+[Showing results with pagination = limit: 250]

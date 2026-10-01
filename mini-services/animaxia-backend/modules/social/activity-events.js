@@ -50,7 +50,7 @@ export async function insertActivityEvent({ actorid, type, contentid = null, tar
 
   const inserted = await one(
     `INSERT INTO activityevents (actorid, type, contentid, targetuserid, metadata)
-     VALUES ($1, $2, $3, $4, $5::jsonb)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING id, createdat`,
     [aid, type, contentid ? num(contentid) : null, targetuserid ? num(targetuserid) : null, jsonb(metadata)],
   );

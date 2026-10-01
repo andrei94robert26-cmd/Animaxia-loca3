@@ -1,0 +1,66 @@
+{
+  "$schema": "https://animaxia.internal/schemas/autoscale-policies.v1.json",
+  "v": 1,
+  "services": {
+    "backend": {
+      "min": 2,
+      "max": 20,
+      "cpuTarget": 70,
+      "memTarget": 75,
+      "latencyP95MsTarget": 800,
+      "scaleUpWindows": 2,
+      "scaleDownWindows": 5
+    },
+    "realtime": {
+      "min": 2,
+      "max": 10,
+      "cpuTarget": 70,
+      "memTarget": 75,
+      "latencyP95MsTarget": 200,
+      "scaleUpWindows": 2,
+      "scaleDownWindows": 5
+    },
+    "ai": {
+      "min": 2,
+      "max": 12,
+      "cpuTarget": 75,
+      "memTarget": 80,
+      "latencyP95MsTarget": 2500,
+      "scaleUpWindows": 2,
+      "scaleDownWindows": 5
+    },
+    "frontend": {
+      "min": 2,
+      "max": 16,
+      "cpuTarget": 65,
+      "memTarget": 75,
+      "latencyP95MsTarget": 500,
+      "scaleUpWindows": 2,
+      "scaleDownWindows": 5
+    },
+    "global-gateway": {
+      "min": 2,
+      "max": 10,
+      "cpuTarget": 60,
+      "memTarget": 70,
+      "latencyP95MsTarget": 150,
+      "scaleUpWindows": 2,
+      "scaleDownWindows": 5
+    },
+    "redis-global": {
+      "min": 3,
+      "max": 3,
+      "cpuTarget": 70,
+      "memTarget": 80,
+      "latencyP95MsTarget": 5,
+      "scaleUpWindows": 3,
+      "scaleDownWindows": 10,
+      "notes": "Managed Upstash deployment (domain/redis/) — replication is provider-side, not HPA. The min=max=3 entry exists so the simulator models the shared-state floor honestly: read replicas are added in the Upstash console, never via kubectl."
+    }
+  },
+  "globalRules": {
+    "cooldownSec": 60,
+    "maxSurgePercent": 50,
+    "notes": "cooldownSec mirrors the HPA scaleUp stabilizationWindowSeconds; maxSurgePercent bounds pod churn during rollouts and scale-ups (matches the Helm values rollout strategy)."
+  }
+}

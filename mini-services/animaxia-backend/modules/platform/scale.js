@@ -61,10 +61,10 @@ async function measure() {
 
   // Live row counts.
   const counts = await Promise.allSettled([
-    one('SELECT COUNT(*)::int AS n FROM content'),
-    one('SELECT COUNT(*)::int AS n FROM users'),
-    one('SELECT COUNT(*)::int AS n FROM searchdocs'),
-    one('SELECT COUNT(*)::int AS n FROM contentsources'),
+    one('SELECT COUNT(*) AS n FROM content'),
+    one('SELECT COUNT(*) AS n FROM users'),
+    one('SELECT COUNT(*) AS n FROM searchdocs'),
+    one('SELECT COUNT(*) AS n FROM contentsources'),
   ]);
   const [items, users, searchdocs, contentsources] = counts;
   measured.items = items.status === 'fulfilled' ? Number(items.value?.n ?? 0) : null;
@@ -72,17 +72,25 @@ async function measure() {
   measured.searchdocs = searchdocs.status === 'fulfilled' ? Number(searchdocs.value?.n ?? 0) : null;
   measured.contentsources = contentsources.status === 'fulfilled' ? Number(contentsources.value?.n ?? 0) : null;
 
-  // Database size + top 10 tables by size.
+  // Local SQLite database size.
   try {
-    const sizeRow = await one('SELECT pg_database_size(current_database())::bigint AS size');
-    measured.dbSizeBytes = Number(sizeRow?.size ?? 0);
-    const tableRows = await rows(
-      `SELECT c.relname AS name, pg_total_relation_size(c.oid)::bigint AS bytes
-       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = 'public' AND c.relkind = 'r'
-       ORDER BY bytes DESC LIMIT 10`,
+    const pageCount = await one('PRAGMA page_count');
+    const pageSize = await one('PRAGMA page_size');
+
+    const pages = Number(
+      pageCount?.page_count ??
+      Object.values(pageCount ?? {})[0] ??
+      0
     );
-    measured.tableSizes = tableRows.map((r) => ({ name: r.name, bytes: Number(r.bytes) }));
+
+    const bytesPerPage = Number(
+      pageSize?.page_size ??
+      Object.values(pageSize ?? {})[0] ??
+      0
+    );
+
+    measured.dbSizeBytes = pages * bytesPerPage;
+    measured.tableSizes = [];
   } catch (err) {
     measured.dbSizeBytes = null;
     measured.tableSizes = [];
@@ -91,21 +99,27 @@ async function measure() {
 
   // In-process gauges.
   const cacheStats = cache.stats();
-  measured.cache = { hitRate: cacheStats.hitRate, keys: cacheStats.keys };
-  const rl = rateLimitStats();
-  measured.rateLimit = { max: rl.max, windowMs: rl.windowMs };
-  measured.providers = breakerStats().map((p) => ({ name: p.name, state: p.state, failures: p.failures }));
+  measured.cache = {
+    hitRate: cacheStats.hitRate,
+    keys: cacheStats.keys,
+  };
 
-  // Neon deployment facts: branch (db name from DATABASEURL) + pool gauges.
-  let branch = null;
-  try {
-    branch = new URL(process.env.DATABASEURL).pathname.replace(/^\//, '') || null;
-  } catch {
-    branch = null;
-  }
-  measured.neon = {
-    branch,
-    poolMax: parseInt(process.env.PGPOOLMAX || '10', 10),
+  const rl = rateLimitStats();
+  measured.rateLimit = {
+    max: rl.max,
+    windowMs: rl.windowMs,
+  };
+
+  measured.providers = breakerStats().map((p) => ({
+    name: p.name,
+    state: p.state,
+    failures: p.failures,
+  }));
+
+  measured.sqlite = {
+    backend: 'sqlite',
+    storage: 'local',
+    physicalDatabases: 1,
     pool: poolStats(),
   };
 
@@ -132,7 +146,7 @@ async function measure() {
 
 function buildVerdicts(m) {
   const searchP95 = m.searchLatency?.p95Ms || 0;
-  const poolMax = m.neon?.poolMax || 10;
+  const poolMax = m.sqlite?.physicalDatabases || 1;
   // Honest ceiling: every concurrent search occupies one pooled connection.
   const searchesPerSec = searchP95 > 0 ? Math.round((1000 / searchP95) * poolMax) : null;
 
@@ -144,9 +158,9 @@ function buildVerdicts(m) {
       status: 'not-ready',
       currentEstimate:
         `≈ 2.000–5.000 utilizatori activi simultan pe acest singur nod ` +
-        `(pool ${poolMax} conexiuni Neon, latență DB ${m.dbLatencyMs ?? '?'}ms, un singur proces Node).`,
+        `(pool ${poolMax} bază SQLite locală, latență DB ${m.dbLatencyMs ?? '?'}ms, un singur proces Node).`,
       reasoning:
-        `Un singur proces Node cu un pool de ${poolMax} conexiuni la un singur branch Neon (` +
+        `Un singur proces Node cu un pool de ${poolMax} conexiuni la un singur bază SQLite locală (` +
         `${m.items ?? '?'} itemi live) servește azi cereri interactive cu latență DB de ` +
         `${m.dbLatencyMs ?? '?'}ms. 10M utilizatori înseamnă mii de ori mai mult trafic concurent: ` +
         `sunt necesare fleet orizontal + load balancer, cache distribuit, pgBouncer și read replicas ` +
@@ -180,7 +194,7 @@ function buildVerdicts(m) {
         `prin source_hash UNIQUE) elimină balastul de metadata JSONB/tsvector/embeddings per rând. ` +
         `Paginarea keyset cu cursor rămâne nelimitată în adâncime. Pentru 10M reali sunt necesare: ` +
         `activarea efectivă a shardurilor dedicate ANIMAXIA_DB_02..15, benchmark stabil la 1M înainte ` +
-        `de orice import mai mare, și resurse Neon plătite — infrastructura gratuită NU garantează ` +
+        `de orice import mai mare, și infrastructură distribuită — infrastructura gratuită NU garantează ` +
         `10M utilizatori simultan (regula AR10M: nu pretinde).`,
     },
     {
@@ -197,13 +211,13 @@ function buildVerdicts(m) {
         `Fiecare căutare ocupă o conexiune din pool-ul de ${poolMax} pentru ~${searchP95 || '?'}ms ` +
         `(p50 ${m.searchLatency?.p50Ms || '?'}ms, ${m.searchLatency?.samples || 0} sample-uri live). ` +
         `10M căutări simultane cer un cluster de căutare dedicat + fleet de API orizontal + cache de ` +
-        `rezultate — nu un singur proces cu un singur branch Neon.`,
+        `rezultate — nu un singur proces cu un singur bază SQLite locală.`,
     },
   ];
 }
 
 function buildGaps(m) {
-  const poolMax = m.neon?.poolMax || 10;
+  const poolMax = m.sqlite?.physicalDatabases || 1;
   return [
     {
       severity: 'critical',
@@ -222,7 +236,7 @@ function buildGaps(m) {
     },
     {
       severity: 'critical',
-      missing: 'Un singur branch Neon — fără read replicas',
+      missing: 'Un singur bază SQLite locală — fără read replicas',
       recommendation: 'Read replicas pentru citiri + sharding pe tenant/categorie; scrierile rămân pe primar cu partitioning.',
     },
     {
@@ -284,15 +298,15 @@ function buildGaps(m) {
 }
 
 function buildConclusion(m) {
-  const poolMax = m.neon?.poolMax || 10;
+  const poolMax = m.sqlite?.physicalDatabases || 1;
   return (
     `Verdict onest: platforma Animaxia este un prototip funcțional complet pe un singur nod — ` +
-    `${m.items ?? '?'} itemi în Neon, ${m.searchdocs ?? '?'} documente indexate FTS, latență DB ` +
+    `${m.items ?? '?'} itemi în SQLite local, ${m.searchdocs ?? '?'} documente indexate FTS, latență DB ` +
     `${m.dbLatencyMs ?? '?'}ms, p95 căutare ${m.searchLatency?.p95Ms || '?'}ms — dar NU este pregătită ` +
     `pentru țintele declarate (10M utilizatori, 10M conturi conectate simultan, 10M contente — ` +
     `capacitate PROIECTATĂ gradual pe arhitectura reală 15-shard AR10M, NU garantată pe ` +
     `infrastructura gratuită; capacitatea TESTATĂ = doar benchmark-ul progresiv 10K→100K→1M). ` +
-    `Un singur proces Node cu un pool de ${poolMax} conexiuni la un singur branch Neon poate ` +
+    `Un singur proces Node cu un pool de ${poolMax} conexiuni la un singur bază SQLite locală poate ` +
     `susține astăzi cel mult câteva mii de utilizatori activi simultan. Pentru ținte reale sunt necesare: ` +
     `fleet orizontal + load balancer, pgBouncer, cache distribuit Redis, CDN, cluster de căutare dedicat, ` +
     `message queue, read replicas + sharding, multi-region, load testing, autoscaling și observabilitate ` +

@@ -357,14 +357,14 @@ async function upsertBatch(items) {
       await queryOnShard(
         shardid,
         `INSERT INTO vectorembeddings (refkey, kind, refid, userid, dims, embedding, metadata, contenttext, shardid)
-         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+         VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9)
          ON CONFLICT (refkey) DO UPDATE SET
            embedding = EXCLUDED.embedding,
            dims = EXCLUDED.dims,
            metadata = EXCLUDED.metadata,
            contenttext = EXCLUDED.contenttext,
            shardid = EXCLUDED.shardid,
-           updatedat = NOW()`,
+           updatedat = CURRENT_TIMESTAMP`,
         [
           refkey,
           item.kind,
@@ -401,7 +401,7 @@ async function health() {
       const startedAt = Date.now();
       try {
         await queryOnShard(shardId, 'SELECT 1 AS ok');
-        const cnt = await queryOnShard(shardId, 'SELECT COUNT(*)::int AS n FROM vectorembeddings WHERE shardid = $1', [shardId]);
+        const cnt = await queryOnShard(shardId, 'SELECT COUNT(*) AS n FROM vectorembeddings WHERE shardid = $1', [shardId]);
         return {
           shardid: shardId,
           branch: shardBranchName(shardId),

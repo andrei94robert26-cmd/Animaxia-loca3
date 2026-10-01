@@ -1,0 +1,731 @@
+     1→/**
+     2→ * modules/player/hub.js — FAZA 19 (Task 19-1): Player Hub API.
+     3→ *
+     4→ * The server-side backbone of the advanced player: user playlists (ordered,
+     5→ * deduped, capped), unified watch progress/resume (REUSES the Phase-2
+     6→ * watchhistory table — the very same rows served by /api/users/me/history),
+     7→ * continue-watching, WebVTT subtitle tracks (public read, admin write) and
+     8→ * public platform stats. 100% REAL data in Neon (playlists, playlistitems,
+     9→ * subtitletracks tables — see modules/platform/migrations.js).
+    10→ *
+    11→ * modules/player/player.js (the REAL external playback resolver) is NEVER
+    12→ * touched — this module only sits next to it under /api/playerhub.
+    13→ *
+    14→ * Mount: app.use('/api/playerhub', playerHubRouter) — attachUser is global,
+    15→ * so req.user is present whenever a valid Bearer token is supplied (null
+    16→ * otherwise). /status, the subtitle listing/tracks and /stats stay public;
+    17→ * user routes enforce auth per-route via requireAuthLocal.
+    18→ *
+    19→ * Routes:
+    20→ *   GET    /status                              → hub contract + live totals (public)
+    21→ *   GET    /continue-watching                   → last 12 watchhistory entries + resume (auth)
+    22→ *   GET    /playlists                           → user playlists + itemsCount + cover (auth)
+    23→ *   POST   /playlists          { title, description? } → create (max 20/user) (auth)
+    24→ *   GET    /playlists/:id                       → playlist detail + ordered items (auth, owner)
+    25→ *   PATCH  /playlists/:id      { title?, description? } → update (auth, owner)
+    26→ *   DELETE /playlists/:id                       → delete (auth, owner)
+    27→ *   POST   /playlists/:id/items { contentId }   → add item (max 200, dedupe) (auth, owner)
+    28→ *   DELETE /playlists/:id/items/:contentId      → remove item + renumber (auth, owner)
+    29→ *   POST   /playlists/:id/reorder { contentIds } → full reorder (auth, owner)
+    30→ *   GET    /progress/:contentId                 → { contentId, progress, watchedat } (auth)
+    31→ *   POST   /progress           { contentId, seconds, duration? } → upsert (auth)
+    32→ *   DELETE /progress/:contentId                 → reset resume (auth)
+    33→ *   GET    /subtitles/:contentId                → tracks [{ id, label, lang }] (public)
+    34→ *   GET    /subtitles/:contentId/:trackId       → raw VTT (public, cached 1h, CORS *)
+    35→ *   POST   /subtitles/:contentId { label, lang, vtt } → attach (admin, max 8)
+    36→ *   DELETE /subtitles/:contentId/:trackId       → detach (admin)
+    37→ *   GET    /stats                               → totals + top continue-watching (public)
+    38→ *
+    39→ * Mutations emit 'playlist:changed' { userid, playlistid? } on the platform
+    40→ * bus; admin subtitle writes are audit-logged ('playerhub.subtitle.*').
+    41→ */
+    42→
+    43→import express from 'express';
+    44→import { rows, one, parseJsonb, isoOrNull, num } from '../platform/sql.js';
+    45→import { emitPlatform } from '../platform/events.js';
+    46→import { auditLog, clientIpOf } from '../security/security.js';
+    47→import { planLimits } from '../premium/plans.js';
+    48→
+    49→/* --------------------------------- helpers --------------------------------- */
+    50→
+    51→const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+    52→
+    53→/** Per-route auth guard (the router is mounted WITHOUT requireAuth so the
+    54→ *  public endpoints — /status, subtitle reads, /stats — stay anonymous). */
+    55→const requireAuthLocal = (req, res, next) => {
+    56→  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    57→  next();
+    58→};
+    59→
+    60→/** Per-route admin guard (401 anonymous / 403 authenticated non-admin). */
+    61→const requireAdminLocal = (req, res, next) => {
+    62→  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    63→  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+    64→  next();
+    65→};
+    66→
+    67→/** Parse a positive integer route/body param; null when invalid. */
+    68→function intParam(raw) {
+    69→  const n = Number(raw);
+    70→  return Number.isInteger(n) && n > 0 ? n : null;
+    71→}
+    72→
+    73→/** Normalize a raw content row (from a JOIN) into the public content shape
+    74→ *  (same contract as modules/users/profile.js contentRow). */
+    75→function contentRow(row) {
+    76→  if (!row) return null;
+    77→  return {
+    78→    id: num(row.id),
+    79→    externalid: row.externalid ?? null,
+    80→    type: row.type ?? null,
+    81→    title: row.title ?? null,
+    82→    metadata: parseJsonb(row.metadata, {}),
+    83→    thumbnail: row.thumbnail ?? null,
+    84→    createdat: isoOrNull(row.createdat),
+    85→  };
+    86→}
+    87→
+    88→/** Number of playable sources on a content row (metadata.player.sources,
+    89→ *  falling back to metadata.sources — same lookup as resolvePlayer). */
+    90→function sourcesCountOf(metadata) {
+    91→  const sources = metadata?.player?.sources || metadata?.sources;
+    92→  return Array.isArray(sources) ? sources.length : 0;
+    93→}
+    94→
+    95→/** Serialize a playlist row (+ optional aggregated extras). */
+    96→function playlistRow(row, extra = {}) {
+    97→  return {
+    98→    id: num(row.id),
+    99→    title: row.title ?? '',
+   100→    description: row.description ?? null,
+   101→    createdat: isoOrNull(row.createdat),
+   102→    updatedat: isoOrNull(row.updatedat),
+   103→    ...extra,
+   104→  };
+   105→}
+   106→
+   107→/** Load one playlist owned by the caller; responds (400/404) and returns
+   108→ *  null when the id is invalid, missing or owned by someone else. */
+   109→async function ownPlaylistOrRespond(req, res) {
+   110→  const id = intParam(req.params.id);
+   111→  if (!id) {
+   112→    res.status(400).json({ error: 'Invalid playlist id' });
+   113→    return null;
+   114→  }
+   115→  const playlist = await one(
+   116→    `SELECT id, userid, title, description, createdat, updatedat
+   117→     FROM playlists WHERE id = $1 AND userid = $2`,
+   118→    [id, req.user.id],
+   119→  );
+   120→  if (!playlist) {
+   121→    // 404 both for missing and foreign playlists (no ownership leak).
+   122→    res.status(404).json({ error: 'Playlist not found' });
+   123→    return null;
+   124→  }
+   125→  return playlist;
+   126→}
+   127→
+   128→/** Validate an optional playlist description; returns { error } or { value }. */
+   129→function validateDescription(raw) {
+   130→  if (raw === undefined || raw === null) return { value: null };
+   131→  if (typeof raw !== 'string') return { error: 'description must be a string (max 500 characters)' };
+   132→  const trimmed = raw.trim();
+   133→  if (!trimmed) return { value: null };
+   134→  if (trimmed.length > 500) return { error: 'description must be at most 500 characters' };
+   135→  return { value: trimmed };
+   136→}
+   137→
+   138→/* ---------------------------------- limits ---------------------------------- */
+   139→
+   140→const MAX_PLAYLISTS_PER_USER = 20;
+   141→const MAX_ITEMS_PER_PLAYLIST = 200;
+   142→const MAX_SUBTITLE_TRACKS_PER_CONTENT = 8;
+   143→const MAX_VTT_CHARS = 256 * 1024; // 256KB
+   144→const MAX_PROGRESS_SECONDS = 24 * 60 * 60; // 24h
+   145→const CONTINUE_WATCHING_LIMIT = 12;
+   146→const LANG_RE = /^[a-zA-Z-]{2,10}$/;
+   147→
+   148→/* ---------------------------------- router ---------------------------------- */
+   149→
+   150→export const playerHubRouter = express.Router();
+   151→
+   152→/* -------------------------------- A. status -------------------------------- */
+   153→
+   154→/** GET /status — hub contract + live totals (public). */
+   155→playerHubRouter.get('/status', wrap(async (req, res) => {
+   156→  const totals = await one(
+   157→    `SELECT
+   158→       (SELECT COUNT(*)::int FROM playlists) AS playlists,
+   159→       (SELECT COUNT(*)::int FROM playlistitems) AS playlistitems,
+   160→       (SELECT COUNT(*)::int FROM subtitletracks) AS subtitletracks`,
+   161→  );
+   162→  let user = null;
+   163→  if (req.user) {
+   164→    const mine = await one(`SELECT COUNT(*)::int AS count FROM playlists WHERE userid = $1`, [req.user.id]);
+   165→    user = { id: req.user.id, playlistsCount: num(mine?.count) };
+   166→  }
+   167→  res.json({
+   168→    ok: true,
+   169→    hub: 'playerhub',
+   170→    version: '19.1',
+   171→    features: ['playlists', 'progress', 'resume', 'continue-watching', 'subtitles', 'stats'],
+   172→    authRequired: {
+   173→      'continue-watching': true,
+   174→      playlists: true,
+   175→      'progress-read': true,
+   176→      'progress-write': true,
+   177→      'subtitles-list': false,
+   178→      'subtitles-track': false,
+   179→      'subtitles-write': 'admin',
+   180→      stats: false,
+   181→    },
+   182→    user,
+   183→    totals: {
+   184→      playlists: num(totals?.playlists),
+   185→      playlistItems: num(totals?.playlistitems),
+   186→      subtitleTracks: num(totals?.subtitletracks),
+   187→    },
+   188→  });
+   189→}));
+   190→
+   191→/* ------------------------- B. continue watching ---------------------------- */
+   192→
+   193→/** GET /continue-watching — the caller's last 12 watched titles with resume
+   194→ *  info (auth). Sorted by watchedat DESC — the natural "pick up where you
+   195→ *  left off" shelf. */
+   196→playerHubRouter.get('/continue-watching', requireAuthLocal, wrap(async (req, res) => {
+   197→  const data = await rows(
+   198→    `SELECT c.id, c.externalid, c.type, c.title, c.metadata, c.thumbnail, c.createdat,
+   199→            h.watchedat, h.progress
+   200→     FROM watchhistory h
+   201→     JOIN content c ON c.id = h.contentid
+   202→     WHERE h.userid = $1
+   203→     ORDER BY h.watchedat DESC, h.id DESC
+   204→     LIMIT $2`,
+   205→    [req.user.id, CONTINUE_WATCHING_LIMIT],
+   206→  );
+   207→  res.json({
+   208→    data: data.map((r) => {
+   209→      const content = contentRow(r);
+   210→      const progress = num(r.progress);
+   211→      return {
+   212→        content,
+   213→        watchedat: isoOrNull(r.watchedat),
+   214→        progress,
+   215→        sourcesCount: sourcesCountOf(content?.metadata),
+   216→        hasResume: progress > 10,
+   217→      };
+   218→    }),
+   219→  });
+   220→}));
+   221→
+   222→/* ------------------------------ C. playlists -------------------------------- */
+   223→
+   224→/** GET /playlists — the caller's playlists with item counts + the first
+   225→ *  item's thumbnail as cover (auth), most recently updated first. */
+   226→playerHubRouter.get('/playlists', requireAuthLocal, wrap(async (req, res) => {
+   227→  const data = await rows(
+   228→    `SELECT p.id, p.title, p.description, p.createdat, p.updatedat,
+   229→            (SELECT COUNT(*)::int FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemscount,
+   230→            (SELECT c.thumbnail
+   231→               FROM playlistitems pi
+   232→               JOIN content c ON c.id = pi.contentid
+   233→              WHERE pi.playlistid = p.id
+   234→              ORDER BY pi.position ASC, pi.addedat ASC, pi.id ASC
+   235→              LIMIT 1) AS firstitemthumbnail
+   236→     FROM playlists p
+   237→     WHERE p.userid = $1
+   238→     ORDER BY p.updatedat DESC, p.id DESC`,
+   239→    [req.user.id],
+   240→  );
+   241→  res.json({
+   242→    data: data.map((r) =>
+   243→      playlistRow(r, {
+   244→        itemsCount: num(r.itemscount),
+   245→        firstItemThumbnail: r.firstitemthumbnail ?? null,
+   246→      }),
+   247→    ),
+   248→  });
+   249→}));
+   250→
+   251→/** POST /playlists — create a playlist (max 20 per user). */
+   252→playerHubRouter.post('/playlists', requireAuthLocal, wrap(async (req, res) => {
+   253→  const body = req.body || {};
+   254→  const title = typeof body.title === 'string' ? body.title.trim() : '';
+   255→  if (title.length < 2 || title.length > 120) {
+   256→    return res.status(400).json({ error: 'title must be 2-120 characters (non-blank)' });
+   257→  }
+   258→  const description = validateDescription(body.description);
+   259→  if (description.error) return res.status(400).json({ error: description.error });
+   260→
+   261→  const countRow = await one(`SELECT COUNT(*)::int AS count FROM playlists WHERE userid = $1`, [req.user.id]);
+   262→  if (num(countRow?.count) >= MAX_PLAYLISTS_PER_USER) {
+   263→    return res.status(409).json({
+   264→      error: `Playlist limit reached — max ${MAX_PLAYLISTS_PER_USER} playlists per user`,
+   265→      limit: MAX_PLAYLISTS_PER_USER,
+   266→    });
+   267→  }
+   268→
+   269→  const created = await one(
+   270→    `INSERT INTO playlists (userid, title, description) VALUES ($1, $2, $3) RETURNING *`,
+   271→    [req.user.id, title, description.value],
+   272→  );
+   273→  emitPlatform('playlist:changed', { userid: req.user.id, playlistid: num(created?.id) });
+   274→  return res.status(201).json({ ok: true, playlist: playlistRow(created, { itemsCount: 0 }) });
+   275→}));
+   276→
+   277→/** GET /playlists/:id — playlist detail with ordered items (owner only). */
+   278→playerHubRouter.get('/playlists/:id', requireAuthLocal, wrap(async (req, res) => {
+   279→  const playlist = await ownPlaylistOrRespond(req, res);
+   280→  if (!playlist) return undefined;
+   281→
+   282→  const items = await rows(
+   283→    `SELECT c.id, c.externalid, c.type, c.title, c.metadata, c.thumbnail, c.createdat,
+   284→            pi.position, pi.addedat
+   285→     FROM playlistitems pi
+   286→     JOIN content c ON c.id = pi.contentid
+   287→     WHERE pi.playlistid = $1
+   288→     ORDER BY pi.position ASC, pi.addedat ASC, pi.id ASC`,
+   289→    [playlist.id],
+   290→  );
+   291→  return res.json({
+   292→    playlist: playlistRow(playlist),
+   293→    items: items.map((r) => ({
+   294→      content: contentRow(r),
+   295→      position: num(r.position),
+   296→      addedat: isoOrNull(r.addedat),
+   297→    })),
+   298→  });
+   299→}));
+   300→
+   301→/** PATCH /playlists/:id — partial update (owner only); bumps updatedat. */
+   302→playerHubRouter.patch('/playlists/:id', requireAuthLocal, wrap(async (req, res) => {
+   303→  const playlist = await ownPlaylistOrRespond(req, res);
+   304→  if (!playlist) return undefined;
+   305→
+   306→  const body = req.body || {};
+   307→  const sets = [];
+   308→  const params = [];
+   309→
+   310→  if (Object.prototype.hasOwnProperty.call(body, 'title')) {
+   311→    const title = typeof body.title === 'string' ? body.title.trim() : '';
+   312→    if (title.length < 2 || title.length > 120) {
+   313→      return res.status(400).json({ error: 'title must be 2-120 characters (non-blank)' });
+   314→    }
+   315→    params.push(title);
+   316→    sets.push(`title = $${params.length}`);
+   317→  }
+   318→
+   319→  if (Object.prototype.hasOwnProperty.call(body, 'description')) {
+   320→    const description = validateDescription(body.description);
+   321→    if (description.error) return res.status(400).json({ error: description.error });
+   322→    params.push(description.value);
+   323→    sets.push(`description = $${params.length}`);
+   324→  }
+   325→
+   326→  if (!sets.length) {
+   327→    return res.json({ ok: true, playlist: playlistRow(playlist) }); // idempotent no-op
+   328→  }
+   329→
+   330→  sets.push(`updatedat = NOW()`);
+   331→  params.push(playlist.id);
+   332→  const updated = await one(
+   333→    `UPDATE playlists SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+   334→    params,
+   335→  );
+   336→  emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
+   337→  return res.json({ ok: true, playlist: playlistRow(updated) });
+   338→}));
+   339→
+   340→/** DELETE /playlists/:id — delete a playlist (items cascade, owner only). */
+   341→playerHubRouter.delete('/playlists/:id', requireAuthLocal, wrap(async (req, res) => {
+   342→  const playlist = await ownPlaylistOrRespond(req, res);
+   343→  if (!playlist) return undefined;
+   344→
+   345→  await one(`DELETE FROM playlists WHERE id = $1`, [playlist.id]);
+   346→  emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
+   347→  return res.json({ ok: true, deleted: true });
+   348→}));
+   349→
+   350→/** POST /playlists/:id/items — append a content item (dedupe, max 200). */
+   351→playerHubRouter.post('/playlists/:id/items', requireAuthLocal, wrap(async (req, res) => {
+   352→  const playlist = await ownPlaylistOrRespond(req, res);
+   353→  if (!playlist) return undefined;
+   354→
+   355→  const contentId = intParam(req.body?.contentId);
+   356→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   357→
+   358→  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+   359→  if (!content) return res.status(404).json({ error: 'Content not found' });
+   360→
+   361→  // Dedupe on (playlistid, contentid) — a duplicate is a 200 no-op.
+   362→  const existing = await one(
+   363→    `SELECT id, position, addedat FROM playlistitems WHERE playlistid = $1 AND contentid = $2`,
+   364→    [playlist.id, contentId],
+   365→  );
+   366→  if (existing) {
+   367→    return res.json({ ok: true, added: false, duplicate: true });
+   368→  }
+   369→
+   370→  const countRow = await one(
+   371→    `SELECT COUNT(*)::int AS count FROM playlistitems WHERE playlistid = $1`,
+   372→    [playlist.id],
+   373→  );
+   374→  if (num(countRow?.count) >= MAX_ITEMS_PER_PLAYLIST) {
+   375→    return res.status(409).json({
+   376→      error: `Playlist item limit reached — max ${MAX_ITEMS_PER_PLAYLIST} items per playlist`,
+   377→      limit: MAX_ITEMS_PER_PLAYLIST,
+   378→    });
+   379→  }
+   380→
+   381→  // position = max(position)+1; ON CONFLICT DO NOTHING keeps concurrent adds race-safe.
+   382→  const inserted = await one(
+   383→    `INSERT INTO playlistitems (playlistid, contentid, position)
+   384→     VALUES ($1, $2, (SELECT COALESCE(MAX(position), -1) + 1 FROM playlistitems WHERE playlistid = $1))
+   385→     ON CONFLICT (playlistid, contentid) DO NOTHING
+   386→     RETURNING id, position, addedat`,
+   387→    [playlist.id, contentId],
+   388→  );
+   389→  if (!inserted) {
+   390→    return res.json({ ok: true, added: false, duplicate: true });
+   391→  }
+   392→
+   393→  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+   394→  emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
+   395→  return res.status(201).json({
+   396→    ok: true,
+   397→    added: true,
+   398→    duplicate: false,
+   399→    item: {
+   400→      contentId,
+   401→      position: num(inserted.position),
+   402→      addedat: isoOrNull(inserted.addedat),
+   403→    },
+   404→  });
+   405→}));
+   406→
+   407→/** DELETE /playlists/:id/items/:contentId — remove an item and renumber the
+   408→ *  remaining positions 0..n-1 (owner only). */
+   409→playerHubRouter.delete('/playlists/:id/items/:contentId', requireAuthLocal, wrap(async (req, res) => {
+   410→  const playlist = await ownPlaylistOrRespond(req, res);
+   411→  if (!playlist) return undefined;
+   412→
+   413→  const contentId = intParam(req.params.contentId);
+   414→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   415→
+   416→  const removed = await one(
+   417→    `DELETE FROM playlistitems WHERE playlistid = $1 AND contentid = $2 RETURNING id`,
+   418→    [playlist.id, contentId],
+   419→  );
+   420→  if (!removed) return res.status(404).json({ error: 'Item not found in this playlist' });
+   421→
+   422→  // Renumber the remaining items 0..n-1 (single statement, parameterized).
+   423→  await rows(
+   424→    `WITH ordered AS (
+   425→       SELECT id, (ROW_NUMBER() OVER (ORDER BY position ASC, id ASC) - 1) AS newpos
+   426→       FROM playlistitems
+   427→       WHERE playlistid = $1
+   428→     )
+   429→     UPDATE playlistitems pi
+   430→     SET position = ordered.newpos
+   431→     FROM ordered
+   432→     WHERE pi.id = ordered.id AND pi.position <> ordered.newpos`,
+   433→    [playlist.id],
+   434→  );
+   435→  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+   436→  emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
+   437→  return res.json({ ok: true, removed: true });
+   438→}));
+   439→
+   440→/** POST /playlists/:id/reorder — full reorder: the submitted contentIds must
+   441→ *  be EXACTLY the set of current items; each becomes position = array index. */
+   442→playerHubRouter.post('/playlists/:id/reorder', requireAuthLocal, wrap(async (req, res) => {
+   443→  const playlist = await ownPlaylistOrRespond(req, res);
+   444→  if (!playlist) return undefined;
+   445→
+   446→  const contentIds = req.body?.contentIds;
+   447→  if (!Array.isArray(contentIds) || !contentIds.every((v) => intParam(v) !== null)) {
+   448→    return res.status(400).json({ error: 'contentIds must be an array of positive integer content ids' });
+   449→  }
+   450→  const ids = contentIds.map((v) => Number(v));
+   451→
+   452→  const current = await rows(
+   453→    `SELECT contentid FROM playlistitems WHERE playlistid = $1`,
+   454→    [playlist.id],
+   455→  );
+   456→  const currentSet = new Set(current.map((r) => num(r.contentid)));
+   457→  const requestedSet = new Set(ids);
+   458→
+   459→  const duplicates = ids.filter((id, i) => ids.indexOf(id) !== i);
+   460→  const missing = [...currentSet].filter((id) => !requestedSet.has(id)); // in DB, not sent
+   461→  const unexpected = [...requestedSet].filter((id) => !currentSet.has(id)); // sent, not in DB
+   462→  if (duplicates.length || missing.length || unexpected.length) {
+   463→    return res.status(400).json({
+   464→      error: 'Reorder payload does not match the playlist items exactly',
+   465→      duplicateIds: duplicates,
+   466→      missingIds: missing,
+   467→      unexpectedIds: unexpected,
+   468→    });
+   469→  }
+   470→
+   471→  if (ids.length > 0) {
+   472→    // position = index in the submitted array (unnest keeps the pairs aligned).
+   473→    await rows(
+   474→      `UPDATE playlistitems pi
+   475→         SET position = u.pos
+   476→       FROM unnest($2::int[], $3::int[]) AS u(cid, pos)
+   477→       WHERE pi.playlistid = $1 AND pi.contentid = u.cid`,
+   478→      [playlist.id, ids, ids.map((_, i) => i)],
+   479→    );
+   480→  }
+   481→  await one(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [playlist.id]);
+   482→  emitPlatform('playlist:changed', { userid: req.user.id, playlistid: playlist.id });
+   483→  return res.json({ ok: true, reordered: true, count: ids.length });
+   484→}));
+   485→
+   486→/* --------------------------- D. progress / resume --------------------------- */
+   487→
+   488→/** GET /progress/:contentId — the caller's saved progress (seconds) for a
+   489→ *  title; 0 when never watched. The content must exist. */
+   490→playerHubRouter.get('/progress/:contentId', requireAuthLocal, wrap(async (req, res) => {
+   491→  const contentId = intParam(req.params.contentId);
+   492→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   493→
+   494→  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+   495→  if (!content) return res.status(404).json({ error: 'Content not found' });
+   496→
+   497→  const entry = await one(
+   498→    `SELECT progress, watchedat FROM watchhistory WHERE userid = $1 AND contentid = $2`,
+   499→    [req.user.id, contentId],
+   500→  );
+   501→  return res.json({
+   502→    contentId,
+   503→    progress: num(entry?.progress),
+   504→    watchedat: isoOrNull(entry?.watchedat),
+   505→  });
+   506→}));
+   507→
+   508→/** POST /progress — upsert playback progress into the SAME watchhistory table
+   509→ *  as /api/users/me/history (unified history). The player pings every ~10s;
+   510→ *  no extra throttle by design. `duration` is validated but intentionally
+   511→ *  NOT persisted (no new columns on Phase-2 schemas — golden rule). */
+   512→playerHubRouter.post('/progress', requireAuthLocal, wrap(async (req, res) => {
+   513→  const body = req.body || {};
+   514→  const contentId = intParam(body.contentId);
+   515→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   516→
+   517→  const seconds = Number(body.seconds);
+   518→  if (!Number.isInteger(seconds) || seconds < 0 || seconds > MAX_PROGRESS_SECONDS) {
+   519→    return res.status(400).json({
+   520→      error: `seconds must be an integer between 0 and ${MAX_PROGRESS_SECONDS} (24h)`,
+   521→    });
+   522→  }
+   523→  if (body.duration !== undefined && body.duration !== null) {
+   524→    const duration = Number(body.duration);
+   525→    if (!Number.isInteger(duration) || duration <= 0) {
+   526→      return res.status(400).json({ error: 'duration must be a positive integer (seconds)' });
+   527→    }
+   528→  }
+   529→
+   530→  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+   531→  if (!content) return res.status(404).json({ error: 'Content not found' });
+   532→
+   533→  await one(
+   534→    `INSERT INTO watchhistory (userid, contentid, progress, watchedat)
+   535→     VALUES ($1, $2, $3, NOW())
+   536→     ON CONFLICT (userid, contentid)
+   537→     DO UPDATE SET progress = EXCLUDED.progress, watchedat = NOW()`,
+   538→    [req.user.id, contentId, seconds],
+   539→  );
+   540→
+   541→  // Rolling-window eviction, identical to POST /api/users/me/history — keeps
+   542→  // the unified history bounded by the caller's plan (-1 = unlimited → skip).
+   543→  const limit = planLimits(req.user.plan).history;
+   544→  if (limit >= 0) {
+   545→    await rows(
+   546→      `DELETE FROM watchhistory
+   547→       WHERE userid = $1 AND id NOT IN (
+   548→         SELECT id FROM watchhistory WHERE userid = $1
+   549→         ORDER BY watchedat DESC, id DESC
+   550→         LIMIT $2
+   551→       )`,
+   552→      [req.user.id, limit],
+   553→    );
+   554→  }
+   555→
+   556→  return res.json({ ok: true, saved: true, progress: seconds });
+   557→}));
+   558→
+   559→/** DELETE /progress/:contentId — reset the resume point (idempotent). */
+   560→playerHubRouter.delete('/progress/:contentId', requireAuthLocal, wrap(async (req, res) => {
+   561→  const contentId = intParam(req.params.contentId);
+   562→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   563→
+   564→  const removed = await one(
+   565→    `DELETE FROM watchhistory WHERE userid = $1 AND contentid = $2 RETURNING id`,
+   566→    [req.user.id, contentId],
+   567→  );
+   568→  return res.json({ ok: true, deleted: Boolean(removed) });
+   569→}));
+   570→
+   571→/* ------------------------------- E. subtitles ------------------------------- */
+   572→
+   573→/** GET /subtitles/:contentId — public track listing (no VTT payloads). */
+   574→playerHubRouter.get('/subtitles/:contentId', wrap(async (req, res) => {
+   575→  const contentId = intParam(req.params.contentId);
+   576→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   577→
+   578→  const content = await one(`SELECT id FROM content WHERE id = $1`, [contentId]);
+   579→  if (!content) return res.status(404).json({ error: 'Content not found' });
+   580→
+   581→  const tracks = await rows(
+   582→    `SELECT id, label, lang FROM subtitletracks WHERE contentid = $1 ORDER BY lang ASC, id ASC`,
+   583→    [contentId],
+   584→  );
+   585→  return res.json({
+   586→    data: tracks.map((t) => ({ id: num(t.id), label: t.label, lang: t.lang })),
+   587→  });
+   588→}));
+   589→
+   590→/** GET /subtitles/:contentId/:trackId — serve the raw WebVTT payload
+   591→ *  (public, 1h cache, permissive CORS — ready for <track src>). */
+   592→playerHubRouter.get('/subtitles/:contentId/:trackId', wrap(async (req, res) => {
+   593→  const contentId = intParam(req.params.contentId);
+   594→  const trackId = intParam(req.params.trackId);
+   595→  if (!contentId || !trackId) return res.status(400).json({ error: 'Invalid content or track id' });
+   596→
+   597→  const track = await one(
+   598→    `SELECT vtt FROM subtitletracks WHERE id = $1 AND contentid = $2`,
+   599→    [trackId, contentId],
+   600→  );
+   601→  if (!track) return res.status(404).json({ error: 'Subtitle track not found for this content' });
+   602→
+   603→  res.set('Content-Type', 'text/vtt; charset=utf-8');
+   604→  res.set('Cache-Control', 'public, max-age=3600');
+   605→  res.set('Access-Control-Allow-Origin', '*');
+   606→  return res.send(track.vtt);
+   607→}));
+   608→
+   609→/** POST /subtitles/:contentId — attach a WebVTT track (admin only, max 8). */
+   610→playerHubRouter.post('/subtitles/:contentId', requireAdminLocal, wrap(async (req, res) => {
+   611→  const contentId = intParam(req.params.contentId);
+   612→  if (!contentId) return res.status(400).json({ error: 'Invalid content id' });
+   613→
+   614→  const body = req.body || {};
+   615→  const label = typeof body.label === 'string' ? body.label.trim() : '';
+   616→  if (label.length < 1 || label.length > 120) {
+   617→    return res.status(400).json({ error: 'label must be 1-120 characters (non-blank)' });
+   618→  }
+   619→  const lang = typeof body.lang === 'string' ? body.lang.trim() : '';
+   620→  if (!LANG_RE.test(lang)) {
+   621→    return res.status(400).json({ error: 'lang must be 2-10 letters/hyphens (e.g. "en", "ro", "pt-BR")' });
+   622→  }
+   623→  if (typeof body.vtt !== 'string' || !body.vtt.trim().startsWith('WEBVTT')) {
+   624→    return res.status(400).json({ error: 'vtt must be a WebVTT document starting with "WEBVTT"' });
+   625→  }
+   626→  if (body.vtt.length > MAX_VTT_CHARS) {
+   627→    return res.status(400).json({
+   628→      error: `vtt too large — ${Math.round(body.vtt.length / 1024)}KB, limit is 256KB`,
+   629→    });
+   630→  }
+   631→
+   632→  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+   633→  if (!content) return res.status(404).json({ error: 'Content not found' });
+   634→
+   635→  const countRow = await one(
+   636→    `SELECT COUNT(*)::int AS count FROM subtitletracks WHERE contentid = $1`,
+   637→    [contentId],
+   638→  );
+   639→  if (num(countRow?.count) >= MAX_SUBTITLE_TRACKS_PER_CONTENT) {
+   640→    return res.status(409).json({
+   641→      error: `Subtitle track limit reached — max ${MAX_SUBTITLE_TRACKS_PER_CONTENT} tracks per content`,
+   642→      limit: MAX_SUBTITLE_TRACKS_PER_CONTENT,
+   643→    });
+   644→  }
+   645→
+   646→  const created = await one(
+   647→    `INSERT INTO subtitletracks (contentid, label, lang, vtt) VALUES ($1, $2, $3, $4) RETURNING id, label, lang`,
+   648→    [contentId, label, lang, body.vtt],
+   649→  );
+   650→  await auditLog({
+   651→    userid: req.user.id,
+   652→    action: 'playerhub.subtitle.attach',
+   653→    ip: clientIpOf(req),
+   654→    meta: { contentid: contentId, trackid: num(created?.id), label, lang },
+   655→  });
+   656→  return res.status(201).json({
+   657→    ok: true,
+   658→    track: { id: num(created?.id), label: created?.label, lang: created?.lang },
+   659→  });
+   660→}));
+   661→
+   662→/** DELETE /subtitles/:contentId/:trackId — detach a track (admin only). */
+   663→playerHubRouter.delete('/subtitles/:contentId/:trackId', requireAdminLocal, wrap(async (req, res) => {
+   664→  const contentId = intParam(req.params.contentId);
+   665→  const trackId = intParam(req.params.trackId);
+   666→  if (!contentId || !trackId) return res.status(400).json({ error: 'Invalid content or track id' });
+   667→
+   668→  const removed = await one(
+   669→    `DELETE FROM subtitletracks WHERE id = $1 AND contentid = $2 RETURNING id, label, lang`,
+   670→    [trackId, contentId],
+   671→  );
+   672→  if (!removed) return res.status(404).json({ error: 'Subtitle track not found for this content' });
+   673→
+   674→  await auditLog({
+   675→    userid: req.user.id,
+   676→    action: 'playerhub.subtitle.detach',
+   677→    ip: clientIpOf(req),
+   678→    meta: { contentid: contentId, trackid: trackId, label: removed.label, lang: removed.lang },
+   679→  });
+   680→  return res.json({ ok: true, deleted: true });
+   681→}));
+   682→
+   683→/* --------------------------------- F. stats --------------------------------- */
+   684→
+   685→/** GET /stats — public hub totals + top-5 continue-watching titles (by
+   686→ *  distinct watchers); admins additionally get activePlaylistsLast7d. */
+   687→playerHubRouter.get('/stats', wrap(async (req, res) => {
+   688→  const totals = await one(
+   689→    `SELECT
+   690→       (SELECT COUNT(*)::int FROM playlists) AS playlists,
+   691→       (SELECT COUNT(*)::int FROM playlistitems) AS playlistitems,
+   692→       (SELECT COUNT(*)::int FROM subtitletracks) AS subtitletracks,
+   693→       (SELECT COUNT(*)::int FROM watchhistory) AS watchentries`,
+   694→  );
+   695→  const top = await rows(
+   696→    `SELECT c.id, c.title, c.thumbnail, c.type
+   697→     FROM watchhistory h
+   698→     JOIN content c ON c.id = h.contentid
+   699→     GROUP BY c.id, c.title, c.thumbnail, c.type
+   700→     ORDER BY COUNT(DISTINCT h.userid) DESC, c.id ASC
+   701→     LIMIT 5`,
+   702→  );
+   703→
+   704→  const payload = {
+   705→    totals: {
+   706→      playlists: num(totals?.playlists),
+   707→      playlistItems: num(totals?.playlistitems),
+   708→      subtitleTracks: num(totals?.subtitletracks),
+   709→      watchEntries: num(totals?.watchentries),
+   710→    },
+   711→    topContinueWatching: top.map((r) => ({
+   712→      id: num(r.id),
+   713→      title: r.title ?? null,
+   714→      thumbnail: r.thumbnail ?? null,
+   715→      type: r.type ?? null,
+   716→    })),
+   717→  };
+   718→
+   719→  if (req.user?.role === 'admin') {
+   720→    const active = await one(
+   721→      `SELECT COUNT(DISTINCT userid)::int AS count
+   722→       FROM playlists
+   723→       WHERE updatedat > NOW() - interval '7 days'`,
+   724→    );
+   725→    payload.admin = { activePlaylistsLast7d: num(active?.count) };
+   726→  }
+   727→  return res.json(payload);
+   728→}));
+   729→
+   730→export default playerHubRouter;
+   731→

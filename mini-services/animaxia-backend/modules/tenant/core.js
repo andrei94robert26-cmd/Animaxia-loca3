@@ -215,7 +215,7 @@ export async function recordTenantUsage(tenant, { metric, quantity = 1, unit = '
   try {
     await rows(
       `INSERT INTO tenantusageevents (tenantid, userid, metric, quantity, unit, meta)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+       VALUES ($1, $2, $3, $4, $5, $6)`,
       [Number(tenant.id), userid ? Number(userid) : null, String(metric), Number(quantity) || 0, String(unit), JSON.stringify(meta ?? {})],
     );
   } catch (err) {
@@ -227,9 +227,9 @@ export async function recordTenantUsage(tenant, { metric, quantity = 1, unit = '
 export async function tenantUsageRollup(tenantid, days = 30) {
   try {
     const list = await rows(
-      `SELECT metric, SUM(quantity)::real AS total, COUNT(*)::int AS events
+      `SELECT metric, SUM(quantity)::real AS total, COUNT(*) AS events
        FROM tenantusageevents
-       WHERE tenantid = $1 AND createdat > NOW() - ($2::text)::interval
+       WHERE tenantid = $1 AND createdat > datetime('now','-' || $2)
        GROUP BY metric`,
       [Number(tenantid), `${Number(days) || 30} days`],
     );

@@ -1,0 +1,171 @@
+# =============================================================================
+# FAZA 23 — Animaxia alerting rules (PrometheusRule)
+# =============================================================================
+# Cele 10 reguli ale stack-ului local de observabilitate (:4050) în format
+# PrometheusRule, deploy-ready pe Prometheus-ul global din
+# animaxia-cloud/observability/global/ (profil faza23).
+#
+# Starea de referință este implementată LIVE în mini-services/animaxia-
+# observability/modules/alerts.ts (evaluare 15s, pending → firing → resolved);
+# acest fișier este echivalentul de producție evaluat de Prometheus.
+#
+# Maparea metodelor de detectare (identică cu :4050):
+#   animaxia-neon-down      ← animaxia_neon_connected (db.connected /api/health)
+#   animaxia-redis-down     ← animaxia_redis_connected + redisMode gateway
+#   animaxia-gateway-down   ← animaxia_gateway_up (:4040 /api/infra/health)
+#   animaxia-backend-down   ← animaxia_up{service="animaxia-backend"}
+#   animaxia-ai-timeout     ← animaxia_ai_latency_p95_ms (FAZA 9)
+#   animaxia-fts-latency-high ← animaxia_fts_latency_p95_ms (pipeline FAZA 18)
+#   animaxia-queue-high     ← animaxia_pipeline_queue_length (strat 4)
+#   animaxia-cache-miss-high ← rate 10m hits/misses (strat 9)
+#   animaxia-ratelimit-abuse ← rate 5m rate-limit (strat 2)
+#   animaxia-cooldown-abuse  ← rate 5m cooldown served+deprioritized (strat 3)
+# =============================================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: animaxia-faza23-alerts
+  labels:
+    app: animaxia
+    phase: faza23
+    team: animaxia-core
+spec:
+  groups:
+    - name: animaxia-faza23-availability
+      interval: 15s
+      rules:
+        - alert: AnimaxiaNeonDown
+          expr: animaxia_neon_connected == 0
+          for: 60s
+          labels:
+            severity: critical
+            service: animaxia-backend
+            rule_id: animaxia-neon-down
+          annotations:
+            summary: "Neon deconectat"
+            description: "Baza Neon nu mai răspunde: animaxia_neon_connected==0 sau /api/health raportează db.connected fals. Platforma nu poate servi conținut real."
+            runbook_url: https://ops.animaxia.local/runbooks/neon-recovery.md
+            dashboard: https://grafana.animaxia.local/d/faza23-global
+
+        - alert: AnimaxiaRedisDown
+          expr: animaxia_redis_connected == 0 or (animaxia_gateway_redis_mode{mode!="redis"} == 1)
+          for: 60s
+          labels:
+            severity: critical
+            service: redis-global
+            rule_id: animaxia-redis-down
+          annotations:
+            summary: "Redis global :4030 nu răspunde"
+            description: "PING pe redis-global a eșuat SAU gateway-ul a degradat la modul in-memory (redisMode != redis) — straturile de perimetru distribuite (FAZA 22) nu mai sunt partajate."
+            runbook_url: https://ops.animaxia.local/runbooks/redis-global-recovery.md
+            dashboard: https://grafana.animaxia.local/d/faza23-global
+
+        - alert: AnimaxiaGatewayDown
+          expr: animaxia_gateway_up == 0
+          for: 60s
+          labels:
+            severity: critical
+            service: global-gateway
+            rule_id: animaxia-gateway-down
+          annotations:
+            summary: "Global gateway :4040 down"
+            description: "Global gateway nu răspunde ok la /api/infra/health — rutarea multi-regiune eu/us/asia și cache-ul de perimetru sunt indisponibile."
+            runbook_url: https://ops.animaxia.local/runbooks/gateway-recovery.md
+            dashboard: https://grafana.animaxia.local/d/faza23-global
+
+        - alert: AnimaxiaBackendDown
+          expr: animaxia_up{service="animaxia-backend"} == 0
+          for: 60s
+          labels:
+            severity: critical
+            service: animaxia-backend
+            rule_id: animaxia-backend-down
+          annotations:
+            summary: "Backend :4000 down"
+            description: "Backend-ul Express nu răspunde la /api/health — întreaga platformă API (hub, search, player, AI) este afectată."
+            runbook_url: https://ops.animaxia.local/runbooks/backend-recovery.md
+            dashboard: https://grafana.animaxia.local/d/faza23-global
+
+    - name: animaxia-faza23-performance
+      interval: 15s
+      rules:
+        - alert: AnimaxiaAiTimeout
+          expr: animaxia_ai_latency_p95_ms > 20000
+          for: 120s
+          labels:
+            severity: warning
+            service: animaxia-backend
+            rule_id: animaxia-ai-timeout
+          annotations:
+            summary: "AI latency p95 > 20s"
+            description: "Latency p95 al apelurilor AI (animaxia_ai_latency_p95_ms FAZA 9) a depășit 20.000ms — rutele AI (FAZA 15/16) sunt aproape de timeout."
+            runbook_url: https://ops.animaxia.local/runbooks/ai-latency.md
+            dashboard: https://grafana.animaxia.local/d/faza23-global
+
+        - alert: AnimaxiaFtsLatencyHigh
+          expr: animaxia_fts_latency_p95_ms > 500
+          for: 300s
+          labels:
+            severity: warning
+            service: animaxia-backend
+            rule_id: animaxia-fts-latency-high
+          annotations:
+            summary: "FTS p95 > 500ms"
+            description: "Latency p95 al motorului FTS (pipeline strat 10 neon-fts / /api/search/status latency.p95Ms) a depășit 500ms — experiența de căutare FAZA 18 se degradează."
+            runbook_url: https://ops.animaxia.local/runbooks/fts-latency.md
+            dashboard: https://grafana.animaxia.local/d/faza23-pipeline
+
+        - alert: AnimaxiaQueueHigh
+          expr: animaxia_pipeline_queue_length > 500
+          for: 120s
+          labels:
+            severity: critical
+            service: animaxia-backend
+            rule_id: animaxia-queue-high
+          annotations:
+            summary: "Pipeline queue > 500"
+            description: "Adâncimea cozii pipeline FAZA 18 (strat 4) a depășit 500 — căutările se acumulează mai repede decât pot fi executate (maxConcurrency saturat)."
+            runbook_url: https://ops.animaxia.local/runbooks/pipeline-queue.md
+            dashboard: https://grafana.animaxia.local/d/faza23-pipeline
+
+        - alert: AnimaxiaCacheMissHigh
+          expr: >-
+            rate(animaxia_pipeline_cache_misses_total[10m])
+              / (rate(animaxia_pipeline_cache_misses_total[10m]) + rate(animaxia_pipeline_cache_hits_total[10m])) > 0.8
+          for: 600s
+          labels:
+            severity: warning
+            service: animaxia-backend
+            rule_id: animaxia-cache-miss-high
+          annotations:
+            summary: "Cache miss rate > 80%"
+            description: "Rata de miss a cache-ului pipeline (strat 9) pe fereastra de 10 minute a depășit 80% — traffic-ul ocolește cache-ul (invalidări masive sau chei nenimerite)."
+            runbook_url: https://ops.animaxia.local/runbooks/cache-miss.md
+            dashboard: https://grafana.animaxia.local/d/faza23-pipeline
+
+        - alert: AnimaxiaRatelimitAbuse
+          expr: rate(animaxia_pipeline_ratelimit_hits_total[5m]) * 60 > 50
+          for: 300s
+          labels:
+            severity: warning
+            service: animaxia-backend
+            rule_id: animaxia-ratelimit-abuse
+          annotations:
+            summary: "Rate-limit rejections > 50/min"
+            description: "Rata respingerilor rate-limit (pipeline strat 2, per minut) a depășit 50 — posibil abuz sau bot flood asupra căutării."
+            runbook_url: https://ops.animaxia.local/runbooks/ratelimit-abuse.md
+            dashboard: https://grafana.animaxia.local/d/faza23-pipeline
+
+        - alert: AnimaxiaCooldownAbuse
+          expr: (rate(animaxia_pipeline_cooldown_served_total[5m]) + rate(animaxia_pipeline_cooldown_deprioritized_total[5m])) * 60 > 60
+          for: 300s
+          labels:
+            severity: warning
+            service: animaxia-backend
+            rule_id: animaxia-cooldown-abuse
+          annotations:
+            summary: "Cooldown served+deprioritized > 60/min"
+            description: "Rata cererilor servite din cooldown + deprioritized (pipeline strat 3, per minut) a depășit 60 — utilizatori/boți care re-interoghează agresiv aceleași chei."
+            runbook_url: https://ops.animaxia.local/runbooks/cooldown-abuse.md
+            dashboard: https://grafana.animaxia.local/d/faza23-pipeline

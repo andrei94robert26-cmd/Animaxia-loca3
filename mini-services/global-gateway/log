@@ -1,0 +1,621 @@
+$ bun --hot index.ts
+global-gateway — multi-region routing (production: Cloudflare Workers geo-routing) listening on :4040, redis=redis, trustXff=false
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 575ms MISS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=200 285ms MISS
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 203ms MISS
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 561ms MISS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/search/status?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 559ms MISS
+GET /api/hub/browse?limit=5&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 190ms MISS
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 189ms MISS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=200 3ms MISS
+GET /api/hub/years?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 188ms MISS
+GET /api/hub/scale?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1305ms MISS
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 378ms MISS
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 449ms MISS
+GET /api/search/advanced?q=big&region=eu region=eu cache=HIT
+GET /api/search/advanced?q=big&region=us region=us cache=HIT
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/search/autocomplete?q=ka&region=eu region=eu cache=HIT
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/search/status?region=eu region=eu cache=HIT
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 190ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu cache=HIT
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/hub/stats?region=us region=us cache=HIT
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 189ms BYPASS
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1324ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=200 336ms BYPASS
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 748ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 743ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=200 3ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 555ms BYPASS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=200 559ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 739ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 187ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/hub/stats?probe=1790017395353 region=eu upstream=http://127.0.0.1:4000 status=200 271ms MISS
+GET /api/hub/stats?probe=1790017395353 region=eu cache=HIT
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/search/advanced?q=frieren&limit=1&probe=1790017395353 region=eu upstream=http://127.0.0.1:4000 status=200 580ms MISS
+GET /api/search/advanced?q=frieren&limit=1&probe=1790017395353 region=eu cache=HIT
+GET /api/hub/stats?region=us&probeUs=1790017395353 region=us upstream=http://127.0.0.1:4000 status=200 301ms MISS
+GET /api/hub/stats?region=asia&probeAsia=1790017395353 region=asia upstream=http://127.0.0.1:4000 status=200 256ms MISS
+GET /api/hub/stats region=eu upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/hub/stats?probe=1790017395353 region=eu upstream=http://127.0.0.1:4000 status=200 1ms MISS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/hub/stats?region=eu&probe2=1790017395353 region=us upstream=http://127.0.0.1:4000 status=200 290ms MISS
+GET /api/hub/stats?region=eu&probe3=1790017395353 region=eu upstream=http://127.0.0.1:4000 status=200 191ms MISS
+GET /api/hub/stats?probe5=1790017395353 region=eu upstream=http://127.0.0.1:4000 status=200 352ms MISS
+GET /api/hub/browse?limit=1&XTransformPort=4040 region=eu upstream=http://127.0.0.1:4000 status=200 189ms MISS
+GET /api/search/advanced?q=rl121&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl245&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl103&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl63&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl74&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl42&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl225&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl101&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl185&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl82&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl182&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl37&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl166&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl134&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl10&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl181&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl113&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 16ms MISS
+GET /api/search/advanced?q=rl197&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl199&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 17ms MISS
+GET /api/search/advanced?q=rl109&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 15ms MISS
+GET /api/search/advanced?q=rl174&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 20ms MISS
+GET /api/search/advanced?q=rl180&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 20ms MISS
+GET /api/search/advanced?q=rl203&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 16ms MISS
+GET /api/search/advanced?q=rl168&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 18ms MISS
+GET /api/search/advanced?q=rl165&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 19ms MISS
+GET /api/search/advanced?q=rl53&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 20ms MISS
+GET /api/search/advanced?q=rl129&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 20ms MISS
+GET /api/search/advanced?q=rl46&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl188&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl98&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 22ms MISS
+GET /api/search/advanced?q=rl237&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 23ms MISS
+GET /api/search/advanced?q=rl201&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 23ms MISS
+GET /api/search/advanced?q=rl29&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 25ms MISS
+GET /api/search/advanced?q=rl60&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 26ms MISS
+GET /api/search/advanced?q=rl105&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 38ms MISS
+GET /api/search/advanced?q=rl54&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 38ms MISS
+GET /api/search/advanced?q=rl209&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 38ms MISS
+GET /api/search/advanced?q=rl167&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 38ms MISS
+GET /api/search/advanced?q=rl88&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 38ms MISS
+GET /api/search/advanced?q=rl111&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 38ms MISS
+GET /api/search/advanced?q=rl41&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 37ms MISS
+GET /api/search/advanced?q=rl77&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl191&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl219&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl23&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl176&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl135&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl94&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 36ms MISS
+GET /api/search/advanced?q=rl48&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 35ms MISS
+GET /api/search/advanced?q=rl216&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 35ms MISS
+GET /api/search/advanced?q=rl13&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 35ms MISS
+GET /api/search/advanced?q=rl118&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 37ms MISS
+GET /api/search/advanced?q=rl126&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 37ms MISS
+GET /api/search/advanced?q=rl123&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 29ms MISS
+GET /api/search/advanced?q=rl90&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 30ms MISS
+GET /api/search/advanced?q=rl158&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 30ms MISS
+GET /api/search/advanced?q=rl55&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 29ms MISS
+GET /api/search/advanced?q=rl73&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 30ms MISS
+GET /api/search/advanced?q=rl110&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 30ms MISS
+GET /api/search/advanced?q=rl86&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 30ms MISS
+GET /api/search/advanced?q=rl145&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 30ms MISS
+GET /api/search/advanced?q=rl217&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 31ms MISS
+GET /api/search/advanced?q=rl104&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 32ms MISS
+GET /api/search/advanced?q=rl125&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 32ms MISS
+GET /api/search/advanced?q=rl59&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 32ms MISS
+GET /api/search/advanced?q=rl38&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 59ms MISS
+GET /api/search/advanced?q=rl230&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 59ms MISS
+GET /api/search/advanced?q=rl152&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 60ms MISS
+GET /api/search/advanced?q=rl149&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 62ms MISS
+GET /api/search/advanced?q=rl18&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 59ms MISS
+GET /api/search/advanced?q=rl75&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 60ms MISS
+GET /api/search/advanced?q=rl127&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 60ms MISS
+GET /api/search/advanced?q=rl243&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 61ms MISS
+GET /api/search/advanced?q=rl240&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 64ms MISS
+GET /api/search/advanced?q=rl170&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 61ms MISS
+GET /api/search/advanced?q=rl189&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 61ms MISS
+GET /api/search/advanced?q=rl69&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 63ms MISS
+GET /api/search/advanced?q=rl222&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 62ms MISS
+GET /api/search/advanced?q=rl34&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 59ms MISS
+GET /api/search/advanced?q=rl106&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 59ms MISS
+GET /api/search/advanced?q=rl25&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 58ms MISS
+GET /api/search/advanced?q=rl2&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 50ms MISS
+GET /api/search/advanced?q=rl71&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 54ms MISS
+GET /api/search/advanced?q=rl7&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 55ms MISS
+GET /api/search/advanced?q=rl99&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 56ms MISS
+GET /api/search/advanced?q=rl151&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 61ms MISS
+GET /api/search/advanced?q=rl6&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 61ms MISS
+GET /api/search/advanced?q=rl56&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 59ms MISS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=200 6ms BYPASS
+GET /api/search/advanced?q=rl0&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 1026ms MISS
+GET /api/search/advanced?q=rl33&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 1087ms MISS
+GET /api/search/advanced?q=rl117&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 1107ms MISS
+GET /api/search/advanced?q=rl97&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 1249ms MISS
+GET /api/search/advanced?q=rl39&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 1269ms MISS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1478ms BYPASS
+GET /api/search/advanced?q=rl85&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 2961ms MISS
+GET /api/search/advanced?q=rl49&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3099ms MISS
+GET /api/search/advanced?q=rl65&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3135ms MISS
+GET /api/search/advanced?q=rl81&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3267ms MISS
+GET /api/search/advanced?q=rl133&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3291ms MISS
+GET /api/search/advanced?q=rl249&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3399ms MISS
+GET /api/search/advanced?q=rl17&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3471ms MISS
+GET /api/search/advanced?q=rl200&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 3558ms MISS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=200 1601ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 1559ms BYPASS
+GET /api/search/advanced?q=rl157&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5298ms MISS
+GET /api/search/advanced?q=rl50&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5371ms MISS
+GET /api/search/advanced?q=rl183&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5418ms MISS
+GET /api/search/advanced?q=rl8&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5500ms MISS
+GET /api/search/advanced?q=rl227&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5600ms MISS
+GET /api/search/advanced?q=rl242&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5685ms MISS
+GET /api/search/advanced?q=rl91&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5764ms MISS
+GET /api/search/advanced?q=rl1&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 5787ms MISS
+GET /api/search/advanced?q=rl246&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7082ms MISS
+GET /api/search/advanced?q=rl57&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7138ms MISS
+GET /api/search/advanced?q=rl233&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7256ms MISS
+GET /api/search/advanced?q=rl234&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7362ms MISS
+GET /api/search/advanced?q=rl187&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7453ms MISS
+GET /api/search/advanced?q=rl66&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7505ms MISS
+GET /api/search/advanced?q=rl5&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7602ms MISS
+GET /api/search/advanced?q=rl202&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 7648ms MISS
+GET /api/search/advanced?q=rl89&limit=1 region=eu upstream=http://127.0.0.1:4000 status=200 8196ms MISS
+GET /api/hub/browse?limit=5&region=asia region=asia upstream=http://127.0.0.1:4000 status=200 439ms MISS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/years?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 189ms MISS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=200 1694ms BYPASS
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 1802ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/scale?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 0ms MISS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/scale?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 0ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/status?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/status?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=200 578ms MISS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=200 106ms MISS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/hub/scale?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 513ms MISS
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 454ms MISS
+GET /api/search/status?region=us region=us upstream=http://127.0.0.1:4000 status=200 928ms MISS
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/hub/scale?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1312ms MISS
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 559ms MISS
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 657ms BYPASS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 375ms MISS
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 375ms MISS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=200 445ms BYPASS
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 382ms MISS
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 383ms MISS
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 676ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 345ms MISS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=200 1ms MISS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu cache=HIT
+GET /api/search/advanced?q=big&region=eu region=eu cache=HIT
+GET /api/search/advanced?q=big&region=us region=us cache=HIT
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/hub/stats?region=us region=us cache=HIT
+GET /api/search/autocomplete?q=ka&region=eu region=eu cache=HIT
+GET /api/search/status?region=eu region=eu cache=HIT
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 187ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 187ms BYPASS
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=200 3ms BYPASS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=200 3ms BYPASS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu cache=HIT
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/hub/stats?region=us region=us cache=HIT
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 187ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 187ms BYPASS
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=401 1ms BYPASS
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 747ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 695ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=200 2ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/search/advanced?q=big&region=us region=us cache=HIT
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/autocomplete?q=ka&region=eu region=eu cache=HIT
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=eu region=eu cache=HIT
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 15ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu cache=HIT
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/search/advanced?q=big&region=us region=us cache=HIT
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 0ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/autocomplete?q=ka&region=eu region=eu cache=HIT
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/search/status?region=eu region=eu cache=HIT
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 3ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/stats?region=us region=us cache=HIT
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/browse?limit=5&region=eu region=eu cache=HIT
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu cache=HIT
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/stats?region=us region=us cache=HIT
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu cache=HIT
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/search/advanced?q=big&region=us region=us cache=HIT
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 3ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/years?region=eu region=eu cache=HIT
+GET /api/search/autocomplete?q=ka&region=eu region=eu cache=HIT
+GET /api/search/status?region=eu region=eu cache=HIT
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 3ms BYPASS
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 0ms BYPASS
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=5&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/browse?limit=5&region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/hub/browse?limit=5&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu cache=HIT
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/stats?region=us region=us cache=HIT
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 0ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/scale?region=eu region=eu cache=HIT
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/years?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/feed?region=eu region=eu cache=HIT
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/hub/recommendations?region=eu region=eu cache=HIT
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/playlists?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/playlists?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 3ms BYPASS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/users/me/stats?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 7ms BYPASS
+GET /api/content/1907/player?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/platform/scale/virtual?region=eu&limit=1 region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/platform/scale/virtual?region=us&limit=1 region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/content/1907/player?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/content/1907/player?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/platform/scale/virtual?region=asia&limit=1 region=asia upstream=http://127.0.0.1:4000 status=429 0ms BYPASS
+GET /api/shards?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/player/subtitles/content/1907/subtitles?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=us region=us upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/shards?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/ai/hub/status?region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms BYPASS
+GET /api/ai/home/stats?region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/search/advanced?q=big&region=us region=us upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/ai/home/stats?region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms BYPASS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/advanced?q=big&region=asia region=asia upstream=http://127.0.0.1:4000 status=429 1ms MISS
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=429 2ms MISS
+GET /api/hub/browse?limit=1&XTransformPort=4040 region=eu upstream=http://127.0.0.1:4000 status=200 190ms MISS
+GET /api/hub/browse?limit=1&XTransformPort=4040 region=eu upstream=http://127.0.0.1:4000 status=200 2ms MISS
+error: script "dev" was terminated by signal SIGTERM (Polite quit request)
+$ bun --hot index.ts
+global-gateway — multi-region routing (production: Cloudflare Workers geo-routing) listening on :4040, redis=redis, trustXff=false
+error: script "dev" was terminated by signal SIGTERM (Polite quit request)
+global-gateway — multi-region routing (production: Cloudflare Workers geo-routing) listening on :4040, redis=redis, trustXff=false
+GET /api/search/advanced?q=big&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 577ms MISS
+GET /api/search/advanced?q=big&region=us region=us cache=HIT
+GET /api/search/advanced?q=big&region=asia region=asia cache=HIT
+GET /api/search/autocomplete?q=ka&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 205ms MISS
+GET /api/search/status?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 560ms MISS
+GET /api/search/status?region=asia region=asia cache=HIT
+GET /api/search/status?region=us region=us cache=HIT
+GET /api/hub/browse?limit=5&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 192ms MISS
+GET /api/hub/browse?limit=5&region=us region=us cache=HIT
+GET /api/hub/browse?limit=5&region=asia region=asia cache=HIT
+GET /api/hub/browse?limit=1&facets=1&region=eu region=eu upstream=http://127.0.0.1:4000 status=200 189ms MISS
+GET /api/hub/stats?region=us region=us upstream=http://127.0.0.1:4000 status=200 2ms MISS
+GET /api/hub/scale?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 1215ms MISS
+GET /api/hub/stats?isolation=1790017738192017711 region=eu upstream=http://127.0.0.1:4000 status=200 1263ms MISS
+GET /api/hub/years?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 174ms MISS
+GET /api/hub/feed?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 350ms MISS
+GET /api/hub/recommendations?region=eu region=eu upstream=http://127.0.0.1:4000 status=200 351ms MISS
+GET /api/users/me/history?region=eu region=eu upstream=http://127.0.0.1:4000 status=401 2ms BYPASS
+GET /api/users/me/history?region=us region=us upstream=http://127.0.0.1:4000 status=401 2ms BYPASS

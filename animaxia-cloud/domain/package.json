@@ -1,0 +1,16 @@
+{
+  "name": "@animaxia/domain",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud extracted domain modules (users, providers, player, miner, ai, analytics, search, cache, premium, social, mobile).",
+  "exports": {
+    "./*": "./*"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "fast-xml-parser": "^4.5.1",
+    "z-ai-web-dev-sdk": "^0.0.18",
+    "@animaxia/common": "*"
+  }
+}

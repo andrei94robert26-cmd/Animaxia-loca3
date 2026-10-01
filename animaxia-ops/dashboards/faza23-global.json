@@ -1,0 +1,368 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "uid": "faza23-global",
+  "title": "FAZA 23 · Platformă globală",
+  "description": "Sănătatea platformei: uptime per serviciu, RAM proces backend (FAZA 9), Neon, Redis global, AI usage, feed & search activity, gateway regiuni.",
+  "tags": [
+    "animaxia",
+    "faza23",
+    "observability"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Uptime per serviciu",
+      "type": "timeseries",
+      "description": "1 = sus (probe health 10s).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_up",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "RAM proces backend (RSS)",
+      "type": "timeseries",
+      "description": "FAZA 9 animaxia_process_memory_rss_bytes re-expus. CPU nu are familie FAZA 9 — omis onest.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_backend_memory_rss_bytes",
+          "legendFormat": "rss",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Neon health",
+      "type": "timeseries",
+      "description": "Alertă critical la deconectare (animaxia-neon-down).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_neon_connected",
+          "legendFormat": "connected",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_neon_latency_ms",
+          "legendFormat": "latencyMs",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_neon_docs",
+          "legendFormat": "docs",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Redis global",
+      "type": "timeseries",
+      "description": "RESP PING + DBSIZE la :4030.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_redis_connected",
+          "legendFormat": "connected",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_redis_keys",
+          "legendFormat": "keys",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "AI usage",
+      "type": "timeseries",
+      "description": "Apeluri AI per rută (OTLP 23-b) + totalul FAZA 9 re-expus.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "sum by (route) (animaxia_ai_usage_calls_total)",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_ai_calls_total",
+          "legendFormat": "total FAZA 9",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Feed activity",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_feed_activity_total",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Search activity",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus"
+          },
+          "expr": "animaxia_search_activity_total",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Sursă de date",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "animaxia-prometheus",
+          "value": "animaxia-prometheus"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "timepicker": {},
+  "weekStart": ""
+}

@@ -1,0 +1,793 @@
+     1→/**
+     2→ * modules/playerx/ — FAZA 34 (PLAN 100X · WS4): Player Experience — strat aditiv
+     3→ * (contract API înghețat cu FAZA-34-b/c).
+     4→ *
+     5→ * Player-ul REAL (FAZA 17 — modules/player/*) rămâne 100% NEATINS; acest modul
+     6→ * doar construiește ÎN JURUL lui: markeri de episod (skip-intro / skip-outro /
+     7→ * recap), setări de stilizare subtitrări (subtitle studio) și votul „următorul
+     8→ * episod" pentru watch-party (FAZA 10 protejat — doar consumat prin loopback,
+     9→ * identic ca pattern cu searchux FAZA 33). ZERO bytes modificați în componentele
+    10→ * protejate, ZERO schimbări de schemă DB — tot stocul e file-based (data/playerx).
+    11→ *
+    12→ * Rutare (mount: app.use('/api/playerx', playerxRouter) — namespace NOU):
+    13→ *   GET    /status                        → stats onest + contract storage      (public)
+    14→ *   GET    /markers/:contentId            → markeri episod estimați+curați     (public, cache 60s)
+    15→ *   POST   /markers/:contentId            → upsert marker curat (override)     (auth)
+    16→ *   DELETE /markers/:contentId/:kind      → înlătură override-ul pentru kind   (auth)
+    17→ *   POST   /markers/use                   → contor utilizare skip (KPI WS4)    (public, 30/min per IP)
+    18→ *   GET    /subtitle-settings             → setările de subtitrări ale userului (auth)
+    19→ *   PUT    /subtitle-settings             → salvează setările (validare strictă)(auth)
+    20→ *   GET    /party/:partyId/votes          → stare vot + tally + votanți        (public)
+    21→ *   POST   /party/:partyId/vote           → votează / schimbă votul (membru)   (auth)
+    22→ *   DELETE /party/:partyId/votes          → închide votul, calculează câștig.  (auth, DOAR gazda)
+    23→ *
+    24→ * MARKERI — estimare DETERMINISTĂ pe tip + durată (câmpuri reale citite din
+    25→ * metadata, inspectate pe rândurile reale Neon din 2026-09-26, 18.925 itemi):
+    26→ *   • metadata.duration   — SECUNDE, string numeric (ex. "120") — 469 rânduri tv;
+    27→ *   • metadata.runtime    — MINUTE, number (ex. 30/60) — 14.055 rânduri tv + 41 movie;
+    28→ *   • metadata.episodeRunTime / metadata.episode_runtime — MINUTE (convenție TMDB;
+    29→ *     ZERO rânduri azi — citite pentru compatibilitate viitoare, documentat onest).
+    30→ *   anime → intro {2s..90s}; tv → recap {0..42s} + intro {48s..110s}; dacă
+    31→ *   durationSec>300 se adaugă outro {max(180|170, dur-90) .. dur-6}. Pentru
+    32→ *   movie/mined/video/page/featured și orice alt tip: [] (onest — fără markeri
+    33→ *   inventați pentru filme). Override-urile curate din markers.json înlocuiesc
+    34→ *   estimarea per-kind și adaugă kind-uri noi; markerii curați invalizi
+    35→ *   (startsec≥endsec sau durată în afara intervalului 5..600s) sunt săriți la
+    36→ *   citire, iar la POST sunt respinși cu 400.
+    37→ *
+    38→ * STOCARE (file-based, zero DB — linie roșie FAZA 34): data/playerx/ cu
+    39→ * markers.json (override-uri curate), settings.json (setări subtitrări per
+    40→ * userid), votes.json (înregistrări vot party), stats.json (contoare durabile —
+    41→ * supraviețuiesc restarturilor --watch). Cache in-memory + scrieri atomice
+    42→ * debounced (tmp+rename); fișiere create leneș; fișier corupt ⇒ pornire de la
+    43→ * zero cu avertisment în log (recoverable, onest).
+    44→ *
+    45→ * AUTH: pattern requireAuthLocal copiat identic din modules/player/hub.js
+    46→ * (FAZA 19) — attachUser e global în server.js (verifyJwt cu AUTHSECRET /
+    47→ * secret derivat per-tenant), deci req.user e prezent la fiecare Bearer valid;
+    48→ * garda per-rută doar refuză 401 când lipsește, exact ca în hub.js.
+    49→ *
+    50→ * PARTY: validarea petrecerii se face prin LOOPBACK
+    51→ * http://127.0.0.1:${PORT}/api/social/party/:partyId (timeout 4s, ca la searchux)
+    52→ * — watchparty.js (FAZA 10, protejat) nu e atins; eșec de fetch ⇒ 503 onest.
+    53→ * Petrecere lipsă/încheiată ⇒ 404 + curățare leneșă a voturilor stocate.
+    54→ *
+    55→ * Config env (opțional, default sigur):
+    56→ *   PLAYERX_CACHE_TTL_MS (60000) · PLAYERX_CACHE_MAX_KEYS (500)
+    57→ *   PLAYERX_RATE_PER_MIN (30) · PLAYERX_WRITE_DEBOUNCE_MS (300)
+    58→ *   PLAYERX_LOOPBACK_TIMEOUT_MS (4000) · PORT (4000)
+    59→ */
+    60→
+    61→import express from 'express';
+    62→import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+    63→import { join, dirname, basename } from 'node:path';
+    64→import { fileURLToPath } from 'node:url';
+    65→import { getContentById } from '../../db.js';
+    66→import { clientIpOf } from '../security/security.js';
+    67→import { logger } from '../../utils/logger.js';
+    68→
+    69→/* ------------------------------- configuration ------------------------------ */
+    70→
+    71→const CACHE_TTL_MS = Math.max(5_000, parseInt(process.env.PLAYERX_CACHE_TTL_MS || '60000', 10) || 60_000);
+    72→const CACHE_MAX_KEYS = Math.max(1, parseInt(process.env.PLAYERX_CACHE_MAX_KEYS || '500', 10) || 500);
+    73→const RATE_PER_MIN = Math.max(5, parseInt(process.env.PLAYERX_RATE_PER_MIN || '30', 10) || 30);
+    74→const WRITE_DEBOUNCE_MS = Math.max(50, parseInt(process.env.PLAYERX_WRITE_DEBOUNCE_MS || '300', 10) || 300);
+    75→const LOOPBACK_TIMEOUT_MS = Math.max(1_000, parseInt(process.env.PLAYERX_LOOPBACK_TIMEOUT_MS || '4000', 10) || 4_000);
+    76→const SELF_PORT = parseInt(process.env.PORT || '4000', 10);
+    77→const SELF_BASE = `http://127.0.0.1:${SELF_PORT}`;
+    78→
+    79→/* modules/playerx → două nivele sus = rădăcina backend-ului → data/playerx
+    80→ * (aceeași convenție ca modules/workers → data/thumbnails, modules/search → data/). */
+    81→const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+    82→const STORAGE_DIR = join(MODULE_DIR, '..', '..', 'data', 'playerx');
+    83→const STORAGE_DIR_LABEL = 'data/playerx'; // contract înghețat: calea relativă raportată în /status
+    84→
+    85→const MARKER_KINDS = ['intro', 'outro', 'recap'];
+    86→const KIND_LABELS = { intro: 'Intro', outro: 'Final', recap: 'Recapitulare' };
+    87→const MARKER_NOTE = 'markeri estimați determinist — confirmă-i pentru a-i salva';
+    88→const LABEL_MAX = 40;
+    89→
+    90→const FONT_FAMILIES = ['sans-serif', 'serif', 'monospace', 'Trebuchet MS', 'Verdana', 'Georgia', 'Comic Sans MS'];
+    91→const EDGES = ['none', 'shadow', 'outline'];
+    92→const POSITIONS = ['bottom', 'top'];
+    93→const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+    94→
+    95→const bootAt = Date.now();
+    96→
+    97→/* ------------------------ file-based JSON store (zero DB) -------------------- */
+    98→/* Cache in-memory + scriere atomică debounced (tmp+rename — un cititor nu vede
+    99→ * niciodată jumătate de fișier). Fișierele sunt create LENEȘ (la prima mutație);
+   100→ * un fișier corupt ⇒ pornim de la zero + avertisment (recoverable). */
+   101→
+   102→class JsonFileStore {
+   103→  constructor(name) {
+   104→    this.file = join(STORAGE_DIR, `${name}.json`);
+   105→    this.name = name;
+   106→    this.data = undefined; // undefined = neîncărcat; {} = încărcat/gol
+   107→    this.writeTimer = null;
+   108→  }
+   109→
+   110→  /** Încarcă o singură dată (sincron, la prima nevoie); corupt ⇒ {} + warn. */
+   111→  load() {
+   112→    if (this.data !== undefined) return this.data;
+   113→    try {
+   114→      const raw = readFileSync(this.file, 'utf8');
+   115→      const parsed = JSON.parse(raw);
+   116→      this.data = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+   117→    } catch (err) {
+   118→      if (err && err.code === 'ENOENT') {
+   119→        this.data = {}; // nu există încă — creat leneș la prima scriere
+   120→      } else {
+   121→        logger.warn(`[playerx] ${this.name}.json corupt/ineligibil — pornesc de la zero (${err?.message ?? err})`);
+   122→        this.data = {};
+   123→      }
+   124→    }
+   125→    return this.data;
+   126→  }
+   127→
+   128→  /** Programează o scriere atomică (debounce) după o mutație in-memory. */
+   129→  scheduleSave() {
+   130→    if (this.writeTimer) return;
+   131→    this.writeTimer = setTimeout(() => {
+   132→      this.writeTimer = null;
+   133→      this.flush();
+   134→    }, WRITE_DEBOUNCE_MS);
+   135→    if (typeof this.writeTimer.unref === 'function') this.writeTimer.unref();
+   136→  }
+   137→
+   138→  /** Scriere atomică: tmp + rename. Niciodată throw. */
+   139→  flush() {
+   140→    if (this.data === undefined) return; // nimic încărcat ⇒ nimic de persistat
+   141→    try {
+   142→      mkdirSync(STORAGE_DIR, { recursive: true });
+   143→      const tmp = `${this.file}.${process.pid}.tmp`;
+   144→      writeFileSync(tmp, `${JSON.stringify(this.data, null, 2)}\n`);
+   145→      renameSync(tmp, this.file);
+   146→    } catch (err) {
+   147→      logger.warn(`[playerx] persistența ${basename(this.file)} a eșuat (non-fatal): ${err?.message ?? err}`);
+   148→    }
+   149→  }
+   150→}
+   151→
+   152→const markersStore = new JsonFileStore('markers'); // { [contentId]: { intro?:{startsec,endsec,label}, outro?, recap? } }
+   153→const settingsStore = new JsonFileStore('settings'); // { [userid]: {fontFamily, fontSizePct, ...} }
+   154→const votesStore = new JsonFileStore('votes'); // { [partyId]: {contentId, status, votes:{[userid]:{username,contentId,votedAt,seq}}, winner, createdAt, updatedAt, nextSeq} }
+   155→const statsStore = new JsonFileStore('stats'); // contoare durabile (supraviețuiesc --watch)
+   156→
+   157→/* Flush la ieșirea procesului (SIGTERM → shutdown server.js → process.exit(0) →
+   158→ * 'exit'). Debounce-ul de 300ms poate pierde, în cel mai rău caz, o mutație
+   159→ * făcută în fereastra dintre ultimul flush și terminare — onest, acceptat. */
+   160→function flushAllStores() {
+   161→  for (const store of [markersStore, settingsStore, votesStore, statsStore]) store.flush();
+   162→}
+   163→process.on('exit', flushAllStores);
+   164→process.on('beforeExit', flushAllStores);
+   165→
+   166→/* ----------------------------- durable counters ----------------------------- */
+   167→/* Contoarele din /status trebuie să supraviețuiască restarturilor --watch ⇒
+   168→ * sunt ținute în stats.json (nu doar în memorie). markersCurated și activeVotes
+   169→ * sunt derivate live din celelalte stocuri. skipUsesByKind e ținut pentru
+   170→ * analiza KPI (fișier), dar NU în răspunsul /status — forma e înghețată. */
+   171→
+   172→function statsData() {
+   173→  const data = statsStore.load();
+   174→  if (typeof data.markersRequests !== 'number') data.markersRequests = 0;
+   175→  if (typeof data.skipUses !== 'number') data.skipUses = 0;
+   176→  if (!data.skipUsesByKind || typeof data.skipUsesByKind !== 'object') data.skipUsesByKind = { intro: 0, outro: 0, recap: 0 };
+   177→  if (typeof data.settingsSaved !== 'number') data.settingsSaved = 0;
+   178→  if (typeof data.votesCast !== 'number') data.votesCast = 0;
+   179→  if (typeof data.votesClosed !== 'number') data.votesClosed = 0;
+   180→  return data;
+   181→}
+   182→
+   183→function bumpStat(field, by = 1) {
+   184→  const data = statsData();
+   185→  data[field] = (data[field] ?? 0) + by;
+   186→  statsStore.scheduleSave();
+   187→}
+   188→
+   189→/* ------------------------------ generic LRU cache --------------------------- */
+   190→
+   191→function makeLru(limit) {
+   192→  return {
+   193→    map: new Map(), // key → { value, storedAt } · Map = insertion order = LRU
+   194→    get(key) {
+   195→      const entry = this.map.get(key);
+   196→      if (!entry) return null;
+   197→      if (Date.now() - entry.storedAt > CACHE_TTL_MS) {
+   198→        this.map.delete(key);
+   199→        return null;
+   200→      }
+   201→      this.map.delete(key);
+   202→      this.map.set(key, entry); // refresh recency
+   203→      return entry.value;
+   204→    },
+   205→    set(key, value) {
+   206→      if (this.map.has(key)) this.map.delete(key);
+   207→      else if (this.map.size >= limit) {
+   208→        const oldest = this.map.keys().next().value;
+   209→        if (oldest !== undefined) this.map.delete(oldest);
+   210→      }
+   211→      this.map.set(key, { value, storedAt: Date.now() });
+   212→    },
+   213→    invalidate(key) {
+   214→      this.map.delete(key);
+   215→    },
+   216→    size() {
+   217→      return this.map.size;
+   218→    },
+   219→  };
+   220→}
+   221→
+   222→const markerCache = makeLru(CACHE_MAX_KEYS); // contentId → payload-ul răspunsului GET /markers/:id
+   223→
+   224→/* ------------------------- rate limit per IP (markers/use) ------------------ */
+   225→
+   226→const useBuckets = new Map(); // ip → { count, windowStart }
+   227→
+   228→function useRateAllowed(ip) {
+   229→  const now = Date.now();
+   230→  let bucket = useBuckets.get(ip);
+   231→  if (!bucket || now - bucket.windowStart >= 60_000) {
+   232→    bucket = { count: 0, windowStart: now };
+   233→    useBuckets.set(ip, bucket);
+   234→  }
+   235→  bucket.count += 1;
+   236→  if (bucket.count > RATE_PER_MIN) return false;
+   237→  if (useBuckets.size > 5000) useBuckets.clear();
+   238→  return true;
+   239→}
+   240→
+   241→const useSweeper = setInterval(() => {
+   242→  const now = Date.now();
+   243→  for (const [ip, bucket] of useBuckets) {
+   244→    if (now - bucket.windowStart >= 120_000) useBuckets.delete(ip);
+   245→  }
+   246→}, 60_000);
+   247→if (typeof useSweeper.unref === 'function') useSweeper.unref();
+   248→
+   249→/* --------------------------------- helpers ---------------------------------- */
+   250→
+   251→const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+   252→
+   253→/** Per-route auth guard — pattern copiat identic din modules/player/hub.js:
+   254→ * attachUser e global (server.js), deci req.user e setat pentru orice Bearer
+   255→ * valid (JWT verificat cu AUTHSECRET / secret derivat per-tenant); aici doar
+   256→ * refuzăm 401 când lipsește. */
+   257→const requireAuthLocal = (req, res, next) => {
+   258→  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+   259→  next();
+   260→};
+   261→
+   262→/** Positive integer route/body param; null when invalid. */
+   263→function intParam(raw) {
+   264→  const n = Number(raw);
+   265→  return Number.isInteger(n) && n > 0 ? n : null;
+   266→}
+   267→
+   268→/** Loopback către watchparty-ul PROTEJAT (FAZA 10) — doar consumat, identic ca
+   269→ * pattern cu searchux (FAZA 33). Returnează { ok:true, party, members } |
+   270→ * { ok:false, missing:true } | { ok:false, unavailable:true }. */
+   271→async function fetchPartyDetail(partyId) {
+   272→  let res;
+   273→  try {
+   274→    // NOTĂ: user-agent STRICT ASCII (Bun fetch validează headerele și respinge
+   275→    // valorile non-ASCII — ex. diacritice — cu TypeError instant; păstrăm ca la
+   276→    // searchux: identificare onestă, doar caractere ASCII).
+   277→    res = await fetch(`${SELF_BASE}/api/social/party/${partyId}`, {
+   278→      signal: AbortSignal.timeout(LOOPBACK_TIMEOUT_MS),
+   279→      headers: { 'user-agent': 'animaxia-playerx/1.0 (FAZA 34; consumes protected watchparty via loopback)' },
+   280→    });
+   281→  } catch (err) {
+   282→    // Diagnostic onest (ops): distinguishes timeout vs reset vs altceva.
+   283→    logger.warn(`[playerx] loopback party ${partyId} a eșuat: ${err?.name ?? '?'} ${err?.message ?? err}`);
+   284→    return { ok: false, unavailable: true }; // timeout / rețea / server oprit
+   285→  }
+   286→  const body = await res.json().catch(() => ({}));
+   287→  if (res.status === 200 && body?.party) {
+   288→    return { ok: true, party: body.party, members: Array.isArray(body.members) ? body.members : [] };
+   289→  }
+   290→  if (res.status === 404) return { ok: false, missing: true };
+   291→  return { ok: false, unavailable: true }; // 410/503/500 de la social ⇒ indisponibil, onest
+   292→}
+   293→
+   294→/** Curățare leneșă: voturile stocate pentru o petrecere dispărută/încheiată. */
+   295→function prunePartyVotes(partyId) {
+   296→  const votes = votesStore.load();
+   297→  if (Object.prototype.hasOwnProperty.call(votes, partyId)) {
+   298→    delete votes[partyId];
+   299→    votesStore.scheduleSave();
+   300→  }
+   301→}
+   302→
+   303→/* --------------------------- marker estimation (determinist) ---------------- */
+   304→
+   305→/** Durata în secunde din metadata reală. Câmpuri citite (inspectate pe rândurile
+   306→ * reale Neon, 2026-09-26): duration (secunde, string numeric — tv), runtime
+   307→ * (minute, number — tv/movie), episodeRunTime/episode_runtime (minute, convenție
+   308→ * TMDB — zero rânduri azi, citite pentru compatibilitate viitoare). */
+   309→function durationSecOf(metadata) {
+   310→  const meta = metadata && typeof metadata === 'object' ? metadata : {};
+   311→  const dur = Number(meta.duration);
+   312→  if (Number.isFinite(dur) && dur > 0) return dur; // secunde
+   313→  const rt = Number(meta.runtime);
+   314→  if (Number.isFinite(rt) && rt > 0) return rt * 60; // minute → secunde
+   315→  const ert = Number(meta.episodeRunTime ?? meta.episode_runtime);
+   316→  if (Number.isFinite(ert) && ert > 0) return ert * 60; // minute → secunde
+   317→  return null;
+   318→}
+   319→
+   320→/** Estimări DETERMINISTE per tip (contract înghețat FAZA-34-b/c). movie/mined/
+   321→ * video/page/featured și orice alt tip ⇒ [] — onest, fără markeri inventați. */
+   322→function estimateMarkers(type, durationSec) {
+   323→  const out = {};
+   324→  if (type === 'anime') {
+   325→    out.intro = { startsec: 2, endsec: 90 };
+   326→    if (durationSec !== null && durationSec > 300) {
+   327→      out.outro = { startsec: Math.max(180, durationSec - 90), endsec: durationSec - 6 };
+   328→    }
+   329→  } else if (type === 'tv') {
+   330→    out.recap = { startsec: 0, endsec: 42 };
+   331→    out.intro = { startsec: 48, endsec: 110 };
+   332→    if (durationSec !== null && durationSec > 300) {
+   333→      out.outro = { startsec: Math.max(170, durationSec - 90), endsec: durationSec - 6 };
+   334→    }
+   335→  }
+   336→  return out;
+   337→}
+   338→
+   339→/** Un marker e valid doar cu startsec/endsec întregi, startsec<endsec, startsec≥0
+   340→ * și o durată (endsec-startsec) între 5 și 600 de secunde. */
+   341→function validMarkerSpan(startsec, endsec) {
+   342→  return (
+   343→    Number.isInteger(startsec) && Number.isInteger(endsec) &&
+   344→    startsec >= 0 && startsec < endsec &&
+   345→    endsec - startsec >= 5 && endsec - startsec <= 600
+   346→  );
+   347→}
+   348→
+   349→/** Merge estimări + override-uri curate: un kind curat ÎNLOCUIEȘTE estimatul
+   350→ * aceluiași kind; kind-urile curate noi se ADAUGĂ. Sortate pe startsec.
+   351→ * anyEstimated = cel puțin un marker ESTIMAT supraviețuiește în rezultatul
+   352→ * final (dacă toate kind-urile estimate au override curat, nota dispare —
+   353→ * contractul leagă nota de source, nu de existența estimărilor). */
+   354→function computeMarkers(contentId, content) {
+   355→  const estimated = estimateMarkers(content?.type, durationSecOf(content?.metadata));
+   356→  const curatedAll = markersStore.load()[contentId] ?? {};
+   357→  const byKind = {};
+   358→  for (const [kind, marker] of Object.entries(estimated)) {
+   359→    byKind[kind] = { ...marker, kind, source: 'estimated' };
+   360→  }
+   361→  for (const kind of MARKER_KINDS) {
+   362→    const curated = curatedAll[kind];
+   363→    if (!curated) continue;
+   364→    const { startsec, endsec } = curated;
+   365→    if (!validMarkerSpan(startsec, endsec)) {
+   366→      logger.warn(`[playerx] marker curat sărit pentru content ${contentId} kind ${kind} (interval invalid: ${startsec}..${endsec})`);
+   367→      continue;
+   368→    }
+   369→    byKind[kind] = {
+   370→      startsec,
+   371→      endsec,
+   372→      kind,
+   373→      label: typeof curated.label === 'string' && curated.label.trim()
+   374→        ? curated.label.trim().slice(0, LABEL_MAX)
+   375→        : KIND_LABELS[kind],
+   376→      source: 'curated',
+   377→    };
+   378→  }
+   379→  const data = Object.values(byKind)
+   380→    .map((m) => ({
+   381→      id: m.kind,
+   382→      kind: m.kind,
+   383→      startsec: m.startsec,
+   384→      endsec: m.endsec,
+   385→      label: m.source === 'estimated' ? KIND_LABELS[m.kind] : m.label,
+   386→      source: m.source,
+   387→    }))
+   388→    .sort((a, b) => a.startsec - b.startsec || a.endsec - b.endsec);
+   389→  return { data, anyEstimated: data.some((m) => m.source === 'estimated') };
+   390→}
+   391→
+   392→/* ---------------------------------- router ---------------------------------- */
+   393→
+   394→const router = express.Router();
+   395→
+   396→/** GET /status — contract înghețat FAZA-34-b/c: stats onest (stats.json durabil
+   397→ * + contoare live derivate) fără câmpuri în plus. */
+   398→router.get('/status', (req, res) => {
+   399→  const stats = statsData();
+   400→  const markers = markersStore.load();
+   401→  const votes = votesStore.load();
+   402→  let markersCurated = 0;
+   403→  for (const byKind of Object.values(markers)) {
+   404→    for (const kind of MARKER_KINDS) {
+   405→      if (byKind && typeof byKind === 'object' && byKind[kind]) markersCurated += 1;
+   406→    }
+   407→  }
+   408→  let activeVotes = 0;
+   409→  for (const record of Object.values(votes)) {
+   410→    if (record && typeof record === 'object' && record.status === 'open') activeVotes += 1;
+   411→  }
+   412→  res.json({
+   413→    ok: true,
+   414→    service: 'playerx',
+   415→    phase: 'faza-34',
+   416→    uptimeSec: Math.round((Date.now() - bootAt) / 1000),
+   417→    storage: 'file',
+   418→    storageDir: STORAGE_DIR_LABEL,
+   419→    stats: {
+   420→      markersCurated,
+   421→      markersRequests: stats.markersRequests,
+   422→      skipUses: stats.skipUses,
+   423→      settingsSaved: stats.settingsSaved,
+   424→      votesCast: stats.votesCast,
+   425→      votesClosed: stats.votesClosed,
+   426→      activeVotes,
+   427→    },
+   428→    generatedAt: new Date().toISOString(),
+   429→  });
+   430→});
+   431→
+   432→/* ------------------------------- B. markers --------------------------------- */
+   433→
+   434→/** GET /markers/:contentId — public, cache LRU 60s per contentId + header
+   435→ * Cache-Control public max-age=60. Estimări deterministe + override-uri curate. */
+   436→router.get('/markers/:contentId', wrap(async (req, res) => {
+   437→  const contentId = intParam(req.params.contentId);
+   438→  if (!contentId) return res.status(400).json({ error: 'ID invalid' });
+   439→  bumpStat('markersRequests');
+   440→
+   441→  const cached = markerCache.get(contentId);
+   442→  if (cached) {
+   443→    res.set('Cache-Control', 'public, max-age=60');
+   444→    return res.json({ ok: true, contentId, ...cached });
+   445→  }
+   446→
+   447→  let content;
+   448→  try {
+   449→    content = await getContentById(contentId); // clientul DB partajat (Neon: SELECT by id; local fallback), ca la /api/content/:id
+   450→  } catch (err) {
+   451→    logger.warn(`[playerx] markers: citirea contentului ${contentId} a eșuat: ${err?.message ?? err}`);
+   452→    return res.status(503).json({ error: 'Sursa de conținut este momentan indisponibilă' });
+   453→  }
+   454→  if (!content) return res.status(404).json({ error: 'Conținut inexistent' });
+   455→
+   456→  const { data, anyEstimated } = computeMarkers(contentId, content);
+   457→  const payload = { data };
+   458→  if (anyEstimated) payload.note = MARKER_NOTE;
+   459→  markerCache.set(contentId, payload);
+   460→  res.set('Cache-Control', 'public, max-age=60');
+   461→  return res.json({ ok: true, contentId, ...payload });
+   462→}));
+   463→
+   464→/** POST /markers/use — contor anonim de utilizare skip (KPI WS4 „utilizare
+   465→ * skip-intro"). Public, per-IP 30/min în-modul. NU atinge DB — contor analitic
+   466→ * (validează doar forma body-ului, contract înghețat). ATENȚIE: înregistrat
+   467→ * ÎNAINTE de POST /markers/:contentId ca literalul „use" să nu fie prins de
+   468→ * parametrul :contentId. */
+   469→router.post('/markers/use', (req, res) => {
+   470→  const ip = clientIpOf(req);
+   471→  if (!useRateAllowed(ip)) {
+   472→    return res.status(429).json({ error: 'Prea multe utilizări skip — încearcă din nou într-un minut', retryAfterSec: 60 });
+   473→  }
+   474→  const body = req.body ?? {};
+   475→  const contentId = intParam(body.contentId);
+   476→  const { kind } = body;
+   477→  if (!contentId) return res.status(400).json({ error: 'contentId (întreg pozitiv) este obligatoriu' });
+   478→  if (!MARKER_KINDS.includes(kind)) return res.status(400).json({ error: 'kind trebuie intro|outro|recap' });
+   479→
+   480→  const stats = statsData();
+   481→  stats.skipUses += 1;
+   482→  if (!Number.isFinite(stats.skipUsesByKind[kind])) stats.skipUsesByKind[kind] = 0;
+   483→  stats.skipUsesByKind[kind] += 1;
+   484→  statsStore.scheduleSave();
+   485→  return res.json({ ok: true, skipUses: stats.skipUses });
+   486→});
+   487→
+   488→/** POST /markers/:contentId — upsert override curat (auth). Înlocuiește un
+   489→ * eventual marker curat pentru același kind; invalidează cache-ul acelui
+   490→ * contentId; validare completă a intervalului (aceleași reguli ca la citire). */
+   491→router.post('/markers/:contentId', requireAuthLocal, wrap(async (req, res) => {
+   492→  const contentId = intParam(req.params.contentId);
+   493→  if (!contentId) return res.status(400).json({ error: 'ID invalid' });
+   494→
+   495→  const body = req.body ?? {};
+   496→  const { kind, startsec, endsec } = body;
+   497→  if (!MARKER_KINDS.includes(kind)) {
+   498→    return res.status(400).json({ error: 'kind trebuie intro|outro|recap' });
+   499→  }
+   500→  if (!Number.isInteger(startsec) || startsec < 0) {
+   501→    return res.status(400).json({ error: 'startsec trebuie un întreg ≥ 0' });
+   502→  }
+   503→  if (!Number.isInteger(endsec) || endsec <= startsec) {
+   504→    return res.status(400).json({ error: 'endsec trebuie un întreg > startsec' });
+   505→  }
+   506→  if (endsec - startsec < 5 || endsec - startsec > 600) {
+   507→    return res.status(400).json({ error: 'durata markerului (endsec-startsec) trebuie între 5 și 600 de secunde' });
+   508→  }
+   509→  const label = typeof body.label === 'string' && body.label.trim()
+   510→    ? body.label.trim().slice(0, LABEL_MAX)
+   511→    : KIND_LABELS[kind];
+   512→
+   513→  let content;
+   514→  try {
+   515→    content = await getContentById(contentId);
+   516→  } catch (err) {
+   517→    logger.warn(`[playerx] markers upsert: citirea contentului ${contentId} a eșuat: ${err?.message ?? err}`);
+   518→    return res.status(503).json({ error: 'Sursa de conținut este momentan indisponibilă' });
+   519→  }
+   520→  if (!content) return res.status(404).json({ error: 'Conținut inexistent' });
+   521→
+   522→  const markers = markersStore.load();
+   523→  const entry = markers[contentId] ?? {};
+   524→  entry[kind] = { startsec, endsec, label };
+   525→  markers[contentId] = entry;
+   526→  markersStore.scheduleSave();
+   527→  markerCache.invalidate(contentId);
+   528→
+   529→  return res.json({ ok: true, marker: { id: kind, kind, startsec, endsec, label, source: 'curated' } });
+   530→}));
+   531→
+   532→/** DELETE /markers/:contentId/:kind — înlătură override-ul curat (auth). */
+   533→router.delete('/markers/:contentId/:kind', requireAuthLocal, (req, res) => {
+   534→  const contentId = intParam(req.params.contentId);
+   535→  if (!contentId) return res.status(400).json({ error: 'ID invalid' });
+   536→  const { kind } = req.params;
+   537→  if (!MARKER_KINDS.includes(kind)) return res.status(400).json({ error: 'kind trebuie intro|outro|recap' });
+   538→
+   539→  const markers = markersStore.load();
+   540→  const entry = markers[contentId];
+   541→  if (!entry || !entry[kind]) return res.status(404).json({ error: 'Marker curat inexistent' });
+   542→  delete entry[kind];
+   543→  if (Object.keys(entry).length === 0) delete markers[contentId]; // ținem fișierul curat
+   544→  markersStore.scheduleSave();
+   545→  markerCache.invalidate(contentId);
+   546→  return res.json({ ok: true });
+   547→});
+   548→
+   549→/* --------------------------- C. subtitle settings ---------------------------- */
+   550→
+   551→/** Validează STRICT toate cele 8 câmpuri (contract subtitle-studio FAZA-34-b).
+   552→ * Returnează { value } sau { error } — mesajul numește câmpul vinovat. */
+   553→function validateSubtitleSettings(raw) {
+   554→  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+   555→    return { error: 'body-ul trebuie un obiect cu cele 8 câmpuri de setări' };
+   556→  }
+   557→  if (typeof raw.fontFamily !== 'string' || !FONT_FAMILIES.includes(raw.fontFamily)) {
+   558→    return { error: `fontFamily trebuie unul dintre: ${FONT_FAMILIES.join(', ')}` };
+   559→  }
+   560→  if (!Number.isInteger(raw.fontSizePct) || raw.fontSizePct < 50 || raw.fontSizePct > 250) {
+   561→    return { error: 'fontSizePct trebuie un întreg între 50 și 250' };
+   562→  }
+   563→  if (typeof raw.textColor !== 'string' || !HEX_RE.test(raw.textColor)) {
+   564→    return { error: 'textColor trebuie un cod hex (#rrggbb)' };
+   565→  }
+   566→  if (typeof raw.bgColor !== 'string' || !HEX_RE.test(raw.bgColor)) {
+   567→    return { error: 'bgColor trebuie un cod hex (#rrggbb)' };
+   568→  }
+   569→  if (typeof raw.bgOpacity !== 'number' || !Number.isFinite(raw.bgOpacity) || raw.bgOpacity < 0 || raw.bgOpacity > 1) {
+   570→    return { error: 'bgOpacity trebuie un număr între 0 și 1' };
+   571→  }
+   572→  if (typeof raw.edge !== 'string' || !EDGES.includes(raw.edge)) {
+   573→    return { error: `edge trebuie unul dintre: ${EDGES.join(', ')}` };
+   574→  }
+   575→  if (typeof raw.position !== 'string' || !POSITIONS.includes(raw.position)) {
+   576→    return { error: `position trebuie una dintre: ${POSITIONS.join(', ')}` };
+   577→  }
+   578→  if (typeof raw.marginPct !== 'number' || !Number.isFinite(raw.marginPct) || raw.marginPct < 0 || raw.marginPct > 20) {
+   579→    return { error: 'marginPct trebuie un număr între 0 și 20' };
+   580→  }
+   581→  return {
+   582→    value: {
+   583→      fontFamily: raw.fontFamily,
+   584→      fontSizePct: raw.fontSizePct,
+   585→      textColor: raw.textColor,
+   586→      bgColor: raw.bgColor,
+   587→      bgOpacity: raw.bgOpacity,
+   588→      edge: raw.edge,
+   589→      position: raw.position,
+   590→      marginPct: raw.marginPct,
+   591→    },
+   592→  };
+   593→}
+   594→
+   595→/** GET /subtitle-settings — setările userului curent (auth); null dacă nu are. */
+   596→router.get('/subtitle-settings', requireAuthLocal, (req, res) => {
+   597→  const settings = settingsStore.load();
+   598→  const mine = settings[req.user.id];
+   599→  return res.json({ ok: true, settings: mine ? { ...mine } : null });
+   600→});
+   601→
+   602→/** PUT /subtitle-settings — salvare per userid (auth). Validare strictă pe
+   603→ * TOATE câmpurile; settingsSaved++ doar la PRIMA salvare a userului. */
+   604→router.put('/subtitle-settings', requireAuthLocal, (req, res) => {
+   605→  const { value, error } = validateSubtitleSettings(req.body ?? {});
+   606→  if (error) return res.status(400).json({ error });
+   607→  const settings = settingsStore.load();
+   608→  const { id: userid } = req.user;
+   609→  const isFirstSave = !Object.prototype.hasOwnProperty.call(settings, userid);
+   610→  settings[userid] = value;
+   611→  settingsStore.scheduleSave();
+   612→  if (isFirstSave) bumpStat('settingsSaved');
+   613→  return res.json({ ok: true });
+   614→});
+   615→
+   616→/* ------------------------------ D. party votes ------------------------------- */
+   617→
+   618→/** Tally + votanți în ordinea în care au votat (seq incremental — determinist,
+   619→ * supraviețuiește și round-trip-ului JSON, care păstrează ordinea cheilor). */
+   620→function tallyOf(record) {
+   621→  const tally = {};
+   622→  const voters = [];
+   623→  const entries = Object.entries(record?.votes ?? {}).slice().sort((a, b) => (a[1]?.seq ?? 0) - (b[1]?.seq ?? 0));
+   624→  for (const [userid, vote] of entries) {
+   625→    const cid = Number(vote?.contentId);
+   626→    tally[cid] = (tally[cid] ?? 0) + 1;
+   627→    voters.push({ userid: Number(userid), username: vote?.username, contentId: cid });
+   628→  }
+   629→  return { tally, voters };
+   630→}
+   631→
+   632→/** Câștigător = contentId cu cele mai multe voturi; la egalitate, contentId-ul
+   633→ * votului cel mai devreme exprimat dintre cele la egalitate (determinist). */
+   634→function computeWinner(record) {
+   635→  const { tally, voters } = tallyOf(record);
+   636→  const counts = Object.entries(tally);
+   637→  if (counts.length === 0) return null;
+   638→  let max = 0;
+   639→  for (const [, count] of counts) max = Math.max(max, count);
+   640→  const tied = counts.filter(([, count]) => count === max).map(([cid]) => Number(cid));
+   641→  if (tied.length === 1) return tied[0];
+   642→  const firstVotePos = new Map(); // contentId → prima poziție în ordinea votării
+   643→  for (let i = 0; i < voters.length; i += 1) {
+   644→    if (!firstVotePos.has(voters[i].contentId)) firstVotePos.set(voters[i].contentId, i);
+   645→  }
+   646→  let winner = null;
+   647→  let bestPos = Infinity;
+   648→  for (const cid of tied) {
+   649→    const pos = firstVotePos.get(cid);
+   650→    if (pos !== undefined && pos < bestPos) {
+   651→      bestPos = pos;
+   652→      winner = cid;
+   653→    }
+   654→  }
+   655→  return winner;
+   656→}
+   657→
+   658→/** GET /party/:partyId/votes — public. Petrecerea trebuie să existe și să fie
+   659→ * activă (validare prin loopback contra FAZA 10 protejat); altfel 404 + curățare
+   660→ * leneșă a voturilor stocate pentru ea. */
+   661→router.get('/party/:partyId/votes', wrap(async (req, res) => {
+   662→  const partyId = intParam(req.params.partyId);
+   663→  if (!partyId) return res.status(400).json({ error: 'ID petrecere invalid' });
+   664→
+   665→  const fetched = await fetchPartyDetail(partyId);
+   666→  if (fetched.unavailable) return res.status(503).json({ error: 'Serviciul de party indisponibil' });
+   667→  if (fetched.missing || fetched.party?.status !== 'active') {
+   668→    prunePartyVotes(partyId);
+   669→    return res.status(404).json({ error: 'Petrecere inexistentă sau încheiată' });
+   670→  }
+   671→
+   672→  const record = votesStore.load()[partyId];
+   673→  if (!record) {
+   674→    // Nicio înregistrare încă — votul e implicit deschis, totul gol, onest.
+   675→    return res.json({
+   676→      ok: true,
+   677→      partyId,
+   678→      contentId: Number(fetched.party.content?.id),
+   679→      status: 'open',
+   680→      winner: null,
+   681→      tally: {},
+   682→      voters: [],
+   683→      createdAt: null,
+   684→      updatedAt: null,
+   685→    });
+   686→  }
+   687→  const { tally, voters } = tallyOf(record);
+   688→  return res.json({
+   689→    ok: true,
+   690→    partyId,
+   691→    contentId: Number(fetched.party.content?.id),
+   692→    status: record.status === 'closed' ? 'closed' : 'open',
+   693→    winner: record.status === 'closed' ? record.winner ?? null : null,
+   694→    tally,
+   695→    voters,
+   696→    createdAt: record.createdAt ?? null,
+   697→    updatedAt: record.updatedAt ?? null,
+   698→  });
+   699→}));
+   700→
+   701→/** POST /party/:partyId/vote — auth, doar membri (gazda e mereu membru). Un vot
+   702→ * per user, care poate fi schimbat cât timp votul e deschis; votesCast++ doar
+   703→ * la voturi NOI (schimbarea votului nu se numără dublu). */
+   704→router.post('/party/:partyId/vote', requireAuthLocal, wrap(async (req, res) => {
+   705→  const partyId = intParam(req.params.partyId);
+   706→  if (!partyId) return res.status(400).json({ error: 'ID petrecere invalid' });
+   707→  const contentId = intParam(req.body?.contentId);
+   708→  if (!contentId) return res.status(400).json({ error: 'contentId (întreg pozitiv) este obligatoriu' });
+   709→
+   710→  const fetched = await fetchPartyDetail(partyId);
+   711→  if (fetched.unavailable) return res.status(503).json({ error: 'Serviciul de party indisponibil' });
+   712→  if (fetched.missing || fetched.party?.status !== 'active') {
+   713→    prunePartyVotes(partyId);
+   714→    return res.status(404).json({ error: 'Petrecere inexistentă sau încheiată' });
+   715→  }
+   716→
+   717→  const userid = Number(req.user.id);
+   718→  const isHost = Number(fetched.party.host?.id) === userid;
+   719→  const isMember = isHost || fetched.members.some((m) => Number(m?.userid) === userid);
+   720→  if (!isMember) return res.status(403).json({ error: 'Doar membrii pot vota' });
+   721→
+   722→  const votes = votesStore.load();
+   723→  let record = votes[partyId];
+   724→  if (record && record.status === 'closed') {
+   725→    return res.status(410).json({ error: 'Votul s-a încheiat' });
+   726→  }
+   727→  const now = new Date().toISOString();
+   728→  if (!record) {
+   729→    record = {
+   730→      contentId: Number(fetched.party.content?.id),
+   731→      status: 'open',
+   732→      votes: {},
+   733→      winner: null,
+   734→      createdAt: now,
+   735→      updatedAt: now,
+   736→      nextSeq: 1,
+   737→    };
+   738→    votes[partyId] = record;
+   739→  }
+   740→  const prev = record.votes[String(userid)];
+   741→  record.votes[String(userid)] = {
+   742→    username: req.user.username,
+   743→    contentId,
+   744→    votedAt: now,
+   745→    seq: prev ? prev.seq : record.nextSeq ?? 1,
+   746→  };
+   747→  if (!prev) {
+   748→    record.nextSeq = (record.nextSeq ?? 1) + 1;
+   749→    bumpStat('votesCast');
+   750→  }
+   751→  record.updatedAt = now;
+   752→  votesStore.scheduleSave();
+   753→
+   754→  const { tally, voters } = tallyOf(record);
+   755→  return res.json({ ok: true, tally, voters });
+   756→}));
+   757→
+   758→/** DELETE /party/:partyId/votes — auth, DOAR gazda: închide votul și calculează
+   759→ * câștigătorul (egalitate ⇒ contentId-ul cel mai devreme votat dintre cei la
+   760→ * egalitate — determinist). Idempotent: re-închiderea returnează aceeași decizie
+   761→ * fără a dubla contorul votesClosed. */
+   762→router.delete('/party/:partyId/votes', requireAuthLocal, wrap(async (req, res) => {
+   763→  const partyId = intParam(req.params.partyId);
+   764→  if (!partyId) return res.status(400).json({ error: 'ID petrecere invalid' });
+   765→
+   766→  const fetched = await fetchPartyDetail(partyId);
+   767→  if (fetched.unavailable) return res.status(503).json({ error: 'Serviciul de party indisponibil' });
+   768→  if (fetched.missing || fetched.party?.status !== 'active') {
+   769→    prunePartyVotes(partyId);
+   770→    return res.status(404).json({ error: 'Petrecere inexistentă sau încheiată' });
+   771→  }
+   772→
+   773→  if (Number(fetched.party.host?.id) !== Number(req.user.id)) {
+   774→    return res.status(403).json({ error: 'Doar gazda poate încheia votul' });
+   775→  }
+   776→
+   777→  const votes = votesStore.load();
+   778→  const record = votes[partyId];
+   779→  if (!record) return res.status(404).json({ error: 'Nu există voturi pentru această petrecere' });
+   780→
+   781→  const { tally } = tallyOf(record);
+   782→  if (record.status !== 'closed') {
+   783→    record.status = 'closed';
+   784→    record.winner = computeWinner(record);
+   785→    record.updatedAt = new Date().toISOString();
+   786→    votesStore.scheduleSave();
+   787→    bumpStat('votesClosed');
+   788→  }
+   789→  return res.json({ ok: true, winner: record.winner ?? null, tally });
+   790→}));
+   791→
+   792→export default router;
+   793→

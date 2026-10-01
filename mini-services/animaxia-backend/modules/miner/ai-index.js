@@ -42,13 +42,13 @@ async function upsertEmbeddings(tenantid, items) {
     try {
       await rows(
         `INSERT INTO vectorembeddings (refkey, kind, refid, userid, dims, embedding, metadata, contenttext, tenantid)
-         VALUES ($1, $2, $3, 0, $4, $5::vector, $6::jsonb, $7, $8)
+         VALUES ($1, $2, $3, 0, $4, $5::vector, $6, $7, $8)
          ON CONFLICT (refkey) DO UPDATE SET
            dims = EXCLUDED.dims,
            embedding = EXCLUDED.embedding,
            metadata = EXCLUDED.metadata,
            contenttext = EXCLUDED.contenttext,
-           updatedat = NOW()`,
+           updatedat = CURRENT_TIMESTAMP`,
         [
           item.refkey,
           'content',
@@ -142,7 +142,7 @@ export async function minerIndexStatus(tenantid) {
   const slug = String(tenantid || GLOBAL_TENANT_SLUG);
   try {
     const r = await one(
-      `SELECT COUNT(*)::int AS docs FROM vectorembeddings WHERE tenantid = $1 AND kind = 'content'`,
+      `SELECT COUNT(*) AS docs FROM vectorembeddings WHERE tenantid = $1 AND kind = 'content'`,
       [slug],
     );
     return { tenant: slug, docs: num(r?.docs) };

@@ -152,7 +152,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms)); // one-shot pause
 
 /**
  * Synthetic insert runner (async, fire-and-forget from the admin endpoint):
- * batches of 5000 with 250ms Neon-friendly pauses, checkpoint after every
+ * batches of 5000 with 250ms local SQLite-friendly pauses, checkpoint after every
  * batch, honest phase transitions. ZERO background timers beyond the pauses.
  */
 async function runBenchInserts(state) {
@@ -170,7 +170,7 @@ async function runBenchInserts(state) {
         const year = 1950 + (idx % 81); // deterministic 1950..2030
         params.push(batchId, normalizeTitle(title), year, computeShardId(title, year));
         const base = i * 4;
-        values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`);
+        values.push('(?, ?, ?, ?)');
       }
       // eslint-disable-next-line no-await-in-loop -- batches are intentionally sequential
       await primaryQuery(
@@ -200,12 +200,7 @@ async function runBenchInserts(state) {
 /* ------------------------------------ stats ------------------------------------- */
 
 function shardsConfiguredCount() {
-  let dedicated = 0;
-  for (let s = 2; s <= 15; s += 1) {
-    if (process.env[`ANIMAXIA_DB_${String(s).padStart(2, '0')}`]) dedicated += 1;
-  }
-  const primaryConfigured = !!(process.env.ANIMAXIA_DB_01 || process.env.DATABASEURL);
-  return (primaryConfigured ? 1 : 0) + dedicated;
+  return 1;
 }
 
 async function buildStatsPayload() {
@@ -230,25 +225,32 @@ async function buildStatsPayload() {
   let dbSizeBytes = null;
   try {
     const r = await primaryQuery(
-      `SELECT (SELECT COUNT(*) FROM ar10m.content)::int AS titles,
-              (SELECT COUNT(*) FROM ar10m.content_sources)::int AS sources,
-              (SELECT COUNT(*) FROM ar10m.content WHERE source_id IS NOT NULL)::int AS playable,
-              pg_database_size(current_database())::bigint AS db_size`,
+      `SELECT
+         (SELECT COUNT(*) FROM ar10m.content) AS titles,
+         (SELECT COUNT(*) FROM ar10m.content_sources) AS sources,
+         (SELECT COUNT(*) FROM ar10m.content WHERE source_id IS NOT NULL) AS playable`,
       [],
       { timeoutMs: 2_000 },
     );
+
     titles = Number(r.rows[0]?.titles ?? 0);
     sources = Number(r.rows[0]?.sources ?? 0);
     playableTitles = Number(r.rows[0]?.playable ?? 0);
-    dbSizeBytes = Number(r.rows[0]?.db_size ?? 0);
-    // Piggyback: record the REAL measured size for the budget module.
-    recordPrimaryMetrics({ rowCount: titles, spaceBytes: dbSizeBytes });
+
+    const metrics = await refreshShardMetrics();
+    dbSizeBytes =
+      metrics.results?.[0]?.spaceBytes ?? null;
+
+    recordPrimaryMetrics({
+      rowCount: titles,
+      spaceBytes: dbSizeBytes,
+    });
   } catch {
     // schema not created yet — every value stays null (honest)
   }
 
-  const users = await count('SELECT COUNT(*)::int AS n FROM public.users', 'stats:users');
-  const legacyTitles = await count('SELECT COUNT(*)::int AS n FROM public.content', 'stats:legacy');
+  const users = await count('SELECT COUNT(*) AS n FROM public.users', 'stats:users');
+  const legacyTitles = await count('SELECT COUNT(*) AS n FROM public.content', 'stats:legacy');
 
   const status = shardStatus();
   const physicalOnline = (report) => report.poolActive && report.state !== 'open';
@@ -433,7 +435,7 @@ router.get('/bench/status', wrap(async (req, res) => {
   const state = readBenchState();
   let rowsInDb = null;
   try {
-    const r = await primaryQuery('SELECT COUNT(*)::int AS n FROM ar10m.bench_catalog', [], { timeoutMs: 2_000 });
+    const r = await primaryQuery('SELECT COUNT(*) AS n FROM ar10m.bench_catalog', [], { timeoutMs: 2_000 });
     rowsInDb = Number(r.rows[0]?.n ?? 0);
   } catch {
     rowsInDb = null; // schema may not exist yet — honest

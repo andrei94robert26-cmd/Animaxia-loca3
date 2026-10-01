@@ -1,0 +1,80 @@
+# animaxia-edge-player — Cloudflare Worker config
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# The PLAYER worker streams HLS through the edge: GET /player/manifest/:id
+# resolves the cloud mobile player payload ({ content, mode, allowedTypes,
+# sources, primary, nextUp }), picks the first HLS source, rewrites the m3u8
+# (nested variant playlists → /player/manifest/variant?src=…, segments/keys →
+# /hls?u=…) and proxies segments with an L1 Cache API tier plus an optional
+# R2 write-through + stale-if-error (HLS_CACHE). GET /player/media/* serves
+# MEDIA_BUCKET objects (thumbnails, offline-test.mp4) with Range + HEAD
+# support. The /hls + variant proxy is open-proxy protected by the
+# config.player.allowHosts allowlist.
+# Full logic: src/index.ts + src/hls.ts.
+
+name = "animaxia-edge-player"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+# `wrangler whoami` shows your subdomain. Turn off once you route the zone
+# through the gateway worker if you don't want the extra public URL.
+workers_dev = true
+
+# --- Routes ------------------------------------------------------------------
+# Uncomment AFTER the zone (animaxia.com) is on your Cloudflare account and
+# the gateway worker routes /player/* + /hls to this worker via the
+# SVC_PLAYER service binding.
+#
+# routes = [
+#   { pattern = "player.animaxia.com/*", zone_name = "animaxia.com" },
+# ]
+
+# --- Bindings ----------------------------------------------------------------
+# KV: EDGE_CONFIG — runtime configuration (key "config", shared/config.ts
+# defaults + KV override). Create with:
+#   wrangler kv namespace create EDGE_CONFIG
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_CACHE — SWR / stale-if-error response cache (shared/cache.ts) for
+# the player:manifest:* / player:sources:* JSON payloads. Create with:
+#   wrangler kv namespace create EDGE_CACHE
+[[kv_namespaces]]
+binding = "EDGE_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# R2: MEDIA_BUCKET — thumbnails + the bundled offline sample served by
+# GET /player/media/* (Range + HEAD support). Create with:
+#   wrangler r2 bucket create animaxia-media
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "animaxia-media"
+
+# R2: HLS_CACHE — OPTIONAL write-through mirror for popular HLS segments
+# (.ts/.m4s/.mp4 bodies ≤ 4MB, gated by config.player.r2WriteThrough) and the
+# stale-if-error store served when an origin 5xxes. Create with:
+#   wrangler r2 bucket create animaxia-hls-cache
+[[r2_buckets]]
+binding = "HLS_CACHE"
+bucket_name = "animaxia-hls-cache"
+
+# --- Vars --------------------------------------------------------------------
+# Where the cloud monolith / gateway is reached from the edge. The default
+# matches the local mini-services gateway for `wrangler dev` style setups —
+# production must point at the cloud gateway host (e.g.
+# "https://api.animaxia.com"): Workers run on Cloudflare's edge, not inside
+# your cluster.
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+# FAZA 14: 30 logical shards × 1B ids — keep in sync with the monolith SHARDCOUNT
+SHARDCOUNT = "30"
+
+# --- Secrets -----------------------------------------------------------------
+# This worker requires no secrets — the manifest/segment proxy is public and
+# protected by the config.player.allowHosts allowlist (open-proxy protection)
+# rather than credentials. NEVER put secrets in this file; if you ever add
+# one, use:  wrangler secret put <NAME>

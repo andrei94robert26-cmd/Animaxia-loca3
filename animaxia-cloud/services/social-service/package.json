@@ -1,0 +1,17 @@
+{
+  "name": "@animaxia/social-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud social-service — threaded comments, votes and content likes (social/comments.js) plus global/personalized activity feeds (social/feed.js) on one /api/social surface, with a 5-min worker checking activity sources and a main-process global-feed snapshot refresher.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

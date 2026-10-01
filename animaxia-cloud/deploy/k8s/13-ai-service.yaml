@@ -1,0 +1,142 @@
+# =============================================================================
+# Animaxia Cloud — ai-service (:4003)
+# AI features: recommendations, summarize, describe, chat (z-ai-web-dev-sdk with heuristic fallback, plan-based daily quotas).
+# Phase 4 — Animaxia AI Cloud (BLUEPRINT §11): llm-core provider chain
+# (z-ai|openai|mock), RAG engine, animaxiaAssistant, personal AI, tools and
+# the pluggable vector backends (pgvector|mock|qdrant|pinecone) behind
+# /api/ai/cloud|rag|assistant|personal|tools|admin + /api/vector.
+# Gateway prefixes: /api/ai, /api/vector
+# Deployment + ClusterIP Service + HorizontalPodAutoscaler.
+#
+# Phase-4 env (AI_PROVIDER, AI_MODEL, AI_TIMEOUTMS, VECTOR_BACKEND, QDRANTURL,
+# PINECONEURL + secrets AI_API_KEY, QDRANTAPIKEY, PINECONEAPIKEY) flows into
+# the container through the SAME envFrom pair as everything else:
+# animaxia-config (01-configmap.yaml) + animaxia-secrets (02-secret.yaml) —
+# only the per-service PORT/SERVICENAME literals need an explicit `env:` entry.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: ai
+spec:
+  # HPA owns replica count once autoscaling is running; this is the initial value
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-service
+        app.kubernetes.io/part-of: animaxia-cloud
+        app.kubernetes.io/component: ai
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4003"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: ai-service
+          image: ghcr.io/animaxia/ai-service:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 4003
+              protocol: TCP
+            - name: metrics
+              containerPort: 4003
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: animaxia-config
+            - secretRef:
+                name: animaxia-secrets
+          env:
+            - name: PORT
+              value: "4003"
+            - name: SERVICENAME
+              value: "ai-service"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: ai
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ai-service
+  ports:
+    - name: http
+      port: 4003
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-service
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-service
+  minReplicas: 1
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # avoid flapping; queue-service especially dislikes replica churn
+      stabilizationWindowSeconds: 300

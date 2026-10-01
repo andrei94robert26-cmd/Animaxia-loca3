@@ -1,0 +1,100 @@
+# =============================================================================
+# FAZA 24 — Zero-downtime deploy (rolling updates + rollback automat).
+#
+#   • maxSurge 1 / maxUnavailable 0 → capacitatea nu scade NICIODATĂ sub
+#     numărul curent de replici în timpul rollout-ului.
+#   • readinessProbe ÎNAINTE de trafic — podul nou primește cereri doar
+#     după ce /api/health răspunde 200 (poarta de health; identic cu
+#     DEPLOY_HEALTH_GATES din :4060).
+#   • rollback automat: Argo Rollouts (sau kubectl rollout undo la eșecul
+#     porții) — simulat live pe :4060 cu failAtStep (QA).
+#   • PDB: minAvailable 1 — drain de nod fără să cadă podeaua de capacitate.
+#
+# FAZA 18/20/21/23 rămân ONLINE în timpul deploy-ului — doar imaginea
+# containerului se schimbă, niciodată logica.
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animaxia-backend
+  namespace: animaxia-core
+  labels:
+    app.kubernetes.io/name: animaxia-backend
+    animaxia.io/faza: "24"
+  annotations:
+    animaxia.io/zero-downtime: "surge + readiness înainte de trafic + rollback automat"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # o replică nouă peste capacitate (surge)
+      maxUnavailable: 0  # ZERO indisponibilitate — regula de aur FAZA 24
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: animaxia-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: animaxia-backend
+    spec:
+      terminationGracePeriodSeconds: 30   # preStop + drain în 30s (conexiuni în curs se termină)
+      containers:
+        - name: animaxia-backend
+          image: animaxia/backend:latest
+          ports:
+            - name: http
+              containerPort: 4000
+          # Poarta de health — EXACT endpoint-urile existente (zero cod nou):
+          startupProbe:                    # boot lent permis fără kill
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:                  # TRAFIC DOAR DUPĂ 200
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 15
+            failureThreshold: 3
+          lifecycle:
+            preStop:                       # drain onest înainte de SIGTERM
+              exec: { command: ["sh", "-c", "sleep 5"] }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: animaxia-backend-faza24
+  namespace: animaxia-core
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: animaxia-backend
+---
+# Rollback automat (Argo Rollouts) — analysis: dacă readiness-ul noii versiuni
+# nu trece în 3 încercări (30s), rollout-ul revine automat la versiunea
+# anterioară; echivalentul exact al deployer.ts de pe :4060 (failAtStep QA).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: animaxia-health-gate
+  namespace: animaxia-core
+spec:
+  metrics:
+    - name: health-gate
+      interval: 10s
+      failureLimit: 3          # 3 eșecuri → rollback automat
+      successCondition: result.status == 200
+      provider:
+        job:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: curl
+                    image: curlimages/curl:latest
+                    command: ["sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://animaxia-backend.animaxia-core.svc:4000/api/health"]
+                restartPolicy: Never

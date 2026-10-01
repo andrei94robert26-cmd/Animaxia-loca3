@@ -1,0 +1,11 @@
+{
+  "name": "animaxia-observability",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FAZA 23 — Animaxia observability stack runnable locally (port 4050): OTel collector (OTLP/HTTP-JSON), Prometheus (scrape + expose), Alertmanager (10 reguli), Grafana-compatible dashboards (4) și 46 synthetics globale. Echivalentul local rulabil al stack-ului de producție din animaxia-cloud/observability/global (profil faza23). ZERO dependențe externe.",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  }
+}

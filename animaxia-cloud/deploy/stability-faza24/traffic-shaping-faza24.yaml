@@ -1,0 +1,60 @@
+# =============================================================================
+# FAZA 24 — Protecție overload (traffic shaping) — plan declarativ.
+#
+#   • Limite globale de trafic per regiune: 500 RPS (buget de producție).
+#   • Priorități:
+#       CRITICE  (auth, search, huburi, player) — garantate; se încetinesc
+#                 doar la overload extrem (≥1.8×) și NU se resping niciodată.
+#       NORMALE  (conținut, categorii, AI, recomandări) — încetinite la ≥1.3×,
+#                 respinse onest la ≥1.5×.
+#       NON-CRITICE (miner, admin, observability, platform) — respinse
+#                 onest de la ≥1.0× cu Retry-After.
+#   • Mesaj onest la orice respingere (RO): „Platformă ocupată — cererile
+#     non-critice sunt limitate temporar. Reîncearcă în câteva secunde."
+#
+# Pipeline-ul FAZA 18 NU este modificat — doar protejat de acest strat
+# din față. Aplicarea: Envoy/NGINX la gateway + APF; echivalentul local
+# rulabil = TrafficShaper pe :4060 (POST /api/shaping/evaluate), iar
+# perimetrul FAZA 22 al gateway-ului deja limitează pe clase search/hub/ai/
+# general (config existent, neatins).
+# =============================================================================
+---
+apiVersion: animaxia.io/v1
+kind: TrafficShapingPolicy
+metadata:
+  name: animaxia-shaping
+  labels:
+    animaxia.io/faza: "24"
+spec:
+  regionLimits:
+    eu: { limitRps: 500 }
+    us: { limitRps: 500 }
+    asia: { limitRps: 500 }
+  classes:
+    - name: critical
+      description: "API critice — auth, search, huburi, player"
+      pathPrefixes: ["/api/auth", "/api/search", "/api/hub", "/api/player", "/api/content/"]
+      guaranteed: true            # niciodată respinse
+      throttleAtRatio: 1.8        # doar încetinite la overload extrem
+    - name: normal
+      description: "API normale — conținut, categorii, AI, recomandări"
+      pathPrefixes: ["/api/all", "/api/movies", "/api/anime", "/api/tv", "/api/news", "/api/sports", "/api/franchise", "/api/recommendations", "/api/ai/"]
+      throttleAtRatio: 1.3
+      shedAtRatio: 1.5
+    - name: sheddable
+      description: "API non-critice — pot fi încetinite la overload"
+      pathPrefixes: ["/api/miner", "/api/admin", "/api/observability", "/api/platform"]
+      shedAtRatio: 1.0
+  thresholds:
+    shedSheddable: 1.0
+    throttleNormal: 1.3
+    shedNormal: 1.5
+    throttleCritical: 1.8
+  retryAfter:
+    throttleMs: 1000
+    shedMs: 5000
+  honestBusyMessage: "Platformă ocupată — cererile non-critice sunt limitate temporar. Reîncearcă în câteva secunde."
+  # Aplicare Envoy (extras):
+  #   http_filters: envoy.filters.http.local_ratelimit
+  #   cu token_bucket per clasă — criticele primesc bucket dedicat egal cu
+  #   90% din limita regiunii; sheddable primește overflow doar la <1.0×.

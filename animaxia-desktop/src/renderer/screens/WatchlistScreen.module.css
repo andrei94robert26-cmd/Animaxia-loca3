@@ -1,0 +1,29 @@
+/* WatchlistScreen.module.css — poster grid slots with hover remove chips. */
+
+.slot {
+  position: relative;
+}
+
+.remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--red);
+  border-radius: 50%;
+  background: rgba(10, 10, 16, 0.85);
+  color: var(--red);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.remove:hover {
+  opacity: 1;
+  background: var(--red-tint);
+  transform: scale(1.06);
+}

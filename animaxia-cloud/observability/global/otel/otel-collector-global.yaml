@@ -1,0 +1,108 @@
+# =============================================================================
+# Animaxia — GLOBAL OpenTelemetry Collector (FAZA 23 prep — NOT ACTIVATED)
+# =============================================================================
+# Mounted into the `otel-collector` container of
+# observability/global/docker-compose.global-observability.yml
+# (profile "faza23" — never starts by default).
+#
+# Role: the global OTel pipeline on top of the per-region collectors
+# (observability/otel/otel-collector-config.yml). Receives OTLP from
+# regional collectors / global-gateway, then:
+#
+#   traces  → tail_sampling (errors + slow traces always kept) → otlp/tempo
+#   metrics → batch → prometheusremotewrite (the global Prometheus)
+#   logs    → batch → otlp/tempo (log-to-trace correlation in Grafana)
+#
+# HONEST NOTE — tail_sampling: tail sampling decides AFTER seeing the whole
+# trace, which means the collector BUFFERS spans until the trace completes
+# (or the decision timeout fires). With policy {errors, slow} this keeps
+# every error/slow trace at 100% and samples the rest — it does NOT make
+# bad traces disappear, but it does trade memory for completeness; the
+# memory_limiter below caps that trade. If global volume outgrows one
+# collector in FAZA 23, the documented path is the collector's
+# load-balancing exporter tier (multiple collectors, trace-ID aware).
+#
+# ── FAZA 23 (verificare aditivă) ─────────────────────────────────────────────
+# Configuration VERIFIED complete for the FAZA 23 contract:
+#   receivers.otlp.protocols.http (:4318) — accepts OTLP/HTTP-JSON traces +
+#     metrics; the backend OTel exporter (FAZA 23, /api/observability/metrics
+#     sibling) and the SPA browser exporter POST here (the LOCAL runnable
+#     equivalent is :4050 /v1/traces + /v1/metrics, same JSON shapes).
+#   receivers.otlp.protocols.grpc (:4317) — kept for SDK defaults.
+#   exporters.prometheusremotewrite → global Prometheus (remote-write
+#     receiver must be enabled: --web.enable-remote-write-receiver).
+#   exporters.otlp/tempo → traces + logs with correlation.
+#   pipelines: traces (tail-sampled), metrics (remote-write), logs — all
+#     complete; memory_limiter + batch on every pipeline.
+# No structural changes needed in FAZA 23 — marker added for traceability.
+# =============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    # Hard ceiling before the collector starts dropping — protects the host.
+    check_interval: 1s
+    limit_mib: 1024
+    spike_limit_mib: 256
+
+  tail_sampling:
+    # See the header note: decide on complete traces, keep errors + slow.
+    decision_wait: 10s
+    num_traces: 100_000
+    expected_new_traces_per_sec: 2_000
+    policies:
+      - name: errors-always
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow-traces-always
+        type: latency
+        latency:
+          threshold_ms: 1500
+      - name: baseline-sample
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+    send_batch_max_size: 16384
+
+exporters:
+  # Metrics → the global Prometheus (remote-write receiver enabled on it —
+  # FAZA 23 TODO: start it with --web.enable-remote-write-receiver).
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+
+  # Traces + logs → Tempo (the per-region Tempo for now; a global Tempo
+  # instance is FAZA 23+ work — documented honestly, not provisioned here).
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]

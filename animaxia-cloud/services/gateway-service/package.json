@@ -1,0 +1,17 @@
+{
+  "name": "@animaxia/gateway-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud API Gateway — single entry point in front of every microservice: prefix routing, edge auth + ACL, edge caching with stale-while-error, per-upstream circuit breakers, global rate limiting, aggregated health.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

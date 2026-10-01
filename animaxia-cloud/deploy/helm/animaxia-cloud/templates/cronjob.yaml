@@ -1,0 +1,70 @@
+{{/* =============================================================================
+CronJobs — schedule enforcers for the PG-backed queue.
+
+Each tick POSTs {"job":"<job>","payload":{...}} to the queue-service
+`POST /api/queue/cron/tick` endpoint. queue-service ALSO runs an internal
+scheduler (QUEUESCHEDULERENABLED in the ConfigMap); these CronJobs are belt &
+braces — duplicate ticks are deduped by the queue.
+============================================================================= */}}
+{{- if .Values.queue.cronJobs.enabled }}
+{{- range $name, $cron := .Values.queue.cronJobs.schedules }}
+{{- $queueUrl := $.Values.queue.cronJobs.queueServiceUrl | default "http://queue-service:4009" }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "animaxia.fullname" $ }}-cron-{{ $name }}
+  namespace: {{ include "animaxia.namespace" $ }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" $ "component" "scheduler") | nindent 4 }}
+    animaxia.io/cron: {{ $name }}
+spec:
+  schedule: {{ $cron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ include "animaxia.name" $ }}-cron
+            app.kubernetes.io/instance: {{ $.Release.Name }}
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: {{ $.Values.queue.cronJobs.curlImage | default "curlimages/curl:8.10.1" }}
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - {{ printf "{\"job\":%s,\"payload\":%s}" ($cron.job | toJson) ($cron.payload | default dict | toJson) | quote }}
+                - {{ printf "%s/api/queue/cron/tick" $queueUrl }}
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+{{- end }}
+{{- end }}

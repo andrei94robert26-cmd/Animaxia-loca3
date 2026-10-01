@@ -1,0 +1,158 @@
+/* AIPanel.module.css — scoped styles for the content-screen AI suite. */
+
+.wrap {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 26px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.headerTitle {
+  font-size: 14px;
+  font-weight: 800;
+  flex: 1;
+}
+
+.pane {
+  min-height: 120px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.matchRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.matchText {
+  color: var(--emerald);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.matchStrong {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.answer {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.neighborTitle {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.neighborName {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staleHint {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.askHint {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.chatLog {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.bubble {
+  border-radius: var(--radius-md);
+  padding: 10px 13px;
+  max-width: 88%;
+}
+
+.bubbleUser {
+  background: var(--rose);
+  align-self: flex-end;
+}
+
+.bubbleAi {
+  background: var(--card-soft);
+  border: 1px solid var(--border-soft);
+  align-self: flex-start;
+}
+
+.bubbleUserText {
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.bubbleAiText {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.sourceRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.sourceLabel {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.inputRow {
+  display: flex;
+  gap: 9px;
+  align-items: flex-end;
+}
+
+.inputRow .textarea {
+  flex: 1;
+  min-height: 46px;
+}

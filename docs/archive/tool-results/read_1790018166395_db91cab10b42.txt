@@ -1,0 +1,472 @@
+     1→/**
+     2→ * Synthetics globale — EXACT 46 checks, rulează la 60s (staggered, max 4
+     3→ * simultan), fiecare = fetch + asserții, timeout 8s, istoric ultimele 50
+     4→ * rulări/check. CHECK-URILE SUNT DOAR CITIRE (GET) — nu modifică nimic.
+     5→ *
+     6→ * Endpoint-urile au fost validate LIVE (curl) înainte de a fi definite:
+     7→ *  - /api/search/advanced este ruta reală de căutare (/api/search simplu nu
+     8→ *    există în router — înlocuit onest, vezi README)
+     9→ *  - /api/ai/home/stats este ruta reală FAZA 15 (/api/ai/home/status nu există)
+    10→ *  - /api/hub/browse?facets=1 este calea reală de facets (nu există /api/hub/facets)
+    11→ *  - /api/hub/years înlocuiește /api/hub/dimensions (rută inexistentă)
+    12→ *  - subtitrările: /api/player/subtitles/content/:id/subtitles (mount FAZA 21)
+    13→ *  - conținut de test: id 1907 (Animaxia HLS Demo — verificat live cu surse)
+    14→ */
+    15→import {
+    16→  SYNTHETIC_CONCURRENCY,
+    17→  SYNTHETIC_HISTORY_MAX,
+    18→  SYNTHETIC_INTERVAL_SEC,
+    19→  SYNTHETIC_RUN_CONCURRENCY,
+    20→  SYNTHETIC_STAGGER_MS,
+    21→  SYNTHETIC_RUN_STAGGER_MS,
+    22→  SYNTHETIC_TIMEOUT_MS,
+    23→} from '../config.ts';
+    24→import type { MetricsStore } from './metrics-store.ts';
+    25→
+    26→export type CheckResult = 'pass' | 'fail';
+    27→
+    28→export interface CheckRun {
+    29→  ts: string;
+    30→  status: CheckResult;
+    31→  durationMs: number;
+    32→  error: string | null;
+    33→}
+    34→
+    35→export interface Assertion {
+    36→  type: 'status' | 'json' | 'bodyIncludes' | 'jsonType';
+    37→  /** pentru status: cod așteptat; pentru json: path */
+    38→  path?: string;
+    39→  op?: 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'truthy' | 'falsy' | 'exists' | 'includes';
+    40→  value?: unknown;
+    41→  expected?: number;
+    42→  text?: string;
+    43→}
+    44→
+    45→export interface CheckDef {
+    46→  id: string;
+    47→  name: string;
+    48→  category: string;
+    49→  region: 'eu' | 'us' | 'asia' | 'local';
+    50→  target: string;
+    51→  method: 'GET' | 'RESP';
+    52→  assertions: Assertion[];
+    53→  intervalSec: number;
+    54→  note?: string;
+    55→}
+    56→
+    57→const GW = 'http://localhost:4040';
+    58→
+    59→/** Rezolvă un path JSON de forma "a.b.0.c". */
+    60→function resolvePath(obj: unknown, path: string): { found: boolean; value: unknown } {
+    61→  let cur: unknown = obj;
+    62→  for (const part of path.split('.')) {
+    63→    if (cur === null || cur === undefined) return { found: false, value: undefined };
+    64→    if (Array.isArray(cur)) {
+    65→      const idx = Number(part);
+    66→      if (!Number.isInteger(idx) || idx < 0 || idx >= cur.length) return { found: false, value: undefined };
+    67→      cur = cur[idx];
+    68→      continue;
+    69→    }
+    70→    if (typeof cur === 'object') {
+    71→      cur = (cur as Record<string, unknown>)[part] ?? undefined;
+    72→      continue;
+    73→    }
+    74→    return { found: false, value: undefined };
+    75→  }
+    76→  return { found: cur !== undefined, value: cur };
+    77→}
+    78→
+    79→function compare(op: Assertion['op'], actual: unknown, expected: unknown): boolean {
+    80→  switch (op) {
+    81→    case 'eq':
+    82→      return actual === expected;
+    83→    case 'ne':
+    84→      return actual !== expected;
+    85→    case 'gt':
+    86→      return typeof actual === 'number' && typeof expected === 'number' && actual > expected;
+    87→    case 'gte':
+    88→      return typeof actual === 'number' && typeof expected === 'number' && actual >= expected;
+    89→    case 'lt':
+    90→      return typeof actual === 'number' && typeof expected === 'number' && actual < expected;
+    91→    case 'lte':
+    92→      return typeof actual === 'number' && typeof expected === 'number' && actual <= expected;
+    93→    case 'truthy':
+    94→      return Boolean(actual);
+    95→    case 'falsy':
+    96→      return !actual;
+    97→    case 'exists':
+    98→      return actual !== undefined && actual !== null;
+    99→    case 'includes':
+   100→      return (
+   101→        Array.isArray(actual) &&
+   102→        actual.length > 0 &&
+   103→        (expected === undefined || actual.some((x) => JSON.stringify(x).includes(String(expected))))
+   104→      );
+   105→    default:
+   106→      return false;
+   107→  }
+   108→}
+   109→
+   110→export class Synthetics {
+   111→  private history = new Map<string, CheckRun[]>();
+   112→  private lastRunAt: string | null = null;
+   113→  private running = false;
+   114→  /** rularea în curs (dacă există) — _run așteaptă finalizarea ei */
+   115→  private inFlight: Promise<void> | null = null;
+   116→  private timer: ReturnType<typeof setInterval> | null = null;
+   117→
+   118→  constructor(private store: MetricsStore) {}
+   119→
+   120→  /** CELE 46 — construite din target-uri validate live. */
+   121→  static readonly CHECKS: CheckDef[] = [
+   122→    // ── homepage ×3 ────────────────────────────────────────────────────────
+   123→    { id: 'homepage-eu', name: 'Homepage eu', category: 'homepage', region: 'eu', target: 'http://localhost:3000/', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'bodyIncludes', text: '<' }] },
+   124→    { id: 'homepage-us', name: 'Homepage us', category: 'homepage', region: 'us', target: 'http://localhost:3000/', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }] },
+   125→    { id: 'homepage-asia', name: 'Homepage asia', category: 'homepage', region: 'asia', target: 'http://localhost:3000/', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }] },
+   126→
+   127→    // ── search ×4 (ruta reală: /api/search/advanced) ──────────────────────
+   128→    { id: 'search-eu', name: 'Căutare eu (q=big)', category: 'search', region: 'eu', target: `${GW}/api/search/advanced?q=big&region=eu`, method: 'GET', intervalSec: 60, note: '/api/search simplu nu există în router — ruta reală FAZA 18 e /api/search/advanced', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'total', op: 'gte', value: 1 }] },
+   129→    { id: 'search-us', name: 'Căutare us (q=big)', category: 'search', region: 'us', target: `${GW}/api/search/advanced?q=big&region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'total', op: 'gte', value: 1 }] },
+   130→    { id: 'search-asia', name: 'Căutare asia (q=big)', category: 'search', region: 'asia', target: `${GW}/api/search/advanced?q=big&region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'total', op: 'gte', value: 1 }] },
+   131→    { id: 'search-autocomplete-eu', name: 'Autocomplete eu (q=ka)', category: 'search', region: 'eu', target: `${GW}/api/search/autocomplete?q=ka&region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'suggestions', op: 'includes' }] },
+   132→
+   133→    // ── pipeline FAZA 18 ×3 (eu, asia + bonus us) ─────────────────────────
+   134→    { id: 'pipeline-status-eu', name: 'Pipeline integrat eu (10 straturi)', category: 'pipeline', region: 'eu', target: `${GW}/api/search/status?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'pipelineIntegrated', op: 'eq', value: true }, { type: 'json', path: 'pipelineStages', op: 'includes' }] },
+   135→    { id: 'pipeline-status-asia', name: 'Pipeline integrat asia', category: 'pipeline', region: 'asia', target: `${GW}/api/search/status?region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'pipelineIntegrated', op: 'eq', value: true }] },
+   136→    { id: 'pipeline-status-us', name: 'Pipeline integrat us', category: 'pipeline', region: 'us', target: `${GW}/api/search/status?region=us`, method: 'GET', intervalSec: 60, note: 'al 3-lea check liber (43→46)', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'pipelineIntegrated', op: 'eq', value: true }] },
+   137→
+   138→    // ── huburi FAZA 20 ×7 ─────────────────────────────────────────────────
+   139→    { id: 'hub-browse-eu', name: 'Hub browse eu', category: 'huburi', region: 'eu', target: `${GW}/api/hub/browse?limit=5&region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }, { type: 'json', path: 'data', op: 'includes' }] },
+   140→    { id: 'hub-browse-us', name: 'Hub browse us', category: 'huburi', region: 'us', target: `${GW}/api/hub/browse?limit=5&region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }] },
+   141→    { id: 'hub-browse-asia', name: 'Hub browse asia', category: 'huburi', region: 'asia', target: `${GW}/api/hub/browse?limit=5&region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }] },
+   142→    { id: 'hub-facets-eu', name: 'Hub facets eu (browse?facets=1)', category: 'huburi', region: 'eu', target: `${GW}/api/hub/browse?limit=1&facets=1&region=eu`, method: 'GET', intervalSec: 60, note: '/api/hub/facets nu există — facets se obțin din /api/hub/browse?facets=1 (rută reală FAZA 20)', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'facets', op: 'exists' }] },
+   143→    { id: 'hub-stats-us', name: 'Hub stats us', category: 'huburi', region: 'us', target: `${GW}/api/hub/stats?region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }, { type: 'json', path: 'totalItems', op: 'gt', value: 0 }] },
+   144→    { id: 'hub-scale-eu', name: 'Hub scale eu (real vs 30B logic)', category: 'huburi', region: 'eu', target: `${GW}/api/hub/scale?region=eu`, method: 'GET', intervalSec: 60, note: 'al 2-lea check liber', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }] },
+   145→    { id: 'hub-years-eu', name: 'Hub years eu (dimensiune anii)', category: 'huburi', region: 'eu', target: `${GW}/api/hub/years?region=eu`, method: 'GET', intervalSec: 60, note: '/api/hub/dimensions nu există — înlocuit onest cu /api/hub/years (rută reală FAZA 20)', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'data', op: 'includes' }] },
+   146→
+   147→    // ── feed 3-surse ×1 ───────────────────────────────────────────────────
+   148→    { id: 'feed-eu', name: 'Feed 3-surse eu', category: 'feed', region: 'eu', target: `${GW}/api/hub/feed?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }, { type: 'json', path: 'global.items', op: 'exists' }] },
+   149→
+   150→    // ── recomandări publice ×1 ────────────────────────────────────────────
+   151→    { id: 'recommendations-eu', name: 'Recomandări publice eu', category: 'recommendations', region: 'eu', target: `${GW}/api/hub/recommendations?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }, { type: 'json', path: 'real.items', op: 'exists' }] },
+   152→
+   153→    // ── history FAZA 21 ×2 (gating 401 fără token) ────────────────────────
+   154→    { id: 'history-gating-eu', name: 'Istoric gating 401 eu', category: 'history', region: 'eu', target: `${GW}/api/users/me/history?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 401 }] },
+   155→    { id: 'history-gating-us', name: 'Istoric gating 401 us', category: 'history', region: 'us', target: `${GW}/api/users/me/history?region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 401 }] },
+   156→
+   157→    // ── playlists FAZA 21 ×2 ──────────────────────────────────────────────
+   158→    { id: 'playlists-gating-eu', name: 'Playlist-uri gating 401 eu', category: 'playlists', region: 'eu', target: `${GW}/api/playlists?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 401 }] },
+   159→    { id: 'playlists-gating-asia', name: 'Playlist-uri gating 401 asia', category: 'playlists', region: 'asia', target: `${GW}/api/playlists?region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 401 }] },
+   160→
+   161→    // ── stats FAZA 21 ×2 ──────────────────────────────────────────────────
+   162→    { id: 'user-stats-gating-eu', name: 'Stats personale gating 401 eu', category: 'user-stats', region: 'eu', target: `${GW}/api/users/me/stats?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 401 }] },
+   163→    { id: 'user-stats-gating-us', name: 'Stats personale gating 401 us', category: 'user-stats', region: 'us', target: `${GW}/api/users/me/stats?region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 401 }] },
+   164→
+   165→    // ── player FAZA 17 ×3 (id 1907 verificat live) ────────────────────────
+   166→    { id: 'player-eu', name: 'Player cu surse eu (id 1907)', category: 'player', region: 'eu', target: `${GW}/api/content/1907/player?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'content.metadata.player.sources', op: 'includes' }] },
+   167→    { id: 'player-us', name: 'Player cu surse us (id 1907)', category: 'player', region: 'us', target: `${GW}/api/content/1907/player?region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'content.metadata.player.sources', op: 'includes' }] },
+   168→    { id: 'player-asia', name: 'Player cu surse asia (id 1907)', category: 'player', region: 'asia', target: `${GW}/api/content/1907/player?region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'content.metadata.player.sources', op: 'includes' }] },
+   169→
+   170→    // ── subtitrări WebVTT ×1 (rută reală FAZA 21) ─────────────────────────
+   171→    { id: 'subtitles-eu', name: 'Subtitrări WebVTT eu (id 1907)', category: 'subtitles', region: 'eu', target: `${GW}/api/player/subtitles/content/1907/subtitles?region=eu`, method: 'GET', intervalSec: 60, note: 'ruta reală e /api/player/subtitles/content/:id/subtitles (mount /api/player/subtitles + router FAZA 21)', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }, { type: 'json', path: 'data', op: 'exists' }] },
+   172→
+   173→    // ── AI Hub FAZA 16 ×2 ─────────────────────────────────────────────────
+   174→    { id: 'ai-hub-eu', name: 'AI Hub status eu', category: 'ai-hub', region: 'eu', target: `${GW}/api/ai/hub/status?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ais', op: 'includes' }] },
+   175→    { id: 'ai-hub-us', name: 'AI Hub status us', category: 'ai-hub', region: 'us', target: `${GW}/api/ai/hub/status?region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ais', op: 'includes' }] },
+   176→
+   177→    // ── AI Home FAZA 15 ×2 (ruta reală: /api/ai/home/stats) ───────────────
+   178→    { id: 'ai-home-eu', name: 'AI Home stats eu', category: 'ai-home', region: 'eu', target: `${GW}/api/ai/home/stats?region=eu`, method: 'GET', intervalSec: 60, note: '/api/ai/home/status nu există — rutele reale FAZA 15: feed/taxonomy/stats/metadata/browse/trailers', assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ai', op: 'eq', value: true }] },
+   179→    { id: 'ai-home-asia', name: 'AI Home stats asia', category: 'ai-home', region: 'asia', target: `${GW}/api/ai/home/stats?region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ai', op: 'eq', value: true }] },
+   180→
+   181→    // ── 30B logic ×3 ──────────────────────────────────────────────────────
+   182→    { id: 'scale30b-eu', name: '30B logic eu (addressSpace 30 mld)', category: 'scale-30b', region: 'eu', target: `${GW}/api/platform/scale/virtual?region=eu&limit=1`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'addressSpace', op: 'eq', value: 30000000000 }] },
+   183→    { id: 'scale30b-us', name: '30B logic us', category: 'scale-30b', region: 'us', target: `${GW}/api/platform/scale/virtual?region=us&limit=1`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'addressSpace', op: 'eq', value: 30000000000 }] },
+   184→    { id: 'scale30b-asia', name: '30B logic asia', category: 'scale-30b', region: 'asia', target: `${GW}/api/platform/scale/virtual?region=asia&limit=1`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'addressSpace', op: 'eq', value: 30000000000 }] },
+   185→
+   186→    // ── sharding FAZA 13 ×3 ───────────────────────────────────────────────
+   187→    { id: 'sharding-eu', name: 'Sharding cluster eu', category: 'sharding', region: 'eu', target: `${GW}/api/shards?region=eu`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'searchCluster.enabled', op: 'eq', value: true }, { type: 'json', path: 'searchCluster.nodes.0.healthy', op: 'eq', value: true }] },
+   188→    { id: 'sharding-us', name: 'Sharding cluster us', category: 'sharding', region: 'us', target: `${GW}/api/shards?region=us`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'searchCluster.enabled', op: 'eq', value: true }] },
+   189→    { id: 'sharding-asia', name: 'Sharding cluster asia', category: 'sharding', region: 'asia', target: `${GW}/api/shards?region=asia`, method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'searchCluster.enabled', op: 'eq', value: true }] },
+   190→
+   191→    // ── uptime interne ×7 ─────────────────────────────────────────────────
+   192→    { id: 'uptime-backend', name: 'Backend :4000 UP', category: 'uptime', region: 'local', target: 'http://localhost:4000/api/health', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'status', op: 'eq', value: 'ok' }] },
+   193→    { id: 'uptime-redis', name: 'Redis :4030 PING', category: 'uptime', region: 'local', target: 'resp://localhost:4030', method: 'RESP', intervalSec: 60, note: 'PING via client RESP propriu (node:net)', assertions: [{ type: 'bodyIncludes', text: '+PONG' }] },
+   194→    { id: 'uptime-gateway', name: 'Gateway :4040 UP', category: 'uptime', region: 'local', target: 'http://localhost:4040/api/infra/health', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }] },
+   195→    { id: 'uptime-realtime', name: 'Realtime :4010 UP', category: 'uptime', region: 'local', target: 'http://localhost:4010/', method: 'GET', intervalSec: 60, note: 'root răspunde 400 — orice răspuns HTTP = UP (ECONNREFUSED = DOWN)', assertions: [{ type: 'json', path: '__status__', op: 'gt', value: 0 }] },
+   196→    { id: 'uptime-watchdog', name: 'Watchdog :4020 UP', category: 'uptime', region: 'local', target: 'http://localhost:4020/health', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }] },
+   197→    { id: 'uptime-frontend', name: 'Frontend :3000 UP', category: 'uptime', region: 'local', target: 'http://localhost:3000/', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }] },
+   198→    { id: 'uptime-collector', name: 'Observability self :4050 UP', category: 'uptime', region: 'local', target: 'http://localhost:4050/health', method: 'GET', intervalSec: 60, assertions: [{ type: 'status', expected: 200 }, { type: 'json', path: 'ok', op: 'eq', value: true }] },
+   199→  ];
+   200→
+   201→  start(): void {
+   202→    // prima rulare completă după 5s (după ce serviciul e sus)
+   203→    setTimeout(() => void this.runAll(SYNTHETIC_CONCURRENCY), 5_000);
+   204→    this.timer = setInterval(() => {
+   205→      void this.runAll(SYNTHETIC_CONCURRENCY);
+   206→    }, SYNTHETIC_INTERVAL_SEC * 1000);
+   207→  }
+   208→
+   209→  stop(): void {
+   210→    if (this.timer) clearInterval(this.timer);
+   211→  }
+   212→
+   213→  /** rulează un singur check și înregistrează rezultatul. */
+   214→  async runCheck(def: CheckDef): Promise<CheckRun> {
+   215→    const started = Date.now();
+   216→    let status: CheckResult = 'pass';
+   217→    let error: string | null = null;
+   218→    let bodyText = '';
+   219→    let statusCode = 0;
+   220→    let json: unknown = null;
+   221→
+   222→    try {
+   223→      if (def.method === 'RESP') {
+   224→        const { probeRedis } = await import('./resp-client.ts');
+   225→        const probe = await probeRedis();
+   226→        statusCode = probe.ok ? 200 : 0;
+   227→        bodyText = probe.ok ? '+PONG' : probe.error ?? 'redis probe failed';
+   228→        json = { __status__: statusCode, pong: probe.ok, keys: probe.keys };
+   229→        if (!probe.ok) {
+   230→          status = 'fail';
+   231→          error = probe.error ?? 'redis probe failed';
+   232→        }
+   233→      } else {
+   234→        const controller = new AbortController();
+   235→        const timer = setTimeout(() => controller.abort(), SYNTHETIC_TIMEOUT_MS);
+   236→        const res = await fetch(def.target, { signal: controller.signal });
+   237→        clearTimeout(timer);
+   238→        statusCode = res.status;
+   239→        bodyText = await res.text();
+   240→        try {
+   241→          json = JSON.parse(bodyText);
+   242→        } catch {
+   243→          json = {};
+   244→        }
+   245→        // expune status-ul HTTP ca path special pentru asserții
+   246→        if (json && typeof json === 'object' && !Array.isArray(json)) {
+   247→          (json as Record<string, unknown>).__status__ = res.status;
+   248→        } else {
+   249→          json = { __status__: res.status, __value__: json };
+   250→        }
+   251→      }
+   252→
+   253→      if (status === 'pass') {
+   254→        for (const a of def.assertions) {
+   255→          if (a.type === 'status') {
+   256→            if (statusCode !== (a.expected ?? 200)) {
+   257→              status = 'fail';
+   258→              error = `status ${statusCode} != ${a.expected}`;
+   259→              break;
+   260→            }
+   261→          } else if (a.type === 'bodyIncludes') {
+   262→            if (!bodyText.includes(a.text ?? '')) {
+   263→              status = 'fail';
+   264→              error = `body nu conține "${a.text}"`;
+   265→              break;
+   266→            }
+   267→          } else if (a.type === 'json') {
+   268→            const { found, value } = resolvePath(json, a.path ?? '');
+   269→            if (!found) {
+   270→              status = 'fail';
+   271→              error = `path lipsă: ${a.path}`;
+   272→              break;
+   273→            }
+   274→            if (!compare(a.op, value, a.value)) {
+   275→              status = 'fail';
+   276→              error = `${a.path}=${JSON.stringify(value)} nu satisface ${a.op} ${JSON.stringify(a.value)}`;
+   277→              break;
+   278→            }
+   279→          }
+   280→        }
+   281→      }
+   282→    } catch (err) {
+   283→      status = 'fail';
+   284→      error = err instanceof Error ? err.message : String(err);
+   285→    }
+   286→
+   287→    const run: CheckRun = {
+   288→      ts: new Date().toISOString(),
+   289→      status,
+   290→      durationMs: Date.now() - started,
+   291→      error,
+   292→    };
+   293→    this.record(def, run);
+   294→    return run;
+   295→  }
+   296→
+   297→  private record(def: CheckDef, run: CheckRun): void {
+   298→    let hist = this.history.get(def.id);
+   299→    if (!hist) {
+   300→      hist = [];
+   301→      this.history.set(def.id, hist);
+   302→    }
+   303→    hist.push(run);
+   304→    if (hist.length > SYNTHETIC_HISTORY_MAX) hist.splice(0, hist.length - SYNTHETIC_HISTORY_MAX);
+   305→
+   306→    // metrici
+   307→    this.store.inc(
+   308→      'animaxia_synthetic_checks_total',
+   309→      { check: def.id, region: def.region, result: run.status },
+   310→      1,
+   311→      'Rulări synthetics per check/regiune/rezultat (FAZA 23)',
+   312→    );
+   313→    this.store.set(
+   314→      'animaxia_synthetic_duration_ms',
+   315→      { check: def.id },
+   316→      run.durationMs,
+   317→      'gauge',
+   318→      'Durata ultimei rulări a check-ului (ms)',
+   319→    );
+   320→  }
+   321→
+   322→  /** rulează toate cele 46 (staggered, limită concurență).
+   323→   *  staggerMs = pacing între porniri (default 1100ms — distribuie cele 46
+   324→   *  pe fereastra de 60s ca să rămână SUB propriul rate-limit al platformei:
+   325→   *  backend-ul FAZA 9/18 aplică 120 req/min/IP — good citizen, onest). */
+   326→  async runAll(
+   327→    concurrency: number,
+   328→    staggerMs = SYNTHETIC_STAGGER_MS,
+   329→  ): Promise<{
+   330→    total: number;
+   331→    passing: number;
+   332→    failing: number;
+   333→    durationMs: number;
+   334→  }> {
+   335→    if (this.running && this.inFlight) {
+   336→      // o rulare programată e deja în desfășurare — _run așteaptă finalizarea
+   337→      await this.inFlight;
+   338→      return this.summaryCounts();
+   339→    }
+   340→    this.running = true;
+   341→    const started = Date.now();
+   342→    const task = (async () => {
+   343→      try {
+   344→        const defs = Synthetics.CHECKS;
+   345→        const queue = [...defs];
+   346→        const workers: Promise<void>[] = [];
+   347→        // stagger ABSOLUT: check-ul N pornește la runStart + N×staggerMs
+   348→        // (delay relativ la pornirea rulării, nu la momentul dequeue —
+   349→        // evită compoundarea întârzierilor când execuția întârzie).
+   350→        let stagger = 0;
+   351→        const runStart = Date.now();
+   352→        for (let i = 0; i < concurrency; i++) {
+   353→          workers.push(
+   354→            (async () => {
+   355→              while (queue.length > 0) {
+   356→                const def = queue.shift();
+   357→                if (!def) break;
+   358→                const startAt = runStart + stagger;
+   359→                stagger += staggerMs;
+   360→                const sleepFor = Math.max(0, startAt - Date.now());
+   361→                await new Promise((r) => setTimeout(r, sleepFor));
+   362→                await this.runCheck(def);
+   363→              }
+   364→            })(),
+   365→          );
+   366→        }
+   367→        await Promise.all(workers);
+   368→        this.lastRunAt = new Date().toISOString();
+   369→
+   370→        const counts = this.summaryCounts();
+   371→        this.store.set(
+   372→          'animaxia_synthetic_pass_ratio',
+   373→          {},
+   374→          counts.total > 0 ? counts.passing / counts.total : 0,
+   375→          'gauge',
+   376→          'Rata de trecere a celor 46 synthetics (ultimele rezultate)',
+   377→        );
+   378→      } finally {
+   379→        this.running = false;
+   380→        this.inFlight = null;
+   381→      }
+   382→    })();
+   383→    this.inFlight = task;
+   384→    await task;
+   385→    const counts = this.summaryCounts();
+   386→    return { ...counts, durationMs: Date.now() - started };
+   387→  }
+   388→
+   389→  private summaryCounts(): { total: number; passing: number; failing: number; durationMs: 0 } {
+   390→    let passing = 0;
+   391→    let failing = 0;
+   392→    for (const def of Synthetics.CHECKS) {
+   393→      const hist = this.history.get(def.id);
+   394→      const last = hist?.[hist.length - 1];
+   395→      if (!last) continue;
+   396→      if (last.status === 'pass') passing++;
+   397→      else failing++;
+   398→    }
+   399→    return { total: Synthetics.CHECKS.length, passing, failing, durationMs: 0 };
+   400→  }
+   401→
+   402→  /** GET /api/synthetics. */
+   403→  view() {
+   404→    const counts = this.summaryCounts();
+   405→    const byRegion: Record<string, { passing: number; total: number }> = {
+   406→      eu: { passing: 0, total: 0 },
+   407→      us: { passing: 0, total: 0 },
+   408→      asia: { passing: 0, total: 0 },
+   409→      local: { passing: 0, total: 0 },
+   410→    };
+   411→    const checks = Synthetics.CHECKS.map((def) => {
+   412→      const hist = this.history.get(def.id) ?? [];
+   413→      const last = hist[hist.length - 1];
+   414→      const passing = last?.status === 'pass';
+   415→      if (last) {
+   416→        byRegion[def.region].total++;
+   417→        if (passing) byRegion[def.region].passing++;
+   418→      }
+   419→      const failures24h = hist.filter(
+   420→        (h) => h.status === 'fail' && Date.now() - Date.parse(h.ts) < 24 * 3600 * 1000,
+   421→      ).length;
+   422→      return {
+   423→        id: def.id,
+   424→        name: def.name,
+   425→        category: def.category,
+   426→        region: def.region,
+   427→        target: def.target,
+   428→        method: def.method,
+   429→        assertions: def.assertions,
+   430→        intervalSec: def.intervalSec,
+   431→        note: def.note,
+   432→        lastStatus: last?.status ?? 'never',
+   433→        lastDurationMs: last?.durationMs ?? null,
+   434→        lastError: last?.error ?? null,
+   435→        lastRunAt: last?.ts ?? null,
+   436→        passing,
+   437→        runs: hist.length,
+   438→        failures24h,
+   439→      };
+   440→    });
+   441→    return {
+   442→      total: counts.total,
+   443→      passing: counts.passing,
+   444→      failing: counts.failing,
+   445→      lastRunAt: this.lastRunAt,
+   446→      byRegion,
+   447→      checks,
+   448→    };
+   449→  }
+   450→
+   451→  historyFor(id: string): { id: string; history: CheckRun[] } | null {
+   452→    if (!Synthetics.CHECKS.some((c) => c.id === id)) return null;
+   453→    return { id, history: [...(this.history.get(id) ?? [])].reverse() };
+   454→  }
+   455→
+   456→  recentFailures(n: number): { id: string; name: string; error: string | null; ts: string }[] {
+   457→    const out: { id: string; name: string; error: string | null; ts: string }[] = [];
+   458→    for (const def of Synthetics.CHECKS) {
+   459→      const last = (this.history.get(def.id) ?? []).slice(-1)[0];
+   460→      if (last && last.status === 'fail') {
+   461→        out.push({ id: def.id, name: def.name, error: last.error, ts: last.ts });
+   462→      }
+   463→    }
+   464→    return out.slice(0, n);
+   465→  }
+   466→
+   467→  async runNow(): Promise<{ total: number; passing: number; failing: number; durationMs: number }> {
+   468→    // pacing mai alert decât rularea programată, dar sub rate-limit-ul platformei
+   469→    return this.runAll(SYNTHETIC_RUN_CONCURRENCY, SYNTHETIC_RUN_STAGGER_MS);
+   470→  }
+   471→}
+   472→

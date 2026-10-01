@@ -1,0 +1,190 @@
+name: Ops CI
+
+# FAZA 9 — Ops & Observability CI.
+#
+#   synthetics — daily (06:00 UTC) + on push: boots the REAL monolith with
+#                repo secrets (Neon + TMDB), then runs the 29-check synthetic
+#                suite (animaxia-ops/synthetics). Skips gracefully when the
+#                secrets are not configured.
+#   edge        — on push: typecheck + guard lint + hermetic smoke (159
+#                checks, no credentials); when DATABASEURL is available it
+#                also starts the monolith and runs the full pipeline
+#                including the live e2e (35 checks, edge → cloud → Neon).
+#   desktop     — on push: tsc strict + guard lint + 55-check smoke matrix.
+#
+# NOTE: this file ships inside animaxia-ops/ (per-phase convention, like
+# animaxia-edge/.github/workflows/edge-deploy.yml). To activate it on a real
+# Git host, copy it to the repository root .github/workflows/ops-ci.yml.
+#
+# Required repo secrets (same matrix as the edge layer):
+#   DATABASEURL  — Neon PostgreSQL connection string (sslmode=require)
+#   TMDBAPIKEY   — TMDB v3 API key
+#   AUTHSECRET   — JWT signing secret for the cloud auth-service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "animaxia-ops/**"
+      - "animaxia-edge/**"
+      - "animaxia-desktop/**"
+      - "mini-services/**"
+      - ".github/workflows/ops-ci.yml"
+  schedule:
+    - cron: "0 6 * * *" # daily synthetic checks
+  workflow_dispatch:
+
+jobs:
+  synthetics:
+    name: Daily synthetics (live platform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Check secrets
+        id: secrets
+        run: |
+          if [ -n "$DATABASEURL" ] && [ -n "$TMDBAPIKEY" ] && [ -n "$AUTHSECRET" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DATABASEURL/TMDBAPIKEY/AUTHSECRET secrets missing — synthetics skipped."
+          fi
+        env:
+          DATABASEURL: ${{ secrets.DATABASEURL }}
+          TMDBAPIKEY: ${{ secrets.TMDBAPIKEY }}
+          AUTHSECRET: ${{ secrets.AUTHSECRET }}
+
+      - name: Install monolith dependencies
+        if: steps.secrets.outputs.available == 'true'
+        working-directory: mini-services/animaxia-backend
+        run: bun install
+
+      - name: Write runtime .env
+        if: steps.secrets.outputs.available == 'true'
+        working-directory: mini-services/animaxia-backend
+        run: |
+          {
+            echo "DATABASEURL=$DATABASEURL"
+            echo "TMDBAPIKEY=$TMDBAPIKEY"
+            echo "AUTHSECRET=$AUTHSECRET"
+            echo "NODE_ENV=production"
+          } > .env
+        env:
+          DATABASEURL: ${{ secrets.DATABASEURL }}
+          TMDBAPIKEY: ${{ secrets.TMDBAPIKEY }}
+          AUTHSECRET: ${{ secrets.AUTHSECRET }}
+
+      - name: Boot the monolith (:4000)
+        if: steps.secrets.outputs.available == 'true'
+        working-directory: mini-services/animaxia-backend
+        run: |
+          (setsid bun run dev > log 2>&1 < /dev/null &)
+          for i in $(seq 1 40); do
+            sleep 2
+            if curl -sf --max-time 5 http://localhost:4000/api/health | grep -q '"connected":true'; then
+              echo "monolith healthy"; exit 0
+            fi
+          done
+          echo "::error::monolith failed to become healthy"; tail -40 log; exit 1
+
+      - name: Run synthetics
+        if: steps.secrets.outputs.available == 'true'
+        working-directory: animaxia-ops
+        run: bun run ops:synthetics:json
+
+  edge:
+    name: Edge tests (hermetic + live e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install edge dependencies
+        working-directory: animaxia-edge
+        run: bun install
+
+      - name: Check DATABASEURL secret (for the live e2e)
+        id: db
+        run: |
+          if [ -n "$DATABASEURL" ]; then echo "available=true" >> "$GITHUB_OUTPUT";
+          else echo "available=false" >> "$GITHUB_OUTPUT";
+            echo "::notice::DATABASEURL missing — running the hermetic pipeline only."; fi
+        env:
+          DATABASEURL: ${{ secrets.DATABASEURL }}
+
+      # tests/e2e-edge.mjs reads the backend .env from the absolute sandbox
+      # path /home/z/my-project/... — mirror the checkout there.
+      - name: Mirror checkout to the sandbox path
+        if: steps.db.outputs.available == 'true'
+        run: sudo mkdir -p /home/z && sudo ln -s "$GITHUB_WORKSPACE" /home/z/my-project
+
+      - name: Install monolith dependencies
+        if: steps.db.outputs.available == 'true'
+        working-directory: mini-services/animaxia-backend
+        run: bun install
+
+      - name: Write runtime .env + boot monolith
+        if: steps.db.outputs.available == 'true'
+        working-directory: mini-services/animaxia-backend
+        run: |
+          {
+            echo "DATABASEURL=$DATABASEURL"
+            echo "TMDBAPIKEY=${TMDBAPIKEY:-}"
+            echo "AUTHSECRET=${AUTHSECRET:-ci-secret}"
+          } > .env
+          (setsid bun run dev > log 2>&1 < /dev/null &)
+          for i in $(seq 1 40); do
+            sleep 2
+            if curl -sf --max-time 5 http://localhost:4000/api/health | grep -q '"connected":true'; then
+              echo "monolith healthy"; exit 0
+            fi
+          done
+          echo "::error::monolith failed to become healthy"; tail -40 log; exit 1
+        env:
+          DATABASEURL: ${{ secrets.DATABASEURL }}
+          TMDBAPIKEY: ${{ secrets.TMDBAPIKEY }}
+          AUTHSECRET: ${{ secrets.AUTHSECRET }}
+
+      - name: Full pipeline (typecheck + smoke + live e2e)
+        if: steps.db.outputs.available == 'true'
+        working-directory: animaxia-edge
+        run: bun run test
+
+      - name: Hermetic pipeline (typecheck + smoke only)
+        if: steps.db.outputs.available != 'true'
+        working-directory: animaxia-edge
+        run: bun run typecheck && bun run lint && bun run test:smoke
+
+  desktop:
+    name: Desktop QA (tsc + lint + smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install desktop dependencies
+        working-directory: animaxia-desktop
+        run: bun install
+
+      - name: Typecheck (strict)
+        working-directory: animaxia-desktop
+        run: bun run typecheck
+
+      - name: Guard lint
+        working-directory: animaxia-desktop
+        run: bun run lint
+
+      - name: Smoke matrix (55 checks)
+        working-directory: animaxia-desktop
+        run: bun run test:smoke

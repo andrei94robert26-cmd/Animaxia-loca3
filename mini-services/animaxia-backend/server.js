@@ -520,7 +520,7 @@ app.get(
       const latencyMs = Date.now() - t0;
       let totalItems = null;
       try {
-        totalItems = (await withTimeout(dbQuery('SELECT COUNT(*)::int AS n FROM content'), 2000)).rows[0].n;
+        totalItems = (await withTimeout(dbQuery('SELECT COUNT(*) AS n FROM content'), 2000)).rows[0].n;
       } catch { /* onest: count indisponibil, ping-ul e suficient */ }
       res.json({
         ok: true,

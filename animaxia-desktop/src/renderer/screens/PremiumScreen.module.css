@@ -1,0 +1,103 @@
+/* PremiumScreen.module.css — premium status, checkout sheet and quota tiles. */
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cardTitle {
+  font-size: 14.5px;
+  font-weight: 800;
+  flex: 1;
+}
+
+.anonNote {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.anonNote p {
+  margin: 0;
+  flex: 1;
+  min-width: 200px;
+}
+
+.noticeCard {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-color: var(--emerald-line);
+  background: var(--emerald-tint);
+  color: var(--emerald);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.upgradeError {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pendingCard {
+  border-color: var(--rose-line);
+}
+
+.pendingTitle {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.sessionId {
+  overflow-wrap: anywhere;
+}
+
+.usageValue {
+  color: var(--rose-soft);
+  font-weight: 800;
+  font-size: 11.5px;
+}
+
+.quotaCard {
+  margin-top: 4px;
+}
+
+.quotaGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .quotaGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.quotaTile {
+  background: var(--card-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.quotaValue {
+  font-size: 17px;
+  font-weight: 900;
+}
+
+.cancelCard {
+  border-color: var(--red);
+}

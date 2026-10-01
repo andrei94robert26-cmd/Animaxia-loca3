@@ -1,0 +1,14 @@
+      samples_ranked AS (
+        SELECT ${YEAR_INT} AS year, id, title, thumbnail, type,
+               ROW_NUMBER() OVER (
+                 PARTITION BY ${YEAR_INT}
+                 ORDER BY ${RATING_NUM} DESC NULLS LAST, id ASC
+               ) AS rn
+        FROM content
+        WHERE ${YEAR_INT} IS NOT NULL
+      ),
+      samples AS (
+        SELECT year, id, title, thumbnail, type
+        FROM samples_ranked
+        WHERE rn = 1
+      )

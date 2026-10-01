@@ -1,0 +1,32 @@
+# =============================================================================
+# Animaxia — Grafana provisioning: GLOBAL dashboards (FAZA 23)
+# =============================================================================
+# Loaded by the `grafana` container of
+# observability/global/docker-compose.global-observability.yml
+# (profile "faza23" — never starts by default). The container mounts
+# ../../observability/global/grafana/provisioning → /etc/grafana/provisioning,
+# so dashboards/ next to this file is picked up automatically.
+#
+# The 4 FAZA 23 dashboards (faza23-pipeline.json, faza23-huburi.json,
+# faza23-player.json, faza23-global.json) are GENERATED from the single source
+# of truth — mini-services/animaxia-observability/modules/dashboards.ts — via
+# `bun scripts/gen-dashboards.ts`, with the datasource uid swapped to the
+# GLOBAL Prometheus (animaxia-prometheus-global, see ../datasources/).
+# The animaxia-ops/dashboards/faza23-*.json copies keep the per-region
+# datasource uid (animaxia-prometheus) per the FAZA 23 spec.
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: animaxia-faza23
+    orgId: 1
+    folder: FAZA 23
+    folderUid: faza23
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

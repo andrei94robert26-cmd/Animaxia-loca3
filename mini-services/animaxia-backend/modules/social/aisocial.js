@@ -24,7 +24,6 @@
 
 import express from 'express';
 import { rows, one, parseJsonb, num } from '../platform/sql.js';
-import { assertPostgres } from '../platform/sql.js';
 import { requireAuth } from '../users/auth.js';
 import { clientIpOf } from '../security/security.js';
 import { consumeAiQuota, llmComplete } from '../aicloud/llm-core.js';
@@ -67,7 +66,6 @@ socialAiRouter.get(
   '/home',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
 
     const friendsAlsoWatched = await rows(
@@ -76,13 +74,13 @@ socialAiRouter.get(
               AVG(fs.rating) AS avgrating,
               ARRAY_AGG(DISTINCT fs.username) AS friendnames
        FROM (
-         SELECT wh.userid, wh.contentid, NULL::numeric AS rating, u.username
+         SELECT wh.userid, wh.contentid, NULL AS rating, u.username
          FROM follows f
          JOIN watchhistory wh ON wh.userid = f.followeeid
          JOIN users u ON u.id = wh.userid
          WHERE f.followerid = $1
          UNION
-         SELECT wl.userid, wl.contentid, NULL::numeric, u.username
+         SELECT wl.userid, wl.contentid, NULL, u.username
          FROM follows f
          JOIN watchlist wl ON wl.userid = f.followeeid
          JOIN users u ON u.id = wl.userid
@@ -205,7 +203,6 @@ socialAiRouter.post(
   '/review-digest/:contentId',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const contentId = parseId(req.params.contentId);
     if (!Number.isInteger(contentId)) return res.status(400).json({ error: 'Invalid content id' });
 

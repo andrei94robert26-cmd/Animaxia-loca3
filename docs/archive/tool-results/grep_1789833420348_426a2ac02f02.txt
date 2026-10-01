@@ -1,0 +1,213 @@
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:40:import { BrandPlaceholder, TypeBadge } from '@/components/animaxia/states';
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:344:                      <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:522:                        placeholder="Playlist nou…"
+/home/z/my-project/src/components/animaxia/player/playlist-queue.tsx:601:            <BrandPlaceholder title={next.title} />
+/home/z/my-project/src/components/animaxia/player/endgame-recommendations.tsx:22:import { BrandPlaceholder, TypeBadge } from '@/components/animaxia/states';
+/home/z/my-project/src/components/animaxia/player/endgame-recommendations.tsx:104:                    <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/player/player-controls.tsx:25: * through `onError` so the existing source fallback chain keeps working
+/home/z/my-project/src/components/animaxia/player/player-controls.tsx:91:  /** Fatal load error — delegated to the FAZA 17 fallback chain. */
+/home/z/my-project/src/components/animaxia/player/player-dock.tsx:22: * cannot be kept alive across pages, so `minimizeToDock` is simply never
+/home/z/my-project/src/components/animaxia/player/player-dock.tsx:67:  minimizeToDock: (state: DockState) => void;
+/home/z/my-project/src/components/animaxia/player/player-dock.tsx:85:  const minimizeToDock = useCallback((state: DockState) => {
+/home/z/my-project/src/components/animaxia/player/player-dock.tsx:92:    () => ({ docked, minimizeToDock, restore, close }),
+/home/z/my-project/src/components/animaxia/player/player-dock.tsx:93:    [docked, minimizeToDock, restore, close],
+/home/z/my-project/src/components/animaxia/content-social.tsx:30:import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+/home/z/my-project/src/components/animaxia/content-social.tsx:146:          /* anonymous fallback below */
+/home/z/my-project/src/components/animaxia/content-social.tsx:311:  placeholder = 'Share your thoughts…',
+/home/z/my-project/src/components/animaxia/content-social.tsx:318:  placeholder?: string;
+/home/z/my-project/src/components/animaxia/content-social.tsx:367:          placeholder={placeholder}
+/home/z/my-project/src/components/animaxia/content-social.tsx:372:          className="min-h-16 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/content-social.tsx:400:      <AvatarFallback className="bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30 text-[11px] font-bold text-rose-200">
+/home/z/my-project/src/components/animaxia/content-social.tsx:402:      </AvatarFallback>
+/home/z/my-project/src/components/animaxia/content-social.tsx:515:              placeholder={`Reply to ${comment.user?.username ?? 'this comment'}…`}
+/home/z/my-project/src/components/animaxia/ai-home-settings.tsx:37:const FALLBACK_CONTEXT: AiHomeSettingsContextValue = {
+/home/z/my-project/src/components/animaxia/ai-home-settings.tsx:43:const AiHomeSettingsContext = createContext<AiHomeSettingsContextValue>(FALLBACK_CONTEXT);
+/home/z/my-project/src/components/animaxia/content-preview.tsx:28:import { BrandPlaceholder, RatingBadge, TypeBadge } from '@/components/animaxia/states';
+/home/z/my-project/src/components/animaxia/content-preview.tsx:186:                  <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:283:                {digest.degraded ? ' · degraded (mock) mode' : ''}
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:334:                    placeholder="Sum it up in a line…"
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:335:                    className="h-10 border-white/10 bg-black/40 text-sm text-zinc-100 placeholder:text-zinc-600"
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:348:                  placeholder="What worked, what didn't — spoiler-free is kinder (10–4000 characters)."
+/home/z/my-project/src/components/animaxia/content-reviews.tsx:349:                  className="custom-scrollbar border-white/10 bg-black/40 text-sm text-zinc-100 placeholder:text-zinc-600"
+/home/z/my-project/src/components/animaxia/error-boundary.tsx:23:  /** Fallback card title (default: "Ceva s-a stricat aici"). */
+/home/z/my-project/src/components/animaxia/admin/admin-search-flow-tab.tsx:81:/** HH:MM:SS clock label for the history X axis (samples are 1 s apart). */
+/home/z/my-project/src/components/animaxia/admin/admin-search-flow-tab.tsx:405:      {/* Banner — the FAZA 15 promise: the queue never fakes a search. */}
+/home/z/my-project/src/components/animaxia/admin/admin-search-opt-tab.tsx:85:/** HH:MM:SS clock label for the history X axis (samples are 1 s apart). */
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:9: * projection card (demand math + the real 500-concurrent sample + the 7
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:591:            value={run ? `${fmtRoNum(run.projection10M.realSample.neonExecutions)} Neon` : '—'}
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:595:                ? `${fmtRoNum(run.projection10M.realSample.users)} concurenți → reducere ${fmtFactor(run.projection10M.realSample.reductionFactor)}`
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:715:                eșantion REAL de {fmtRoNum(run.projection10M.realSample.users)} concurenți (virful benzii
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:739:                    value: `${fmtRoNum(run.projection10M.realSample.neonExecutions)} Neon`,
+/home/z/my-project/src/components/animaxia/admin/admin-search-full-tab.tsx:740:                    sub: `reducere măsurată ${fmtFactor(run.projection10M.realSample.reductionFactor)} · 0 pierdute`,
+/home/z/my-project/src/components/animaxia/admin/admin-shards-tab.tsx:179:    if (!cluster?.enabled) return `${label} cluster disabled — Neon direct + edge KV fallback`;
+/home/z/my-project/src/components/animaxia/admin/admin-search-rate-tab.tsx:77:/** HH:MM:SS clock label for the history X axis (samples are 1 s apart). */
+/home/z/my-project/src/components/animaxia/admin/admin-search-rate-tab.tsx:336:      {/* Banner — the FAZA 16 promise: pacing never fakes or delays a search. */}
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:239:                placeholder="acme"
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:249:                placeholder="ACME Streaming"
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:380:          placeholder="account email…"
+/home/z/my-project/src/components/animaxia/admin/admin-tenants-tab.tsx:741:        <p className="text-[11px] text-zinc-500">{d?.provider?.available ? `available (fallback ${d.provider.fallback})` : 'degraded'}</p>
+/home/z/my-project/src/components/animaxia/admin/admin-analytics-tab.tsx:77:          <p className="mt-1 text-xs text-zinc-600">Demo admin: admin@animaxia.test</p>
+/home/z/my-project/src/components/animaxia/admin/admin-workers-tab.tsx:142:          <p className="mt-1 text-xs text-zinc-600">Demo admin: admin@animaxia.test</p>
+/home/z/my-project/src/components/animaxia/admin/admin-security-tab.tsx:116:          <p className="mt-1 text-xs text-zinc-600">Demo admin: admin@animaxia.test</p>
+/home/z/my-project/src/components/animaxia/admin/admin-miner-tab.tsx:247:                  <SelectValue placeholder="Type" />
+/home/z/my-project/src/components/animaxia/admin/admin-miner-tab.tsx:264:                placeholder="global"
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:13: * Everything is REAL data from Neon — no mocks.
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:247:                placeholder="ex. 2"
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:259:                placeholder="ex. Română"
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:271:                placeholder="ro"
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:285:              placeholder={'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nText subtitrare'}
+/home/z/my-project/src/components/animaxia/admin/admin-playerhub-tab.tsx:314:                placeholder="ex. 2"
+/home/z/my-project/src/components/animaxia/footer.tsx:147:          <p className="text-xs text-zinc-600">© 2025 Animaxia — built for demonstration purposes.</p>
+/home/z/my-project/src/components/animaxia/states.tsx:146:export function BrandPlaceholder({ title }: { title: string }) {
+/home/z/my-project/src/components/animaxia/content-card.tsx:5: * Handles image fallback, badges, hover play affordance and navigation.
+/home/z/my-project/src/components/animaxia/content-card.tsx:28:import { BrandPlaceholder, RatingBadge, TypeBadge } from './states';
+/home/z/my-project/src/components/animaxia/content-card.tsx:143:          <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/hero-carousel.tsx:14:import { BrandPlaceholder, RatingBadge, TypeBadge } from './states';
+/home/z/my-project/src/components/animaxia/hero-carousel.tsx:60:            <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:32:import { BrandPlaceholder, ErrorState, TypeBadge } from './states';
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:399:          placeholder={`Ask about ${title}…`}
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:403:          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/content-ai-panel.tsx:648:          <BrandPlaceholder title={pick.title} />
+/home/z/my-project/src/components/animaxia/home-panels.tsx:157:          placeholder="Lipștește un link: MP4 / HLS / DASH, iframe, embed sau YouTube…"
+/home/z/my-project/src/components/animaxia/home-panels.tsx:159:          className="h-11 border-white/10 bg-white/5 pl-9 text-sm text-zinc-100 placeholder:text-zinc-500"
+/home/z/my-project/src/components/animaxia/views/mobile-view.tsx:82:function PhoneMockup({
+/home/z/my-project/src/components/animaxia/views/mobile-view.tsx:637:            <PhoneMockup
+/home/z/my-project/src/components/animaxia/views/mobile-view.tsx:751:      {/* Empty-home fallback */}
+/home/z/my-project/src/components/animaxia/views/feed-view.tsx:21:import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/views/feed-view.tsx:313:          <BrandPlaceholder title={content.title} />
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:5: * the left, gradient feature panel on lg+), demo-account chip, inline
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:31:const DEMO_ACCOUNT = { email: 'admin@animaxia.test', password: 'SuperSecret1' };
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:42:  'h-11 border-white/10 bg-white/5 text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-rose-500/50';
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:101:          placeholder="you@example.com"
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:116:          placeholder="••••••••"
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:131:      {/* Demo account */}
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:137:            setEmail(DEMO_ACCOUNT.email);
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:138:            setPassword(DEMO_ACCOUNT.password);
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:142:          aria-label="Use demo admin account"
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:145:          Use demo admin
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:203:          placeholder="kaguya_fan_99"
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:223:          placeholder="you@example.com"
+/home/z/my-project/src/components/animaxia/views/auth-view.tsx:238:          placeholder="••••••••"
+/home/z/my-project/src/components/animaxia/social/social-ui.tsx:6: * fallback avatars, plan chips, navigable content mini-cards and the
+/home/z/my-project/src/components/animaxia/social/social-ui.tsx:14:import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+/home/z/my-project/src/components/animaxia/social/social-ui.tsx:17:import { BrandPlaceholder, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/social/social-ui.tsx:57:      <AvatarFallback className="bg-gradient-to-br from-rose-500 to-fuchsia-600 text-[11px] font-black text-white">
+/home/z/my-project/src/components/animaxia/social/social-ui.tsx:59:      </AvatarFallback>
+/home/z/my-project/src/components/animaxia/social/social-ui.tsx:125:          <BrandPlaceholder title={content.title} />
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:7: * and a REST fallback for chat when the socket is down. Reuses the
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:421:    /* REST fallback (socket down): optimistic append, replaced by the reply. */
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:923:                  placeholder={socketConnected ? 'Message the party…' : 'Chat (offline — sends via server)'}
+/home/z/my-project/src/components/animaxia/social/party-room.tsx:926:                  className="border-white/10 bg-black/40 text-sm text-zinc-100 placeholder:text-zinc-500"
+/home/z/my-project/src/components/animaxia/views/meta-view.tsx:50:  /* Sibling values power the quick-switch chips + the default value fallback
+/home/z/my-project/src/components/animaxia/navbar.tsx:31:import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+/home/z/my-project/src/components/animaxia/navbar.tsx:142:                placeholder="Search titles…"
+/home/z/my-project/src/components/animaxia/navbar.tsx:144:                className="h-9 w-40 border-white/10 bg-white/5 pl-9 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-rose-500/50 2xl:w-52"
+/home/z/my-project/src/components/animaxia/navbar.tsx:173:                    <AvatarFallback className="bg-gradient-to-br from-rose-500 to-fuchsia-600 text-xs font-black text-white">
+/home/z/my-project/src/components/animaxia/navbar.tsx:175:                    </AvatarFallback>
+/home/z/my-project/src/components/animaxia/navbar.tsx:259:                      placeholder="Search titles…"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:53:import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:442:            placeholder="Search people by username…"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:444:            className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:993:                placeholder="XXXXXX"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:996:                className="h-10 rounded-xl border-white/10 bg-black/40 font-mono text-sm font-bold tracking-[0.25em] text-zinc-100 placeholder:tracking-[0.25em] placeholder:text-zinc-600"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1052:                      <BrandPlaceholder title={p.content.title} />
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1173:            placeholder="Search the library…"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1175:            className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1204:                        <BrandPlaceholder title={c.title} />
+/home/z/my-project/src/components/animaxia/views/social-view.tsx:1397:          <BrandPlaceholder title={title} />
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:220:                Local fallback
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:300:              <SelectValue placeholder="Type" />
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:447:    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:516:                  placeholder="https://example.com/page-or-stream"
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:524:                    <SelectValue placeholder="Type" />
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:541:                  placeholder="Optional — defaults to the URL"
+/home/z/my-project/src/components/animaxia/views/admin-view.tsx:964:          <p className="mt-1 text-xs text-zinc-600">Demo admin: admin@animaxia.test</p>
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:60:import { BrandPlaceholder, EmptyState, ErrorState, LoadingCards, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:165:/** Amber "offline / degraded" chip shown when the LLM fell back to mock mode. */
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:284:          placeholder="Search the library…"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:293:          className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:324:                      <BrandPlaceholder title={s.title} />
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:344:                <BrandPlaceholder title={selected.title} />
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:582:          <BrandPlaceholder title={c.title} />
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:755:              placeholder="e.g. Neon Requiem"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:757:              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:790:                placeholder="e.g. Sci-Fi, Action, Thriller"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:792:                className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1004:          placeholder={selected ? `Ask about ${selected.title}…` : 'Pick a title first…'}
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1009:          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30 disabled:opacity-50"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1218:          <BrandPlaceholder title={pick.title} />
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1250:          <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1557:          placeholder="Ask the Animaxia Assistant…"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1561:          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1683:              placeholder="e.g. mind-bending sci-fi with a great ending"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1685:              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1752:                      <BrandPlaceholder title={pick.title} />
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1911:              placeholder="e.g. Why would I like this? Is the ending good?"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:1913:              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:2127:          placeholder={selected ? `Ask about ${selected.title}…` : 'Pick a title first…'}
+/home/z/my-project/src/components/animaxia/views/ai-view.tsx:2132:          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30 disabled:opacity-50"
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:52:import { BrandPlaceholder, ErrorState, RatingBadge, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:401:      subtitle="Sarcină generată în-proces pe nodul live — nu un demo: fiecare cerere lovește motorul real."
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:475:              placeholder="termen de căutat"
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:477:              className="mt-1 border-white/15 bg-black/30 text-zinc-100 placeholder:text-zinc-600"
+/home/z/my-project/src/components/animaxia/views/stability-lab-view.tsx:597:          <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/views/edge-view.tsx:61:    role: 'Fuzzy search + autocomplete over a KV catalog snapshot built from /api/all (paged); cloud fallback when the catalog is unavailable.',
+/home/z/my-project/src/components/animaxia/views/edge-view.tsx:107:  { prefix: '/search · /autocomplete', target: 'edge-search (fallback /api/search/*)', cached: 'in-memory fuzzy index' },
+/home/z/my-project/src/components/animaxia/views/edge-view.tsx:108:  { prefix: '/auth/*', target: 'edge-auth (fallback /api/auth/*)', cached: 'never (bypass list)' },
+/home/z/my-project/src/components/animaxia/views/edge-view.tsx:109:  { prefix: '/player/* · /hls', target: 'edge-player (fallback /api/mobile/player/*)', cached: 'manifest 30s · segments 1h' },
+/home/z/my-project/src/components/animaxia/views/edge-view.tsx:110:  { prefix: '/analytics/* · /beacon', target: 'edge-analytics (fallback /api/analytics/*)', cached: 'never (writes)' },
+/home/z/my-project/src/components/animaxia/views/edge-view.tsx:287:            <CardDescription>Service bindings cu fallback la cloud — fiecare binding e opțional la runtime.</CardDescription>
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:35:import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:96:function errorMessage(err: unknown, fallback: string): string {
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:97:  return err instanceof Error ? err.message : fallback;
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:147:            <AvatarFallback className="bg-gradient-to-br from-rose-500 to-fuchsia-600 text-2xl font-black text-white">
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:149:            </AvatarFallback>
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:509:  placeholder,
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:516:  placeholder: string;
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:541:          placeholder={placeholder}
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:543:          className="h-11 flex-1 border-white/10 bg-white/5 text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-rose-500/50"
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:659:        placeholder="e.g. Sci-Fi, Shounen, Thriller…"
+/home/z/my-project/src/components/animaxia/views/profile-view.tsx:669:        placeholder="e.g. Naruto, Marvel, Lord of the Rings…"
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:598:          placeholder="Caută semantic: „desert planet science fiction”…"
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:903:              <SelectValue placeholder="Alege un titlu" />
+/home/z/my-project/src/components/animaxia/views/ai-hub-view.tsx:918:              <SelectValue placeholder="Limbă" />
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:11: * FAZA 17 — hardening: a real fallback chain over `sources`. mp4/HLS errors
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:80:import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:103:    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:247:              placeholder="https://example.com/pagina-sau-stream"
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:327:  const { minimizeToDock } = usePlayerDock();
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:334:  /* FAZA 17 — source fallback chain. `sourceIndex` walks data.sources on any
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:454:  /* New title (route change) → reset the fallback chain before the new data
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:838:  const handleMinimizeToDock = () => {
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:843:    minimizeToDock({
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:905:                onClick={handleMinimizeToDock}
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:1021:                      placeholder="https://example.com/page-or-stream"
+/home/z/my-project/src/components/animaxia/views/player-view.tsx:1369:                      <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/views/scale-report-view.tsx:322:              hint={`${m.searchLatency.samples} eșantioane`}
+/home/z/my-project/src/components/animaxia/category-panels.tsx:143:          placeholder="Numele colecției noi — ex. „Anime de vazut”, „Filme de familie”…"
+/home/z/my-project/src/components/animaxia/category-panels.tsx:262:              placeholder="Caută în bibliotecă…"
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:17: * into one height-preserving placeholder each, and a MAX_LOADED_PAGES memory
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:74:/** Placeholder for a contiguous group of loaded-but-hidden pages: keeps
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:77:function PageWindowPlaceholder({ from, to, onJump }: { from: number; to: number; onJump: (n: number) => void }) {
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:371:  /* Render plan: visible pages interleaved with one placeholder per
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:375:      { kind: 'page'; page: (typeof normalizedPages)[number] } | { kind: 'placeholder'; from: number; to: number }
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:381:      segments.push({ kind: 'placeholder', from: runStart, to: runEnd });
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:464:                height-preserving placeholder per contiguous group of hidden
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:467:              seg.kind === 'placeholder' ? (
+/home/z/my-project/src/components/animaxia/home-ai-feed.tsx:468:                <PageWindowPlaceholder
+/home/z/my-project/src/components/animaxia/views/global-30b-view.tsx:42:import { BrandPlaceholder, EmptyState, ErrorState, RatingBadge, TypeBadge } from '../states';
+/home/z/my-project/src/components/animaxia/views/global-30b-view.tsx:133:          <BrandPlaceholder title={item.title} />
+/home/z/my-project/src/components/animaxia/views/global-30b-view.tsx:223:  /* Constantele modelului vin din răspuns; fallback-urile sunt valorile
+/home/z/my-project/src/components/animaxia/views/global-30b-view.tsx:229:     fallback matematic (30B/20 = 1,5 mld; 1 mld/20 = 50 mil per shard). */
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:337:            placeholder="Caută anime, filme, seriale…"
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:342:            className="h-12 rounded-xl border-white/10 bg-white/[0.04] pl-12 pr-11 text-base text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:647:                <SelectValue placeholder="Orice an" />
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:663:                <SelectValue placeholder="Orice gen" />
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:679:                <SelectValue placeholder="Orice categorie" />
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:695:                <SelectValue placeholder="Relevanță" />
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:718:              placeholder="ex. Walt Disney"
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:726:                <SelectValue placeholder="Orice notă" />
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:923:          placeholder="ex. Dwayne Johnson"
+/home/z/my-project/src/components/animaxia/views/search-view.tsx:1028:                placeholder="Lipește linkul: YouTube, MP4, HLS, DASH, embed…"
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:77:function errorMessage(err: unknown, fallback: string): string {
+/home/z/my-project/src/components/animaxia/views/premium-view.tsx:78:  return err instanceof Error ? err.message : fallback;

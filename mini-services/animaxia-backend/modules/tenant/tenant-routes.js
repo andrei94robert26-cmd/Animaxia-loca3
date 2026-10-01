@@ -58,7 +58,7 @@ tenantAdminRouter.get('/', wrap(async (req, res) => {
   const list = await rows(
     `SELECT t.*, l.maxusers, l.aiperday, l.ratelimitpermin, l.vectorcollections, l.storagegb, l.overageallowed,
             c.config, c.features, c.playerallowlist,
-            (SELECT COUNT(*)::int FROM tenantusers tu WHERE tu.tenantid = t.id) AS usercount
+            (SELECT COUNT(*) FROM tenantusers tu WHERE tu.tenantid = t.id) AS usercount
      FROM tenants t
      LEFT JOIN tenantlimits l ON l.tenantid = t.id
      LEFT JOIN tenantconfig c ON c.tenantid = t.id
@@ -106,7 +106,7 @@ tenantAdminRouter.post('/', wrap(async (req, res) => {
   );
   await rows(
     `INSERT INTO tenantconfig (tenantid, config, features, playerallowlist)
-     VALUES ($1, '{}'::jsonb, $2::jsonb, '["mp4","m3u8"]'::jsonb)`,
+     VALUES ($1, '{}', $2, '["mp4","m3u8"]')`,
     [tid, jsonb({ social: true, aicloud: true, edge: true, billing: plan !== 'free' })],
   );
   await auditLog({ userid: req.user.id, action: 'tenant.create', ip: clientIpOf(req), meta: { slug, plan, tenantid: tid } });
@@ -154,7 +154,7 @@ tenantAdminRouter.patch('/:slug/limits', wrap(async (req, res) => {
   }
   await rows(
     `UPDATE tenantlimits SET maxusers=$2, aiperday=$3, ratelimitpermin=$4, vectorcollections=$5, storagegb=$6,
-            overageallowed=$7, updatedat=NOW()
+            overageallowed=$7, updatedat=CURRENT_TIMESTAMP
      WHERE tenantid=$1`,
     [tenant.id, next.maxusers, next.aiperday, next.ratelimitpermin, next.vectorcollections, next.storagegb, next.overageallowed !== false],
   );
@@ -184,10 +184,10 @@ tenantAdminRouter.patch('/:slug/config', wrap(async (req, res) => {
   }
   await rows(
     `UPDATE tenantconfig SET
-       config = COALESCE($2::jsonb, config),
-       features = COALESCE($3::jsonb, features),
-       playerallowlist = COALESCE($4::jsonb, playerallowlist),
-       updatedat = NOW()
+       config = COALESCE($2, config),
+       features = COALESCE($3, features),
+       playerallowlist = COALESCE($4, playerallowlist),
+       updatedat = CURRENT_TIMESTAMP
      WHERE tenantid = $1`,
     [tenant.id,
       config !== undefined ? jsonb(config) : null,
@@ -213,7 +213,7 @@ tenantAdminRouter.post('/:slug/users', wrap(async (req, res) => {
   }
   const user = await one(`SELECT id, email, username FROM users WHERE email = $1`, [String(email).toLowerCase()]);
   if (!user) return res.status(404).json({ error: `No account with email ${email}`, code: 'USER_NOT_FOUND' });
-  const count = await one(`SELECT COUNT(*)::int AS c FROM tenantusers WHERE tenantid = $1`, [tenant.id]);
+  const count = await one(`SELECT COUNT(*) AS c FROM tenantusers WHERE tenantid = $1`, [tenant.id]);
   if (num(count?.c) >= tenant.limits.maxusers) {
     return res.status(402).json({ error: `Tenant '${tenant.slug}' is at its maxusers limit (${tenant.limits.maxusers}) — raise the limit first`, code: 'TENANT_USER_LIMIT' });
   }

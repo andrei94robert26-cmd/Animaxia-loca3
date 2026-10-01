@@ -74,10 +74,10 @@ function compactItem(row) {
  */
 async function trendingContent(limit = ROW_LIMIT) {
   const data = await rows(
-    `SELECT ${CONTENT_COLUMNS}, COUNT(v.id)::int AS views
+    `SELECT ${CONTENT_COLUMNS}, COUNT(v.id) AS views
      FROM viewevents v
      JOIN content c ON c.id = v.contentid
-     WHERE v.createdat > NOW() - interval '7 days'
+     WHERE v.createdat > datetime('now','-7 days')
      GROUP BY c.id
      ORDER BY views DESC, MAX(v.createdat) DESC
      LIMIT $1`,
@@ -207,7 +207,7 @@ router.get('/player/:id', wrap(async (req, res) => {
 /** GET /profile — authenticated mobile profile card. */
 router.get('/profile', requireAuth, wrap(async (req, res) => {
   const plan = req.user.plan || 'free';
-  const watchRow = await one(`SELECT COUNT(*)::int AS count FROM watchlist WHERE userid = $1`, [req.user.id]);
+  const watchRow = await one(`SELECT COUNT(*) AS count FROM watchlist WHERE userid = $1`, [req.user.id]);
   const recent = await continueWatching(req.user.id, 5);
   res.json({
     user: req.user,

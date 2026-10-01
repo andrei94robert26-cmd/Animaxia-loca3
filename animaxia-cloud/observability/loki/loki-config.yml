@@ -1,0 +1,71 @@
+# =============================================================================
+# Animaxia Cloud — Loki single-binary configuration (BLUEPRINT §11)
+# =============================================================================
+# Mounted read-only into the `loki` container (grafana/loki:3.4.1) by
+# deploy/docker/docker-compose.observability.yml:
+#   loki -config.file=/etc/loki/loki-config.yml
+#
+# Deliberately minimal single-binary setup for local development:
+#   * auth disabled (Grafana is the only client; the port is host-published
+#     for convenience — do NOT expose 3100 beyond a dev machine)
+#   * schema v13 + tsdb index + filesystem object store (boltdb-shipper was
+#     deprecated before v13 and is superseded by tsdb — same on-disk layout
+#     role, better compaction; anything boltdb-shipper did, tsdb does here)
+#   * everything under /loki (named volume `loki-data`)
+#   * 7-day retention enforced by the compactor
+#   * generous ingestion rate (10 MB/s) — this is a dev box, and the 10
+#     services log one JSON line per request
+#   * reject_old_samples=false so replayed/backdated logs are kept
+# =============================================================================
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1      # single binary — ring lives in-process
+  path_prefix: /loki            # parent of chunks/tsdb/compactor (volume root)
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# tsdb index (schema v13), one index per 24h, stored on the local filesystem.
+schema_config:
+  configs:
+    - from: "2024-01-01"        # covers any dev timeline; Loki picks the latest schema
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  filesystem:
+    directory: /loki/chunks
+
+# Retention: delete chunks older than 7 days (compactor walks index/table
+# boundaries, so expect up to ~1 extra day of slack).
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+
+limits_config:
+  retention_period: 168h        # 7 days
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+  reject_old_samples: false     # keep replayed/backdated lines (dev-friendly)
+
+# NOTE — Kubernetes: replace filesystem storage with object storage (S3/GCS)
+# and run Loki via the official Helm chart; this file is the local-docker
+# profile only (see observability/README.md → "Kubernetes notes").

@@ -1,0 +1,332 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "uid": "faza23-huburi",
+  "title": "FAZA 23 · Huburi FAZA 20",
+  "description": "Hub-urile publice FAZA 20 (/api/hub/*): browse + facets, stats, feed 3-surse, recomandări. Latency-ul per rută = FAZA 9 histogramă (_sum/_count) re-expusă; requests = animaxia_http_requests_total{route=~\"/api/hub/.*\"}.",
+  "tags": [
+    "animaxia",
+    "faza23",
+    "observability"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Browse latency (ms)",
+      "type": "timeseries",
+      "description": "Durata medie /api/hub/browse (incl. facets=1 — aceeași rută).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_hub_duration_ms{route=\"/api/hub/browse\"}",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Latency per rută hub",
+      "type": "timeseries",
+      "description": "Toate rutele FAZA 20 observate (browse/scale/feed/years…).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_hub_duration_ms",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Stats publice — itemi total",
+      "type": "stat",
+      "description": "/api/hub/stats totalItems (Neon real).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_hub_total_items",
+          "legendFormat": "totalItems",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Feed 3-surse — activitate",
+      "type": "timeseries",
+      "description": "Cereri către feed-ul 3-surse (personal + global + AI).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_feed_activity_total",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cereri per rută hub",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_hub_requests_total",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Recomandări publice — requests",
+      "type": "timeseries",
+      "description": "/api/hub/recommendations (split onest real+simulat FAZA 20).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_hub_requests_total{route=\"/api/hub/recommendations\"}",
+          "legendFormat": "recommendations",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Hub docs (FTS)",
+      "type": "stat",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "animaxia-prometheus-global"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "animaxia-prometheus-global"
+          },
+          "expr": "animaxia_fts_docs",
+          "legendFormat": "docs",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Sursă de date",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "animaxia-prometheus-global",
+          "value": "animaxia-prometheus-global"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "timepicker": {},
+  "weekStart": ""
+}

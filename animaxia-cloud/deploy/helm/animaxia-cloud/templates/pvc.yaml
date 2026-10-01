@@ -1,0 +1,21 @@
+{{/* Shared data PVC — mounted by content-service and queue-service
+     (services with dataMountPath set) at /app/data (LOCALDATADIR).
+     ReadWriteOnce = single-node; see values-production.yaml for multi-AZ. */}}
+{{- if .Values.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "animaxia.pvcName" . }}
+  namespace: {{ include "animaxia.namespace" . }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" . "component" "storage") | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

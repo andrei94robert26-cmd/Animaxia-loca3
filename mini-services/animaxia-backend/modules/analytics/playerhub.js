@@ -23,7 +23,7 @@
  */
 
 import express from 'express';
-import { rows, one, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+import { rows, one, isoOrNull, num } from '../platform/sql.js';
 import { playerAllowedTypes } from '../player/player.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -53,18 +53,17 @@ export const playerhubRouter = express.Router();
 
 /** GET /status — live gauges for the admin playerhub dashboard. */
 playerhubRouter.get('/status', wrap(async (_req, res) => {
-  assertPostgres();
 
   // Playback gauges (viewevents: kind lives in the `event` column).
   const [playbackTotals, byKindRows, topWatchedRows, usersWatchingRow, avgProgressRow] = await Promise.all([
     one(
-      `SELECT COUNT(*)::int AS total,
-              COUNT(*) FILTER (WHERE createdat > NOW() - '1 day'::interval)::int AS last24h
+      `SELECT COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE createdat > datetime('now','-1 day')) AS last24h
        FROM viewevents`,
     ),
-    rows(`SELECT event AS kind, COUNT(*)::int AS count FROM viewevents GROUP BY event ORDER BY count DESC`),
+    rows(`SELECT event AS kind, COUNT(*) AS count FROM viewevents GROUP BY event ORDER BY count DESC`),
     rows(
-      `SELECT v.contentid, c.title, c.type, c.thumbnail, COUNT(*)::int AS plays
+      `SELECT v.contentid, c.title, c.type, c.thumbnail, COUNT(*) AS plays
        FROM viewevents v
        JOIN content c ON c.id = v.contentid
        WHERE v.event IN ('view', 'play')
@@ -73,8 +72,8 @@ playerhubRouter.get('/status', wrap(async (_req, res) => {
        LIMIT 10`,
     ),
     one(
-      `SELECT COUNT(DISTINCT userid)::int AS count FROM viewevents
-       WHERE userid IS NOT NULL AND createdat > NOW() - '1 day'::interval`,
+      `SELECT COUNT(DISTINCT userid) AS count FROM viewevents
+       WHERE userid IS NOT NULL AND createdat > datetime('now','-1 day')`,
     ),
     one(`SELECT AVG(progress) AS avg FROM watchhistory`),
   ]);
@@ -86,9 +85,9 @@ playerhubRouter.get('/status', wrap(async (_req, res) => {
   let subtitles;
   try {
     const [subTotalRow, subPerContentRows] = await Promise.all([
-      one(`SELECT COUNT(*)::int AS total FROM subtitles`),
+      one(`SELECT COUNT(*) AS total FROM subtitles`),
       rows(
-        `SELECT s.contentid, c.title, COUNT(*)::int AS tracks
+        `SELECT s.contentid, c.title, COUNT(*) AS tracks
          FROM subtitles s
          JOIN content c ON c.id = s.contentid
          GROUP BY s.contentid, c.title
@@ -111,18 +110,18 @@ playerhubRouter.get('/status', wrap(async (_req, res) => {
   // Source gauges — honest approximation straight from content metadata.
   const [withSourcesRow, modeRows] = await Promise.all([
     one(
-      `SELECT COUNT(*)::int AS count FROM content c
+      `SELECT COUNT(*) AS count FROM content c
        WHERE (jsonb_typeof(c.metadata->'player'->'sources') = 'array' AND jsonb_array_length(c.metadata->'player'->'sources') > 0)
           OR (jsonb_typeof(c.metadata->'sources') = 'array' AND jsonb_array_length(c.metadata->'sources') > 0)`,
     ),
     rows(
-      `SELECT s->>'type' AS mode, COUNT(*)::int AS count
+      `SELECT s->>'type' AS mode, COUNT(*) AS count
        FROM content c
        CROSS JOIN LATERAL jsonb_array_elements(
          CASE
            WHEN jsonb_typeof(c.metadata->'player'->'sources') = 'array' THEN c.metadata->'player'->'sources'
            WHEN jsonb_typeof(c.metadata->'sources') = 'array' THEN c.metadata->'sources'
-           ELSE '[]'::jsonb
+           ELSE '[]'
          END
        ) AS s
        GROUP BY 1
@@ -135,7 +134,7 @@ playerhubRouter.get('/status', wrap(async (_req, res) => {
     const mode = r.mode || 'untyped';
     byMode[mode] = num(r.count) + num(byMode[mode]); // entry counts per source type
   }
-  const totalContentRow = await one(`SELECT COUNT(*)::int AS count FROM content`);
+  const totalContentRow = await one(`SELECT COUNT(*) AS count FROM content`);
   byMode.none = Math.max(0, num(totalContentRow?.count) - contentWithSources);
 
   return res.json({
@@ -168,7 +167,6 @@ playerhubRouter.get('/status', wrap(async (_req, res) => {
 
 /** GET /history — the admin's own watch history (50 latest, personal view). */
 playerhubRouter.get('/history', wrap(async (req, res) => {
-  assertPostgres();
   const data = await rows(
     `SELECT h.contentid, c.title, c.thumbnail, h.progress, h.watchedat
      FROM watchhistory h
@@ -196,41 +194,40 @@ export const mystatsRouter = express.Router();
 
 /** GET / — personal stats for the authenticated user. */
 mystatsRouter.get('/', wrap(async (req, res) => {
-  assertPostgres();
   const userid = req.user.id;
 
   const [watchRow, byTypeRows, activeDayRows, watchlistRow, viewsRow, topGenreRows] = await Promise.all([
     one(
-      `SELECT COUNT(*)::int AS historycount,
-              COALESCE(ROUND(SUM(progress) / 60.0), 0)::int AS totalminutes,
+      `SELECT COUNT(*) AS historycount,
+              COALESCE(ROUND(SUM(progress) / 60.0), 0) AS totalminutes,
               AVG(progress) AS avgprogress
        FROM watchhistory WHERE userid = $1`,
       [userid],
     ),
     rows(
-      `SELECT c.type AS type, COUNT(*)::int AS count
+      `SELECT c.type AS type, COUNT(*) AS count
        FROM watchhistory h JOIN content c ON c.id = h.contentid
        WHERE h.userid = $1
        GROUP BY c.type ORDER BY count DESC, c.type ASC`,
       [userid],
     ),
     rows(
-      `SELECT DISTINCT to_char(date_trunc('day', watchedat), 'YYYY-MM-DD') AS date
+      `SELECT DISTINCT strftime('%Y-%m-%d', watchedat) AS date
        FROM watchhistory WHERE userid = $1
        ORDER BY date DESC`,
       [userid],
     ),
-    one(`SELECT COUNT(*)::int AS count FROM watchlist WHERE userid = $1`, [userid]),
-    one(`SELECT COUNT(*)::int AS count FROM viewevents WHERE userid = $1`, [userid]),
+    one(`SELECT COUNT(*) AS count FROM watchlist WHERE userid = $1`, [userid]),
+    one(`SELECT COUNT(*) AS count FROM viewevents WHERE userid = $1`, [userid]),
     rows(
-      `SELECT g.genre AS genre, COUNT(*)::int AS count
+      `SELECT g.value AS genre, COUNT(*) AS count
        FROM watchhistory h
        JOIN content c ON c.id = h.contentid
-       CROSS JOIN LATERAL jsonb_array_elements_text(
-         CASE WHEN jsonb_typeof(c.metadata->'genres') = 'array' THEN c.metadata->'genres' ELSE '[]'::jsonb END
-       ) AS g(genre)
+       CROSS JOIN json_each(
+         CASE WHEN json_type(c.metadata->'genres') = 'array' THEN c.metadata->'genres' ELSE '[]' END
+       ) AS g
        WHERE h.userid = $1
-       GROUP BY g.genre ORDER BY count DESC, g.genre ASC
+       GROUP BY g.value ORDER BY count DESC, g.value ASC
        LIMIT 5`,
       [userid],
     ),
@@ -247,7 +244,7 @@ mystatsRouter.get('/', wrap(async (req, res) => {
   let aiUsage = null;
   try {
     const aiRow = await one(
-      `SELECT COUNT(*)::int AS calls, MAX(createdat) AS last FROM aiusagelogs WHERE userid = $1`,
+      `SELECT COUNT(*) AS calls, MAX(createdat) AS last FROM aiusagelogs WHERE userid = $1`,
       [userid],
     );
     aiUsage = { calls: num(aiRow?.calls), lastUsedAt: isoOrNull(aiRow?.last) };

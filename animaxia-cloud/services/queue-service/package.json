@@ -1,0 +1,18 @@
+{
+  "name": "@animaxia/queue-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud queue-service — durable PostgreSQL-backed job queue (FOR UPDATE SKIP LOCKED claiming, leases, quadratic-backoff retries, dead letters) with an in-process consumer pool, a cron scheduler and the monolith-compatible /api/workers surface (BLUEPRINT §10).",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "z-ai-web-dev-sdk": "^0.0.18"
+  }
+}

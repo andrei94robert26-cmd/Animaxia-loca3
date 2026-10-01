@@ -1,0 +1,139 @@
+# =============================================================================
+# Animaxia — production origin Caddyfile (FAZA 22)
+# =============================================================================
+# The origin reverse proxy for real deployments. Two supported modes:
+#
+#   1. BEHIND CLOUDFLARE (recommended) — Cloudflare Full (strict):
+#      the zone's ssl mode is "strict" (main.tf), so this origin MUST present
+#      a certificate Cloudflare trusts. Caddy's automatic ACME certificate
+#      (Let's Encrypt) satisfies Full (strict) out of the box: port 80 stays
+#      open for HTTP-01 challenges and redirects, 443 serves valid certs.
+#      Cloudflare connects to 443 with SNI = animaxia.com and validates the
+#      ACME chain — no Cloudflare Origin CA certificate needed.
+#      See cdn/cloudflare/terraform/main.tf (ssl = "strict").
+#
+#   2. STANDALONE (no Cloudflare) — Caddy obtains and renews ACME certs
+#      itself and serves HTTP/1.1 + h2 + h3 directly. HSTS + security
+#      headers below match the Cloudflare zone settings so clients get the
+#      same hardening either way.
+#
+# RUN (from the origin host):
+#     caddy run --config Caddyfile.production
+# or install as a service:
+#     caddy start --config Caddyfile.production
+#
+# UPSTREAMS (adjust to the actual deploy):
+#     127.0.0.1:3000 — Next.js frontend (SSR; static assets go via CDN/edge)
+#     127.0.0.1:4000 — animaxia-backend (the API monolith)
+#     127.0.0.1:4040 — global-gateway (multi-region origin setups, see the
+#                      commented api.animaxia.com variant below)
+# =============================================================================
+
+{
+	# ACME account e-mail for expiry / renewal notices (var: replace with the
+	# real ops address before deploying).
+	email admin@animaxia.com
+
+	# Serve HTTP/1.1, HTTP/2 and HTTP/3 (QUIC) — h3 matches the Cloudflare
+	# zone setting (http3 = "on" in main.tf).
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+# --- plain HTTP: ACME challenges + permanent redirect to HTTPS ----------------
+# The tls-alpn/HTTP-01 dance needs port 80 reachable; everything else is a
+# 301 to the https:// host so HSTS-primed clients never loop back.
+http://animaxia.com, http://www.animaxia.com {
+	redir https://{host}{uri} permanent
+}
+
+# --- frontend: animaxia.com + www.animaxia.com → Next.js :3000 ----------------
+animaxia.com, www.animaxia.com {
+	# Automatic TLS via ACME (Let's Encrypt / ZeroSSL). Valid for Cloudflare
+	# Full (strict) — see the header comment.
+	tls
+
+	# FAZA 22 — HSTS strict global, mirrors the Cloudflare security_header
+	# zone setting (max-age 1 year, subdomains, preload-eligible).
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+	# Standard security headers on every response.
+	header X-Content-Type-Options "nosniff"
+	header X-Frame-Options "DENY"
+	header Referrer-Policy "strict-origin-when-cross-origin"
+	header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+
+	# Origin identity tag (useful when debugging CDN vs origin hits).
+	header X-Served-By "animaxia-origin"
+
+	# zstd first, gzip fallback (Cloudflare recompresses at the edge anyway).
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:3000 {
+		header_up Host {host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# --- API: api.animaxia.com → backend :4000 ------------------------------------
+api.animaxia.com {
+	tls
+
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	header X-Content-Type-Options "nosniff"
+	header X-Frame-Options "DENY"
+	header Referrer-Policy "strict-origin-when-cross-origin"
+	header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	header X-Served-By "animaxia-origin"
+
+	encode zstd gzip
+
+	# /api/* → the backend monolith. Caddy strips nothing (the backend mounts
+	# its routes at /api/*), so a plain reverse_proxy preserves the path.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:4000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Anything else on the API host → backend as well (health probes, future
+	# non-/api management routes).
+	handle {
+		reverse_proxy 127.0.0.1:4000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# --- global-gateway variant (multi-region origin setups) -----------------
+	# When the origin runs the FAZA 22 global-gateway (mini-services/
+	# global-gateway, :4040 — distributed rate-limit/cooldown/anti-spam/cache
+	# perimeter in front of the backend), proxy to it instead so every region
+	# funnels through the shared perimeter layers:
+	#
+	# handle /api/* {
+	# 	reverse_proxy 127.0.0.1:4040 {
+	# 		header_up Host {host}
+	# 		header_up X-Forwarded-For {remote_host}
+	# 		header_up X-Forwarded-Proto {scheme}
+	# 		header_up X-Real-IP {remote_host}
+	# 	}
+	# }
+	#
+	# handle {
+	# 	reverse_proxy 127.0.0.1:4040 {
+	# 		header_up Host {host}
+	# 		header_up X-Forwarded-For {remote_host}
+	# 		header_up X-Forwarded-Proto {scheme}
+	# 		header_up X-Real-IP {remote_host}
+	# 	}
+	# }
+}

@@ -226,14 +226,14 @@ class PgVectorBackend {
       const shardid = computeShardIdFromVectorRef(refKey(item));
       await rows(
         `INSERT INTO vectorembeddings (refkey, kind, refid, userid, dims, embedding, metadata, contenttext, shardid)
-         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9)
+         VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9)
          ON CONFLICT (refkey) DO UPDATE SET
            embedding = EXCLUDED.embedding,
            dims = EXCLUDED.dims,
            metadata = EXCLUDED.metadata,
            contenttext = EXCLUDED.contenttext,
            shardid = EXCLUDED.shardid,
-           updatedat = NOW()`,
+           updatedat = CURRENT_TIMESTAMP`,
         [
           refKey(item),
           item.kind,
@@ -309,7 +309,7 @@ class PgVectorBackend {
   }
 
   async counts() {
-    const found = await rows(`SELECT kind, COUNT(*)::int AS count FROM vectorembeddings GROUP BY kind`);
+    const found = await rows(`SELECT kind, COUNT(*) AS count FROM vectorembeddings GROUP BY kind`);
     return found.reduce((acc, r) => {
       acc[r.kind] = r.count;
       return acc;
@@ -537,10 +537,10 @@ export async function ensureVectorSchema() {
         userid INTEGER,
         dims INTEGER NOT NULL DEFAULT ${EMBED_DIMS},
         embedding vector(${EMBED_DIMS}) NOT NULL,
-        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        metadata JSONB NOT NULL DEFAULT '{}',
         contenttext TEXT,
-        createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`);
     await rows(`CREATE INDEX IF NOT EXISTS idx_vectorembeddings_kind ON vectorembeddings (kind)`);
     // Exact (seq-scan) cosine search is faster AND correct for small/medium

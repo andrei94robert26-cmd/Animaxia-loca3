@@ -1,0 +1,376 @@
+# CD — Animaxia Cloud: build, push, deploy, verify, auto-rollback
+#
+# Triggered by pushing a version tag (`v*`, e.g. v3.0.1) or manually via
+# workflow_dispatch. Pipeline:
+#
+#   ci-gate ──► build-push (10 service images → ghcr.io)
+#            ──► helm-deploy (helm upgrade --install --atomic)
+#            ──► smoke-test  (in-cluster curl of gateway /api/health)
+#            ──► auto-rollback (only on failure: helm rollback || rollout undo,
+#                job summary + optional Slack notification via SLACKWEBHOOK)
+#
+# Requires the KUBE_CONFIG repo secret (base64 kubeconfig) — see .github/README.md.
+
+name: CD — Build, Push & Deploy
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (concurrency group + deploy summary)'
+        required: true
+        default: 'production'
+        type: string
+      imageTag:
+        description: 'Image tag to build & deploy (empty = git tag version, else sha-<short>)'
+        required: false
+        default: ''
+        type: string
+
+# Never cancel an in-flight deploy — it must either complete or roll back.
+# The next deploy of the same environment queues behind this one.
+concurrency:
+  group: deploy-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # Placeholder namespace — lowercased per-job (ghcr.io requires all-lowercase
+  # repository paths) by the "Lowercase image namespace" step in build-push.
+  IMAGE_PREFIX: ${{ github.repository_owner }}
+
+permissions:
+  contents: read
+  packages: write # push the 10 service images to ghcr.io with GITHUB_TOKEN
+
+jobs:
+  ci-gate:
+    name: CI gate (lint + verify)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        # Same fallback note as ci.yml: drop --frozen-lockfile only until
+        # bun.lock is committed at the repo root.
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        # Flat ESLint config lives at the repo root (eslint.config.mjs).
+        continue-on-error: false
+        run: bunx eslint . --ext .js,.mjs
+
+      - name: Verify syntax
+        # scripts/verify-syntax.mjs (task 2-l): bun build --no-bundle over
+        # every .js/.mjs in common/, domain/ and services/.
+        run: node scripts/verify-syntax.mjs
+
+  build-push:
+    name: Build & push (${{ matrix.service }})
+    needs: ci-gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - gateway-service
+          - auth-service
+          - content-service
+          - ai-service
+          - analytics-service
+          - search-service
+          - premium-service
+          - social-service
+          - mobile-service
+          - queue-service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lowercase image namespace
+        # ghcr.io refuses mixed-case repository paths; GitHub owners can be
+        # mixed-case ("Animaxia" -> "animaxia"). Overwrites the workflow-level
+        # IMAGE_PREFIX env for the rest of this job.
+        run: echo "IMAGE_PREFIX=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Compute image version
+        id: meta
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          # Version precedence:
+          #   1. explicit workflow_dispatch imageTag input
+          #   2. git tag            (refs/tags/v1.2.3 -> "1.2.3", leading v stripped)
+          #   3. sha-<short>        (manual dispatch from a branch)
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            VERSION="$INPUT_IMAGE_TAG"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="sha-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Image version: ${VERSION}"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Dockerfiles build from the repo ROOT context (BLUEPRINT section 8).
+      # Every image gets the immutable version tag plus the moving :latest.
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ steps.meta.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm-deploy:
+    name: Helm deploy (animaxia namespace)
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # The Helm chart is part of the repo: deploy/helm/animaxia-cloud.
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Compute deployed version
+        # MUST match the tag pushed by build-push — same precedence logic.
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            VERSION="$INPUT_IMAGE_TAG"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="sha-${GITHUB_SHA:0:7}"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "Deploying version: ${VERSION}"
+
+      - name: Write kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          # KUBE_CONFIG = base64-encoded kubeconfig YAML (see .github/README.md).
+          # Tolerant decode: if the secret was stored as PLAIN YAML (no base64),
+          # detect it (base64 -d output lacks an apiVersion: line) and store the
+          # raw content instead — the documented format is base64.
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::error::Repo secret KUBE_CONFIG is not configured (base64 kubeconfig). See .github/README.md."
+            exit 1
+          fi
+          mkdir -p "${HOME}/.kube"
+          # Decode straight into the file (byte-faithful — no $() newline
+          # stripping); if the result does not look like a kubeconfig the
+          # secret was stored as PLAIN YAML — store it verbatim instead.
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "${HOME}/.kube/config" 2>/dev/null || true
+          if ! grep -q 'apiVersion:' "${HOME}/.kube/config"; then
+            printf '%s' "$KUBE_CONFIG" > "${HOME}/.kube/config"
+          fi
+          chmod 600 "${HOME}/.kube/config"
+
+      - name: Helm upgrade --install (atomic)
+        run: |
+          # The chart (agent 2-h) templates per-service images from
+          # `.Values.image.tag` (values.yaml default: latest). This deploy
+          # pins the released version with BOTH knobs — belt & braces:
+          #   --set image.tag=<v>      chart-native per-service image tag
+          #   --set global.imageTag=<v> documented global override (honored
+          #                            when the chart consumes .Values.global)
+          # --atomic rolls the release back automatically if any resource
+          # fails to become ready within --timeout, so a failed deploy never
+          # lingers half-applied.
+          helm upgrade --install animaxia-cloud deploy/helm/animaxia-cloud \
+            --namespace animaxia \
+            --create-namespace \
+            --values deploy/helm/animaxia-cloud/values-production.yaml \
+            --set image.tag="${VERSION}" \
+            --set global.imageTag="${VERSION}" \
+            --atomic \
+            --timeout 10m \
+            --wait
+
+      - name: Wait for gateway rollout
+        run: kubectl -n animaxia rollout status deploy/gateway-service --timeout=300s
+
+      - name: Deploy summary
+        if: always()
+        env:
+          IMAGE_PREFIX: ${{ github.repository_owner }}
+        run: |
+          PREFIX="${IMAGE_PREFIX,,}"
+          {
+            echo "## Deployment summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Release | \`animaxia-cloud\` (namespace \`animaxia\`) |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Trigger | ${GITHUB_EVENT_NAME} on \`${GITHUB_REF_NAME}\` |"
+            echo "| Images | \`${REGISTRY}/${PREFIX}/<service>:${VERSION}\` + \`:latest\` — 10 services |"
+            echo "| Helm | \`helm upgrade --install animaxia-cloud deploy/helm/animaxia-cloud --values values-production.yaml --atomic\` |"
+            echo "| Run | [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-test:
+    name: Smoke test (gateway /api/health)
+    needs: helm-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::error::Repo secret KUBE_CONFIG is not configured (base64 kubeconfig). See .github/README.md."
+            exit 1
+          fi
+          mkdir -p "${HOME}/.kube"
+          # Decode straight into the file (byte-faithful — no $() newline
+          # stripping); if the result does not look like a kubeconfig the
+          # secret was stored as PLAIN YAML — store it verbatim instead.
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "${HOME}/.kube/config" 2>/dev/null || true
+          if ! grep -q 'apiVersion:' "${HOME}/.kube/config"; then
+            printf '%s' "$KUBE_CONFIG" > "${HOME}/.kube/config"
+          fi
+          chmod 600 "${HOME}/.kube/config"
+
+      - name: In-cluster smoke test
+        # One-shot curl pod inside the animaxia namespace hits the gateway
+        # service directly (no port-forward needed in CI). curl -f turns any
+        # non-2xx into a non-zero exit, and the payload must contain a
+        # "status" field (BLUEPRINT section 6 health shape) — this fails the
+        # job and triggers auto-rollback otherwise.
+        run: |
+          kubectl -n animaxia delete pod smoke --ignore-not-found=true >/dev/null 2>&1 || true
+          OUTPUT=$(kubectl -n animaxia run smoke --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 \
+            -- curl -fsS http://gateway-service:8080/api/health)
+          echo "Gateway /api/health responded:"
+          echo "$OUTPUT"
+          if ! echo "$OUTPUT" | grep -q '"status"'; then
+            echo "::error::Gateway health payload did not contain a \"status\" field."
+            exit 1
+          fi
+
+  auto-rollback:
+    name: Auto-rollback (deploy failed)
+    needs: [helm-deploy, smoke-test]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Write kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::error::Repo secret KUBE_CONFIG is not configured (base64 kubeconfig). See .github/README.md."
+            exit 1
+          fi
+          mkdir -p "${HOME}/.kube"
+          # Decode straight into the file (byte-faithful — no $() newline
+          # stripping); if the result does not look like a kubeconfig the
+          # secret was stored as PLAIN YAML — store it verbatim instead.
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "${HOME}/.kube/config" 2>/dev/null || true
+          if ! grep -q 'apiVersion:' "${HOME}/.kube/config"; then
+            printf '%s' "$KUBE_CONFIG" > "${HOME}/.kube/config"
+          fi
+          chmod 600 "${HOME}/.kube/config"
+
+      - name: Roll back the release
+        # NOTE: no step-level `if` here — step-level failure() only covers
+        # failures of PREVIOUS STEPS IN THIS JOB, while this whole job only
+        # runs because a needed job failed. Only roll back when THIS run
+        # actually deployed something: if helm-deploy itself failed, --atomic
+        # already restored the previous revision and a second rollback would
+        # go one revision too far back.
+        env:
+          HELM_DEPLOY_RESULT: ${{ needs.helm-deploy.result }}
+        run: |
+          if [ "$HELM_DEPLOY_RESULT" != "success" ]; then
+            echo "::notice::helm-deploy did not succeed (result: ${HELM_DEPLOY_RESULT}) — --atomic already rolled the release back. Nothing to do."
+            exit 0
+          fi
+          # Deploy succeeded but verification failed -> restore the previous
+          # release revision; if helm rollback cannot complete (e.g. very
+          # first deploy has nothing to roll back to), fall back to a plain
+          # rollout undo of the gateway deployment.
+          helm rollback animaxia-cloud --namespace animaxia --wait --timeout 10m \
+            || kubectl -n animaxia rollout undo deploy/gateway-service
+
+      - name: Verify gateway after rollback
+        run: kubectl -n animaxia rollout status deploy/gateway-service --timeout=300s
+
+      - name: Failure summary
+        if: always()
+        env:
+          HELM_DEPLOY_RESULT: ${{ needs.helm-deploy.result }}
+          SMOKE_RESULT: ${{ needs.smoke-test.result }}
+        run: |
+          if [ "$HELM_DEPLOY_RESULT" = "success" ]; then
+            REASON="helm deploy succeeded but the smoke test failed (result: ${SMOKE_RESULT}) — release rolled back to the previous revision"
+          else
+            REASON="helm deploy failed (result: ${HELM_DEPLOY_RESULT}) — release rolled back automatically by --atomic"
+          fi
+          {
+            echo "## Deployment FAILED — rollback executed"
+            echo ""
+            echo "- Reason: ${REASON}"
+            echo "- Release: \`animaxia-cloud\` (namespace \`animaxia\`)"
+            echo "- Trigger: ${GITHUB_EVENT_NAME} on \`${GITHUB_REF_NAME}\` (commit \`${GITHUB_SHA}\`)"
+            echo "- Run: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            echo ""
+            echo "Manual remediation: re-run \`cd-deploy.yml\` after fixing the cause, or use the"
+            echo "\`Rollback\` workflow (.github/workflows/rollback.yml) to pick a specific revision."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify failure (Slack webhook hook)
+        # Hook for Slack notifications via the SLACKWEBHOOK repo secret
+        # (incoming-webhook URL, OPTIONAL — see .github/README.md).
+        if: always()
+        env:
+          SLACKWEBHOOK: ${{ secrets.SLACKWEBHOOK }}
+          HELM_DEPLOY_RESULT: ${{ needs.helm-deploy.result }}
+        run: |
+          if [ -z "$SLACKWEBHOOK" ]; then
+            echo "::notice::SLACKWEBHOOK secret not configured — skipping Slack notification."
+            exit 0
+          fi
+          if [ "$HELM_DEPLOY_RESULT" = "success" ]; then
+            DETAIL="smoke test failed after deploy, release rolled back to the previous revision"
+          else
+            DETAIL="helm deploy failed, release rolled back by --atomic"
+          fi
+          TEXT="Animaxia deploy FAILED — ${DETAIL}. Ref: ${GITHUB_REF_NAME} (commit ${GITHUB_SHA:0:7}). Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -fsS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"${TEXT}\"}" \
+            "$SLACKWEBHOOK" \
+            || echo "::warning::Slack notification failed (webhook rejected the payload)."

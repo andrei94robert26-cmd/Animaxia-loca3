@@ -19,7 +19,6 @@
 
 import express from 'express';
 import { rows, one, parseJsonb, isoOrNull, num } from '../platform/sql.js';
-import { assertPostgres } from '../platform/sql.js';
 import { requireAuth, attachUser, getUserById } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import { insertActivityEvent } from './activity-events.js';
@@ -62,7 +61,6 @@ socialFollowsRouter.get(
   '/people',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const limit = Math.min(Math.max(num(req.query.limit, 12), 1), 30);
     const q = String(req.query.q || '').trim().slice(0, 60);
@@ -71,7 +69,7 @@ socialFollowsRouter.get(
     let filter = `u.id <> $1 AND NOT EXISTS (SELECT 1 FROM follows f WHERE f.followerid = $1 AND f.followeeid = u.id)`;
     if (q) {
       params.push(`%${q}%`);
-      filter += ` AND u.username ILIKE $2`;
+      filter += ` AND lower(u.username) LIKE lower($2)`;
     }
     params.push(limit);
 
@@ -94,7 +92,6 @@ socialFollowsRouter.post(
   requireAuth,
   followLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const target = parseId(req.body?.userId);
     if (!Number.isInteger(target)) return res.status(400).json({ error: 'userId (positive integer) is required' });
@@ -129,7 +126,6 @@ socialFollowsRouter.post(
   requireAuth,
   followLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const target = parseId(req.body?.userId);
     if (!Number.isInteger(target)) return res.status(400).json({ error: 'userId (positive integer) is required' });
@@ -143,7 +139,6 @@ socialFollowsRouter.get(
   '/following',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const data = await rows(
       `SELECT ${USER_CARD_SQL},
@@ -163,7 +158,6 @@ socialFollowsRouter.get(
   '/followers',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const data = await rows(
       `SELECT ${USER_CARD_SQL},
@@ -187,7 +181,6 @@ socialFollowsRouter.get(
   '/user/:id/profile',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid user id' });
 

@@ -194,7 +194,7 @@ async function persistTurn(userId, role, message, traceId, toolsUsed) {
   try {
     await rows(
       `INSERT INTO agentconversations (userid, role, message, traceid, toolsused)
-       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+       VALUES ($1,$2,$3,$4,$5)`,
       [userId, role, String(message).slice(0, 4000), traceId, jsonb({ tools: toolsUsed || [] })],
     );
   } catch {

@@ -1,0 +1,54 @@
+{{/* Post-install notes rendered after helm install/upgrade. */}}
+Animaxia Cloud {{ .Chart.AppVersion }} — release "{{ .Release.Name }}", namespace "{{ include "animaxia.namespace" . }}"
+
+{{- if not .Values.existingSecret }}
+
+  !! You are NOT using an existingSecret — the chart rendered a Secret from
+  !! env.secret. If those values are placeholders (REPLACE_ME), FIX THEM NOW:
+
+     kubectl -n {{ include "animaxia.namespace" . }} get secret {{ include "animaxia.secretName" . }} -o jsonpath='{.data}' | jq 'to_entries[] | select(.value=="UkVQTEFDRV9NRQ==")'
+
+  Prefer recreating it out-of-band and re-pointing the chart:
+     kubectl -n {{ include "animaxia.namespace" . }} delete secret {{ include "animaxia.secretName" . }}
+     kubectl -n {{ include "animaxia.namespace" . }} create secret generic animaxia-secrets \
+       --from-literal=DATABASEURL=... --from-literal=AUTHSECRET=... \
+       --from-literal=TMDBAPIKEY=... --from-literal=STRIPESECRETKEY=... \
+       --from-literal=FOOTBALLDATAAPI_KEY=... --from-literal=ADMINEMAILS=...
+     helm upgrade {{ .Release.Name }} . --reuse-values --set existingSecret=animaxia-secrets
+{{- end }}
+
+1. Wait for the pods (10 Deployments{{ if .Values.autoscaling.enabled }}, HPAs{{ end }}):
+
+     kubectl -n {{ include "animaxia.namespace" . }} get pods -w
+
+2. Reach the gateway:
+
+{{- if .Values.ingress.enabled }}
+   Via the ingress (host "{{ .Values.ingress.host }}", class {{ .Values.ingress.className }}):
+     echo "$(minikube ip 2>/dev/null || <ingress-node-ip>)  {{ .Values.ingress.host }}" | sudo tee -a /etc/hosts
+     curl http://{{ .Values.ingress.host }}/api/health
+{{- end }}
+   Or port-forward:
+     kubectl -n {{ include "animaxia.namespace" . }} port-forward svc/gateway-service 8080:8080
+     curl http://localhost:8080/api/health        # aggregated health of all services
+
+3. Check individual services (each exposes /health, /metrics, /):
+
+     kubectl -n {{ include "animaxia.namespace" . }} port-forward svc/auth-service 4001:4001
+     curl http://localhost:4001/health
+
+4. Queue + schedules:
+
+{{- if .Values.queue.cronJobs.enabled }}
+   CronJobs are installed on top of the queue-service internal scheduler:
+     kubectl -n {{ include "animaxia.namespace" . }} get cronjobs
+{{- end }}
+   Queue stats:   kubectl -n {{ include "animaxia.namespace" . }} exec deploy/queue-service -- \
+                     curl -s http://localhost:4009/api/queue/stats
+
+5. On-demand worker job (disabled by default):
+
+     helm upgrade {{ .Release.Name }} {{ .Chart.Name }} --reuse-values \
+       --set workerJob.enabled=true --set workerJob.jobType=indexing.batch
+
+Docs: deploy/k8s/README.md (raw-manifest twin), observability/ for the metrics stack.

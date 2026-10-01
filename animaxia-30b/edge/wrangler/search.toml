@@ -1,0 +1,66 @@
+# animaxia-edge-search — Cloudflare Worker config
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# The SEARCH worker answers GET /search + GET /autocomplete entirely at the
+# edge from a catalog snapshot (cloud GET /api/all → CatalogItem[], stored in
+# the SEARCH_CACHE KV + a per-isolate singleton, refreshed once it is older
+# than config.search.catalogTtlSec). When no snapshot is available it degrades
+# to a transparent /api/search/* cloud passthrough (response header
+# 'x-edge-search: cloud-fallback'). POST /search/refresh (internal auth)
+# forces a snapshot rebuild. Full logic: src/index.ts + src/catalog.ts.
+
+name = "animaxia-edge-search"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+# `wrangler whoami` shows your subdomain. Turn off once you route the zone
+# through the gateway worker if you don't want the extra public URL.
+workers_dev = true
+
+# --- Routes ------------------------------------------------------------------
+# Uncomment AFTER the zone (animaxia.com) is on your Cloudflare account and
+# the gateway worker routes /search/* + /autocomplete to this worker via the
+# SVC_SEARCH service binding.
+#
+# routes = [
+#   { pattern = "search.animaxia.com/*", zone_name = "animaxia.com" },
+# ]
+
+# --- Bindings ----------------------------------------------------------------
+# KV: EDGE_CONFIG — runtime configuration (key "config", shared/config.ts
+# defaults + KV override). Create with:
+#   wrangler kv namespace create EDGE_CONFIG
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: SEARCH_CACHE — the catalog snapshot store (key from config.search.
+# catalogKey, default "catalog:v1"; written with expirationTtl =
+# max(60, 2 × catalogTtlSec) — see search/src/catalog.ts). Create with:
+#   wrangler kv namespace create SEARCH_CACHE
+[[kv_namespaces]]
+binding = "SEARCH_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# --- Vars --------------------------------------------------------------------
+# Where the cloud monolith / gateway is reached from the edge. The default
+# matches the local mini-services gateway for `wrangler dev` style setups —
+# production must point at the cloud gateway host (e.g.
+# "https://api.animaxia.com"): Workers run on Cloudflare's edge, not inside
+# your cluster.
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+# FAZA 14: 30 logical shards × 1B ids — keep in sync with the monolith SHARDCOUNT
+SHARDCOUNT = "30"
+
+# --- Secrets -----------------------------------------------------------------
+# Public /search + /autocomplete need no secrets. POST /search/refresh accepts
+# either of these (shared/http.ts::requireInternalAuth):
+#
+#   EDGE_ADMIN_JWT      — admin token, sent as "Authorization: Bearer <token>".
+#   EDGE_INTERNAL_TOKEN — shared internal token, sent via "x-internal-token".
+#
+# NEVER put secrets in this file — use:  wrangler secret put <NAME>

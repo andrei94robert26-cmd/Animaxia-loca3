@@ -1,0 +1,46 @@
+# =============================================================================
+# FAZA 24 — Failover Neon (bază de date) — plan declarativ.
+#
+#   • Connection multi-host: pooler-ul încearcă main → read replica →
+#     fallback local (exact comportamentul driverului platformei: driver
+#     local-fallback + sondă de reconectare la 60s — existent din Task 1-a,
+#     OBSERVAT de :4060, zero modificări).
+#   • Read replica în regiunea secundară pentru citiri la failover.
+#   • Sondă de sănătate DB la 10s (db.connected din /api/health).
+#   • FAZA 18 (pipeline FTS), FAZA 20 (huburi cu date reale Neon), FAZA 13
+#     (sharding logic) — rulează DEASUPRA; failover-ul DB le ține online,
+#     nu le atinge.
+# =============================================================================
+---
+apiVersion: animaxia.io/v1
+kind: DatabaseFailover
+metadata:
+  name: animaxia-neon-failover
+  labels:
+    animaxia.io/faza: "24"
+spec:
+  primary:
+    host: ep-animaxia-main.eu-central-1.aws.neon.tech
+    database: neondb
+  readReplicas:
+    - host: ep-animaxia-replica.us-east-1.aws.neon.tech   # citiri la failover
+      database: neondb
+  connection:
+    # pooler multi-host — failover automat la nivel de conexiune
+    strategy: least-connections
+    poolMax: 20
+    connectTimeoutMs: 3000
+    # ordinea de failover: main → replica → driver local-fallback
+    failoverChain: [primary, read-replica, local-fallback]
+  healthProbe:
+    intervalSeconds: 10         # db.connected din /api/health (existent)
+    command: "SELECT 1"
+    failureThreshold: 3
+  reconnect:
+    probeIntervalSeconds: 60    # sondă de reconectare (comportament Task 1-a)
+    autoRowMigration: true      # la reconectare, rândurile locale migrează înapoi
+  notes: |
+    În sandbox, Neon rulează cu driver local de fallback + sondă la 60s —
+    failover-ul DB este DEJA activ în platformă; :4060 îl observă onest
+    (overview.neon.connected / .driver) și înregistrează tranzițiile ca
+    evenimente de failover reale.

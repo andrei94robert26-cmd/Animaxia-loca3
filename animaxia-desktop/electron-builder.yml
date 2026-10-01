@@ -1,0 +1,89 @@
+# electron-builder.yml — Animaxia Desktop packaging.
+#
+# Targets (FAZA 7 requirement 7):
+#   • Windows → NSIS installer (.exe)
+#   • macOS   → DMG (.dmg, x64 + arm64)
+#   • Linux   → AppImage
+#
+# What ships inside the app:
+#   • src/main/**      — Electron main process (plain JS, no build step)
+#   • dist-renderer/** — the Vite-built renderer (React bundle + public assets)
+#   • package.json + production dependencies (electron-updater)
+#   devDependencies (react, vite, …) are NEVER packed — the renderer is a
+#   static bundle produced by `vite build`.
+#
+# `animaxia://` deep links are registered by the OS installers via
+# `protocols` below (the app also calls setAsDefaultProtocolClient at runtime
+# so portable/dev builds still work).
+
+appId: io.animaxia.desktop
+productName: Animaxia
+copyright: Copyright © Animaxia
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - src/main/**/*
+  - dist-renderer/**/*
+  - package.json
+  - "!**/node_modules/**/{.github,.bin,README.md,README,readme.md,readme,test,tests,__tests__,example,examples,*.d.ts,*.md,*.map,*.ts}"
+  - "!src/renderer/**"
+
+asar: true
+
+# animaxia:// deep-link scheme (installed per-OS by the installers)
+protocols:
+  - name: Animaxia deep link
+    schemes:
+      - animaxia
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.png
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Animaxia
+  artifactName: Animaxia-Setup-${version}.${ext}
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  category: public.app-category.entertainment
+  icon: build/icon.png
+  extendInfo:
+    CFBundleURLTypes:
+      - CFBundleURLName: io.animaxia.desktop
+        CFBundleURLSchemes: [animaxia]
+
+dmg:
+  title: Animaxia ${version}
+  artifactName: Animaxia-${version}-${arch}.${ext}
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  category: AudioVideo
+  icon: build/icon.png
+  desktop:
+    Name: Animaxia
+    Comment: Anime, movies, sports & AI streaming
+    Categories: AudioVideo;Network;
+  artifactName: Animaxia-${version}.${ext}
+
+# Auto-update feed (electron-updater). Point this at wherever you host the
+# `latest.yml` / `latest-mac.yml` / `latest-linux.yml` release metadata, or
+# override at runtime with the ANIMAXIA_UPDATE_URL environment variable.
+publish:
+  - provider: generic
+    url: https://updates.animaxia.io/desktop

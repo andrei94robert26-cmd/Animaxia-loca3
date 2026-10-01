@@ -1,0 +1,87 @@
+# =============================================================================
+# FAZA 24 — HPA backend cu REGULILE EXACTE (autoscaling/v2 + custom metrics).
+#
+#   scale-OUT (OR, oricare declanșează):
+#     • CPU > 70%  menținut 5 minute   → stabilizationWindowSeconds: 300
+#     • latență p95 /api > 500ms menținut 5 minute (custom metric)
+#     • coadă pipeline > 300 menținut 2 minute (custom metric, window 120)
+#   scale-IN (AND):
+#     • CPU < 40%  menținut 10 minute  → scaleDown stabilization 600
+#     • latență p95 < 200ms menținut 10 minute
+#   min 2 / max 20 replici.
+#
+# Valorile oglindesc EXACT mini-services/animaxia-stability/config.ts
+# (BACKEND_POLICY) — suita stability-faza24.mjs afirmă consistența.
+# Notă HPA: în Kubernetes, „>X% timp de 5 min" se obține prin
+# stabilizationWindowSeconds (ferestre de menținere) + praguri pe custom
+# metrics; motorul local (:4060) implementează semanticile identice 1:1.
+# =============================================================================
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: animaxia-backend-faza24
+  namespace: animaxia-core
+  labels:
+    app.kubernetes.io/name: animaxia-backend
+    app.kubernetes.io/part-of: animaxia-cloud
+    animaxia.io/faza: "24"
+  annotations:
+    animaxia.io/rules: |
+      scale-out: cpu>70% 5m | p95>500ms 5m | queue>300 2m (OR)
+      scale-in:  cpu<40% 10m & p95<200ms 10m (AND)
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: animaxia-backend
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    # CPU > 70% (regula de bază; fereastra de 5 min = scaleUp stabilization)
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # RAM — metrică urmărită (nu declanșează singură; aliniat FAZA 24 pct. 1)
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+    # latență p95 API > 500ms (Prometheus Adapter, expus de /api/metrics FAZA 9)
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_http_latency_p95_ms
+        target:
+          type: AverageValue
+          averageValue: "500"
+    # coadă pipeline > 300 (expus de /api/observability/metrics FAZA 23-b)
+    - type: Pods
+      pods:
+        metric:
+          name: animaxia_pipeline_queue_length
+        target:
+          type: AverageValue
+          averageValue: "300"
+  behavior:
+    scaleUp:
+      # „CPU > 70% PENTRU 5 MIN" — menținut continuu înainte de scalare.
+      stabilizationWindowSeconds: 300
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2          # stepOut = 2 (identic cu :4060 BACKEND_POLICY)
+          periodSeconds: 60 # cooldown 60s între pași (identic :4060)
+    scaleDown:
+      # „CPU < 40% PENTRU 10 MIN" — stabilizare lentă anti-flap.
+      stabilizationWindowSeconds: 600
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1          # stepIn = 1 (identic :4060)
+          periodSeconds: 120

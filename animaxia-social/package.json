@@ -1,0 +1,13 @@
+{
+  "name": "animaxia-social",
+  "version": "1.0.0",
+  "description": "Animaxia FAZA 10 \u2014 Social & Real-Time: monolith social modules (drop-in), realtime service (socket.io watch parties + live activity), end-to-end smoke tests.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "smoke": "bun tests/smoke-social.mjs"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}

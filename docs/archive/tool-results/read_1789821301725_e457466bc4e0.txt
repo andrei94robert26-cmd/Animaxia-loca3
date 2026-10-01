@@ -1,0 +1,592 @@
+     1→/**
+     2→ * server.js — Animaxia backend composition root: Express app, middleware stack,
+     3→ * module routers, core content/health/miner routes, DB boot + seeding,
+     4→ * graceful shutdown. Listens on PORT (default 4000).
+     5→ */
+     6→
+     7→import 'dotenv/config';
+     8→import express from 'express';
+     9→import cors from 'cors';
+    10→
+    11→import { initDb, listContent, getContentById, getContentByExternalId, upsertContent, deleteContent, countContent, countsByType, driverInfo, poolStats, closeDb, closeShardPools, listShardPools } from './db.js'; // closeShardPools + listShardPools added in FAZA 13 (sharding)
+    12→import { cache, cacheMiddleware } from './cache.js';
+    13→import { rateLimitMiddleware, rateLimitStats } from './rateLimit.js';
+    14→import { logger, requestLogger } from './utils/logger.js';
+    15→import { breakerStats } from './utils/fetcher.js';
+    16→import { mineUrl } from './miner.js';
+    17→import { seed } from './seed.js';
+    18→import { playerAllowedTypes, resolvePlayer, resolveExternalSource } from './modules/player/player.js';
+    19→import animeRouter from './modules/anime/jikan.js';
+    20→import { moviesRouter, tvRouter } from './modules/movies/tmdb.js';
+    21→import tvmazeRouter from './modules/tv/tvmaze.js';
+    22→import footballRouter from './modules/sports/football.js';
+    23→import f1Router from './modules/sports/f1.js';
+    24→import newsRouter from './modules/news/rss.js';
+    25→
+    26→/* Phase-2 platform modules (users, premium, social, ai, analytics, search, cache, workers, security, mobile) */
+    27→import { ensurePlatformSchema } from './modules/platform/migrations.js';
+    28→import { events } from './modules/platform/events.js';
+    29→import { authRouter, attachUser, requireAuth, requireAdmin } from './modules/users/auth.js';
+    30→import { securityRouter, auditLog, clientIpOf } from './modules/security/security.js';
+    31→import profileRouter from './modules/users/profile.js';
+    32→import { plansRouter } from './modules/premium/plans.js';
+    33→import stripeRouter from './modules/premium/stripe.js';
+    34→import { commentsRouter } from './modules/social/comments.js';
+    35→import { feedRouter } from './modules/social/feed.js';
+    36→import aiRouter from './modules/ai/ai.js';
+    37→import { homeAiRouter } from './modules/ai/home.js'; // FAZA 15: AI Home engine (/api/ai/home/*)
+    38→import { hubAiRouter } from './modules/ai/hub.js'; // FAZA 16-b: AI Hub — 6 new AIs (/api/ai/hub/*)
+    39→import analyticsRouter from './modules/analytics/analytics.js';
+    40→import searchRouter from './modules/search/search.js';
+    41→import advancedCacheRouter from './modules/cache/advancedCache.js';
+    42→import workersRouter from './modules/workers/workers.js';
+    43→import mobileRouter from './modules/mobile/mobile.js';
+    44→
+    45→/* Phase-4 AI Cloud layer (llm-core, vector-service, rag-engine, tools,
+    46→   animaxiaAssistant, personal AI, admin AI) — extends /api/ai + adds /api/vector */
+    47→import { aicloudRouter, vectorRouter, ensureAicloudSchema, aicloudBoot } from './modules/aicloud/router.js';
+    48→import { llmProviderStatus, llmUsageStats, aiQuotaStatus } from './modules/aicloud/llm-core.js';
+    49→import { vectorStatus } from './modules/aicloud/vector-service.js';
+    50→import { metrics, registerStandardCollectors, registerShardingCollectors } from './modules/ops/metrics.js'; // FAZA 9 ops + FAZA 13-5 sharding collectors
+    51→
+    52→/* FAZA 10 (social): follows, reviews, activity feed v2, watch parties,
+    53→   AI × social — additive routers, no changes to Phase-2 comments/feed. */
+    54→import { ensureSocialSchema } from './modules/social/social-migrations.js';
+    55→import { socialFollowsRouter } from './modules/social/follows.js';
+    56→import { socialReviewsRouter } from './modules/social/reviews.js';
+    57→import { socialActivityRouter, initSocialActivity } from './modules/social/activity.js';
+    58→import { socialPartyRouter } from './modules/social/watchparty.js';
+    59→import { socialAiRouter } from './modules/social/aisocial.js';
+    60→
+    61→/* FAZA 11 (multi-tenant): tenant registry, tenant-aware auth/JWT helpers,
+    62→   tenant AI Cloud quotas + scoped vector search, admin tenant CRUD,
+    63→   metered billing — strictly additive, contracts frozen. */
+    64→import { ensureTenantSchema } from './modules/tenant/tenant-migrations.js';
+    65→import { tenantAdminRouter, tenantContextRouter } from './modules/tenant/tenant-routes.js';
+    66→import { tenantAiRouter } from './modules/tenant/tenant-ai.js';
+    67→import { tenantBillingRouter } from './modules/tenant/billing.js';
+    68→
+    69→/* FAZA 12 (miner): ingest + indexing service — persistent job queue in Neon
+    70→ * (miner_jobs/sources/logs/manifests), TMDB/Jikan providers, tenant-scoped
+    71→ * vector indexing + search catalog push — strictly additive. */
+    72→import { ensureMinerSchema } from './modules/miner/miner-migrations.js';
+    73→import { minerBoot } from './modules/miner/core.js';
+    74→import minerRouter from './modules/miner/routes.js';
+    75→
+    76→/* FAZA 13 (sharding): shardid columns on content/searchdocs/vectorembeddings
+    77→ * (logical sharding by default — dedicated Neon branch pools activate via
+    78→ * SHARD{N}URL, see db.js + modules/sharding/). */
+    79→import { ensureShardingSchema, restampVectorShardIds } from './modules/sharding/migrations.js';
+    80→
+    81→/* FAZA 14 (discover): live category feeds for every sidebar menu — TMDB
+    82→ * discover slugs, real radio-browser stations, franchise & trilogy hubs. */
+    83→import { discoverRouter } from './modules/discover/discover.js';
+    84→import { radioRouter } from './modules/discover/radio.js';
+    85→import { franchiseRouter, trilogyRouter } from './modules/discover/collections.js';
+    86→
+    87→/* FAZA 16 (Task 16-a): global source dedup registry (contentsources) +
+    88→ * real scale report (live measurements, honest verdicts). */
+    89→import ingestRouter from './modules/ingest/dedup.js';
+    90→import scaleRouter from './modules/platform/scale.js';
+    91→
+    92→/* FAZA 17-a (Task 17-a): resilience core (per-request timeout, load shedding,
+    93→ * event-loop/memory monitors, watchdog) + stress laboratory + virtual 30B
+    94→ * catalog at /api/platform — strictly additive. */
+    95→import { resilienceMiddleware, stabilitySnapshot } from './modules/platform/resilience.js';
+    96→import platformRouter from './modules/platform/stress.js';
+    97→
+    98→/* FAZA 13 (Task 13-3): shard admin/observability router — /api/shards
+    99→ * (infra status + per-shard synthetics + admin cluster reindex), fed by the
+   100→ * search/vector cluster services in services/. */
+   101→import shardingRouter from './modules/sharding/routes.js';
+   102→
+   103→/* FAZA 13 (Task 13-5, ops): search/vector cluster snapshots + per-node health
+   104→ * for the 'shards' metrics collector namespace (animaxia_db_shard_*,
+   105→ * animaxia_search_cluster_*, animaxia_vector_cluster_*). */
+   106→import { searchClusterOpsSnapshot, searchCluster } from './services/search-cluster/index.js';
+   107→import { vectorClusterOpsSnapshot, vectorCluster } from './services/vector-cluster/index.js';
+   108→
+   109→/* FAZA 15 (Search Flow Control): the 'searchflow' metrics collector —
+   110→ * animaxia_search_* series (queue, inflight, windowing, dropped, …) fed by
+   111→ * modules/search/flow.js. */
+   112→import { searchFlowMetricsSnapshot } from './modules/search/flow.js';
+   113→
+   114→/* FAZA 16 (Search Rate Management): the 'searchrate' metrics collector —
+   115→ * animaxia_search_rate_* / animaxia_search_cooldown_active /
+   116→ * animaxia_search_spam_blocked / animaxia_search_burst_events series fed by
+   117→ * modules/search/rate.js. */
+   118→import { searchRateMetricsSnapshot } from './modules/search/rate.js';
+   119→
+   120→/* FAZA 17 (Search Optimization Layer): the 'searchopt' metrics collector —
+   121→ * animaxia_search_opt_* / animaxia_search_batch_hits / _cache_hits /
+   122→ * _cache_misses / animaxia_search_dedup_count series fed by
+   123→ * modules/search/opt.js. */
+   124→import { searchOptMetricsSnapshot } from './modules/search/opt.js';
+   125→
+   126→/* FAZA 18 (Full Integration + Stress Test): the 'searchstress' metrics
+   127→ * collector — animaxia_search_pipeline_integrated / animaxia_search_stress_*
+   128→ * series (the integrated 10-stage pipeline contract + the last
+   129→ * 10,000-simultaneous-searches run verdict) fed by
+   130→ * modules/search/stress.js. */
+   131→import { searchStressMetricsSnapshot } from './modules/search/stress.js';
+   132→
+   133→const PORT = parseInt(process.env.PORT || '4000', 10);
+   134→const VERSION = '1.0.0';
+   135→const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+   136→
+   137→function safeDecode(value) {
+   138→  try {
+   139→    return decodeURIComponent(value);
+   140→  } catch {
+   141→    return value;
+   142→  }
+   143→}
+   144→
+   145→function localFallbackWarning() {
+   146→  return driverInfo().driver === 'local-fallback'
+   147→    ? { warning: 'PostgreSQL credentials rejected — serving from local fallback store' }
+   148→    : {};
+   149→}
+   150→
+   151→/** Invalidate cached HTTP responses after any data mutation (provider cache stays warm).
+   152→ *  Also notifies platform modules (search index, advanced cache) via the event bus. */
+   153→function invalidateHttpCache() {
+   154→  cache.clearPrefix('http:');
+   155→  events.emit('content:changed');
+   156→}
+   157→
+   158→const app = express();
+   159→app.set('trust proxy', 1);
+   160→
+   161→/* FAZA 9 (ops): pull collectors for /api/metrics — read live state from the
+   162→ * modules already imported above; nothing is polled until a scrape happens. */
+   163→registerStandardCollectors({
+   164→  driverInfo,
+   165→  poolStats,
+   166→  cacheStats: () => cache.stats(),
+   167→  breakerStats,
+   168→  llmProviderStatus,
+   169→  llmUsageStats,
+   170→  vectorStatus,
+   171→});
+   172→// FAZA 13 (Task 13-5, ops): per-shard pools + search/vector cluster metrics — 'shards' pull collector (additive).
+   173→registerShardingCollectors({
+   174→  listShardPools,
+   175→  searchClusterOpsSnapshot,
+   176→  searchClusterHealth: () => searchCluster.health(),
+   177→  vectorClusterOpsSnapshot,
+   178→  vectorClusterHealth: () => vectorCluster.health(),
+   179→});
+   180→// FAZA 15 (Search Flow Control): animaxia_search_* series — 'searchflow' pull collector (additive).
+   181→metrics.attachPull('searchflow', () => searchFlowMetricsSnapshot());
+   182→// FAZA 16 (Search Rate Management): animaxia_search_rate_* series — 'searchrate' pull collector (additive).
+   183→metrics.attachPull('searchrate', () => searchRateMetricsSnapshot());
+   184→// FAZA 17 (Search Optimization Layer): animaxia_search_opt_* series — 'searchopt' pull collector (additive).
+   185→metrics.attachPull('searchopt', () => searchOptMetricsSnapshot());
+   186→// FAZA 18 (Full Integration + Stress Test): animaxia_search_stress_* + pipeline series — 'searchstress' pull collector (additive).
+   187→metrics.attachPull('searchstress', () => searchStressMetricsSnapshot());
+   188→app.use(
+   189→  cors({
+   190→    origin: (origin, cb) => cb(null, !origin || origin === process.env.CORS_ORIGIN || true),
+   191→  }),
+   192→);
+   193→app.use(express.json({ limit: '2mb' })); // 2mb: avatar data-URL uploads
+   194→app.use(requestLogger);
+   195→app.use(rateLimitMiddleware);
+   196→app.use(attachUser); // req.user (from Bearer token) available platform-wide
+   197→app.use(metrics.middleware()); // FAZA 9 ops: request counters + latency histograms (finish-hook, no behavior change)
+   198→app.use(resilienceMiddleware); // FAZA 17-a: per-request timeout + load shedding + in-flight gauge (before all routes)
+   199→
+   200→app.get('/', (req, res) => {
+   201→  res.json({
+   202→    service: 'animaxia-backend',
+   203→    version: VERSION,
+   204→    status: 'ok',
+   205→    docs: 'Try /api/health',
+   206→  });
+   207→});
+   208→
+   209→/* ------------------------------- module routers ------------------------------ */
+   210→
+   211→app.use('/api/anime', cacheMiddleware(), animeRouter);
+   212→app.use('/api/movies', cacheMiddleware(), moviesRouter);
+   213→// TVmaze's /schedule must be registered before the TMDB tv router so the paths coexist.
+   214→app.use('/api/tv', cacheMiddleware(), tvmazeRouter, tvRouter);
+   215→app.use('/api/sports/football', cacheMiddleware(), footballRouter);
+   216→app.use('/api/sports/f1', cacheMiddleware(), f1Router);
+   217→app.use('/api/news', cacheMiddleware(), newsRouter);
+   218→
+   219→/* ---------------------------- platform (Phase 2) ---------------------------- */
+   220→
+   221→app.use('/api/auth', authRouter);
+   222→app.use('/api/users', requireAuth, profileRouter);
+   223→app.use('/api/premium', plansRouter, stripeRouter);
+   224→app.use('/api/social', commentsRouter, feedRouter);
+   225→/* FAZA 10 (social): additive mounts — new paths only (people, follow/unfollow,
+   226→   following/followers, user/:id/profile, reviews/*, party*, parties, feed/v2). */
+   227→app.use('/api/social', socialFollowsRouter, socialReviewsRouter, socialActivityRouter, socialPartyRouter);
+   228→app.use('/api/ai/social', socialAiRouter); // friends-also-watched, taste matches, review digest
+   229→app.use('/api/ai/hub', hubAiRouter); // FAZA 16-b: must precede /api/ai (curator, forecaster, semantic, watchdog, marathon, translator)
+   230→app.use('/api/ai/home', homeAiRouter); // FAZA 15: must precede /api/ai (feed, taxonomy, stats, metadata, trailers, settings, browse)
+   231→app.use('/api/ai', aiRouter);
+   232→app.use('/api/analytics', analyticsRouter);
+   233→app.use('/api/search', searchRouter);
+   234→app.use('/api/cache', advancedCacheRouter);
+   235→app.use('/api/workers', workersRouter);
+   236→app.use('/api/security', requireAuth, requireAdmin, securityRouter);
+   237→app.use('/api/mobile', mobileRouter);
+   238→
+   239→/* ---------------------------- AI Cloud (Phase 4) ---------------------------- */
+   240→
+   241→app.use('/api/ai', aicloudRouter); // rag/*, assistant, personal/*, tools, admin/*, cloud/status
+   242→app.use('/api/vector', vectorRouter); // vector-service: status, search, index-content, index-user
+   243→
+   244→/* ------------------------- Multi-tenant (FAZA 11) ------------------------- */
+   245→
+   246→// Tenant AI surface — mounted BEFORE the base aicloud router would matter
+   247→// only if it had a /tenant catch-all (it does not — explicit literal paths
+   248→// only), so ordering here is defensive, not functional.
+   249→app.use('/api/ai/tenant', tenantAiRouter); // status, rag/:mode, vector/*, usage
+   250→app.use('/api/tenants', tenantAdminRouter, tenantBillingRouter); // admin CRUD + billing/*
+   251→app.use('/api/tenant', tenantContextRouter); // whoami context
+   252→
+   253→// FAZA 12 (miner): ingest + indexing — jobs, status, search push.
+   254→app.use('/api/miner', minerRouter);
+   255→
+   256→// FAZA 14 (discover): live sidebar menus + radio + franchise/trilogy hubs.
+   257→app.use('/api/discover', cacheMiddleware(), discoverRouter);
+   258→app.use('/api/radio', cacheMiddleware(), radioRouter);
+   259→app.use('/api/franchises', cacheMiddleware(), franchiseRouter);
+   260→app.use('/api/trilogies', cacheMiddleware(), trilogyRouter);
+   261→
+   262→// FAZA 16 (Task 16-a): /api/ingest MUST precede the content routes below;
+   263→// /api/scale is independent (additive mount).
+   264→app.use('/api/ingest', ingestRouter);
+   265→app.use('/api/scale', scaleRouter);
+   266→
+   267→// FAZA 13 (Task 13-3): /api/shards — sharding model/schema/pools/cluster
+   268→// health + ops counters (public read-only) and admin cluster reindex.
+   269→app.use('/api/shards', shardingRouter);
+   270→
+   271→// FAZA 17-a: /api/platform — stability snapshot, stress lab, virtual 30B catalog
+   272→// (no pre-existing /api/platform routes — verified before mounting).
+   273→app.use('/api/platform', platformRouter);
+   274→
+   275→/* -------------------------------- core routes -------------------------------- */
+   276→
+   277→app.get(
+   278→  '/api/health',
+   279→  wrap(async (req, res) => {
+   280→    const [totalItems, byType] = await Promise.all([countContent(), countsByType()]);
+   281→    const stability = stabilitySnapshot(); // FAZA 17-a
+   282→    res.json({
+   283→      status: 'ok',
+   284→      service: 'animaxia-backend',
+   285→      version: VERSION,
+   286→      env: process.env.NODE_ENV || 'development',
+   287→      uptimeSec: Math.floor(process.uptime()),
+   288→      timestamp: new Date().toISOString(),
+   289→      db: { ...driverInfo(), totalItems, countsByType: byType },
+   290→      cache: { ...cache.stats(), enabled: true, ttlMs: parseInt(process.env.CACHETTLMS || '60000', 10) },
+   291→      rateLimit: rateLimitStats(),
+   292→      providers: breakerStats(),
+   293→      player: { allowedTypes: playerAllowedTypes() },
+   294→      ai: { // FAZA 9 (ops): AI provider + per-caller quota snapshot
+   295→        provider: llmProviderStatus(),
+   296→        quota: aiQuotaStatus({ user: req.user ?? null, ip: clientIpOf(req) }),
+   297→      },
+   298→      stability: { // FAZA 17-a: live resilience gauges
+   299→        eventLoopLagP95Ms: stability.eventLoopLag.p95Ms,
+   300→        inFlight: stability.inFlight,
+   301→        shedCount: stability.shed.count,
+   302→      },
+   303→    });
+   304→  }),
+   305→);
+   306→
+   307→/* FAZA 9 (ops): unified metrics — Prometheus text (default) or ?format=json.
+   308→ * Aggregate counters/gauges only; safe to expose like /api/health. */
+   309→app.get(
+   310→  '/api/metrics',
+   311→  wrap(async (req, res) => {
+   312→    if (req.query.format === 'json') {
+   313→      return res.json(await metrics.snapshot());
+   314→    }
+   315→    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+   316→    return res.send(await metrics.renderPrometheus());
+   317→  }),
+   318→);
+   319→
+   320→app.get(
+   321→  '/api/all',
+   322→  cacheMiddleware(),
+   323→  wrap(async (req, res) => {
+   324→    const result = await listContent({
+   325→      page: parseInt(req.query.page, 10) || 1,
+   326→      limit: parseInt(req.query.limit, 10) || 20,
+   327→      type: req.query.type || undefined,
+   328→      search: req.query.search || undefined,
+   329→      sort: req.query.sort === 'title' ? 'title' : 'createdat',
+   330→    });
+   331→    res.status(200).json({ ...result, ...localFallbackWarning() });
+   332→  }),
+   333→);
+   334→
+   335→app.get(
+   336→  '/api/content/external/:externalid',
+   337→  cacheMiddleware(),
+   338→  wrap(async (req, res) => {
+   339→    const row = await getContentByExternalId(safeDecode(req.params.externalid));
+   340→    if (!row) return res.status(404).json({ error: 'Content not found' });
+   341→    return res.json(row);
+   342→  }),
+   343→);
+   344→
+   345→app.get(
+   346→  '/api/content/:id',
+   347→  cacheMiddleware(),
+   348→  wrap(async (req, res) => {
+   349→    const id = parseInt(req.params.id, 10);
+   350→    if (!Number.isInteger(id) || id <= 0) {
+   351→      return res.status(400).json({ error: 'Invalid content id' });
+   352→    }
+   353→    // FAZA 13 (sharding): gateway shard hint (x-animaxia-shard) — optional
+   354→    // read affinity; a bogus/absent header keeps the legacy unfiltered path.
+   355→    const shardHint = parseInt(req.headers['x-animaxia-shard'], 10);
+   356→    const row = await getContentById(id, { shardId: Number.isInteger(shardHint) && shardHint >= 0 ? shardHint : undefined });
+   357→    if (!row) return res.status(404).json({ error: 'Content not found' });
+   358→    return res.json(row);
+   359→  }),
+   360→);
+   361→
+   362→app.delete(
+   363→  '/api/content/:id',
+   364→  wrap(async (req, res) => {
+   365→    const id = parseInt(req.params.id, 10);
+   366→    if (!Number.isInteger(id) || id <= 0) {
+   367→      return res.status(400).json({ error: 'Invalid content id' });
+   368→    }
+   369→    const deleted = await deleteContent(id);
+   370→    if (!deleted) return res.status(404).json({ error: 'Content not found' });
+   371→    invalidateHttpCache();
+   372→    await auditLog({ userid: req.user?.id ?? null, action: 'content.delete', ip: clientIpOf(req), meta: { id, title: deleted.title } });
+   373→    return res.json({ ok: true, deleted });
+   374→  }),
+   375→);
+   376→
+   377→app.post(
+   378→  '/api/content',
+   379→  wrap(async (req, res) => {
+   380→    const { externalid, type, title, thumbnail, metadata } = req.body || {};
+   381→    if (!externalid || !title) {
+   382→      return res.status(400).json({ error: 'Missing required fields: externalid, title' });
+   383→    }
+   384→    const { record, created } = await upsertContent({ externalid, type, title, thumbnail, metadata });
+   385→    invalidateHttpCache();
+   386→    await auditLog({ userid: req.user?.id ?? null, action: created ? 'content.create' : 'content.update', ip: clientIpOf(req), meta: { id: record.id, externalid } });
+   387→    return res.json({ ok: true, record, created });
+   388→  }),
+   389→);
+   390→
+   391→app.get(
+   392→  '/api/content/:id/player',
+   393→  cacheMiddleware(),
+   394→  wrap(async (req, res) => {
+   395→    const id = parseInt(req.params.id, 10);
+   396→    if (!Number.isInteger(id) || id <= 0) {
+   397→      return res.status(400).json({ error: 'Invalid content id' });
+   398→    }
+   399→    // FAZA 13 (sharding): pass the gateway shard hint through (same affinity
+   400→    // semantics as GET /api/content/:id).
+   401→    const shardHint = parseInt(req.headers['x-animaxia-shard'], 10);
+   402→    const content = await getContentById(id, { shardId: Number.isInteger(shardHint) && shardHint >= 0 ? shardHint : undefined });
+   403→    if (!content) return res.status(404).json({ error: 'Content not found' });
+   404→    const resolved = await resolvePlayer(content);
+   405→    return res.json(resolved);
+   406→  }),
+   407→);
+   408→
+   409→/* FAZA 14 (Task 14-2): UNIVERSAL EXTERNAL PLAYBACK — resolve ANY external URL
+   410→ * (YouTube / Vimeo / Rumble / MP4 / HLS m3u8 / any iframe-embed JS) to a
+   411→ * playable descriptor with ZERO database access: the player never depends on
+   412→ * how many real content rows exist in Neon (definitive spec rule 4).
+   413→ * Policy-filtered (PLAYERALLOW* flags) + SSRF-guarded (private networks
+   414→ * blocked unless MINERALLOWPRIVATE_NETWORK=true). Public + cacheable. */
+   415→app.get(
+   416→  '/api/player/external',
+   417→  cacheMiddleware(),
+   418→  wrap(async (req, res) => {
+   419→    const resolved = resolveExternalSource(String(req.query.url || ''));
+   420→    if (!resolved.ok) {
+   421→      return res.status(400).json(resolved);
+   422→    }
+   423→    return res.json(resolved);
+   424→  }),
+   425→);
+   426→
+   427→async function handleMine(req, res) {
+   428→  const url = req.method === 'GET' ? req.query.url : req.body?.url;
+   429→  if (!url || typeof url !== 'string') {
+   430→    return res.status(400).json({ error: 'Missing url' });
+   431→  }
+   432→  const options =
+   433→    req.method === 'GET'
+   434→      ? { type: req.query.type, externalId: req.query.externalId }
+   435→      : { type: req.body?.type, externalId: req.body?.externalId };
+   436→  try {
+   437→    const { extraction, record } = await mineUrl(url, options);
+   438→    invalidateHttpCache();
+   439→    await auditLog({ userid: req.user?.id ?? null, action: 'miner.run', ip: clientIpOf(req), meta: { url, id: record?.id } });
+   440→    return res.json({ ok: true, extraction, record });
+   441→  } catch (err) {
+   442→    return res.status(err.status || 502).json({ error: err.message || 'Mining failed' });
+   443→  }
+   444→}
+   445→
+   446→// GET /api/miner also UPSERTs (explicitly uncached — every call re-mines and re-upserts).
+   447→app.get('/api/miner', wrap(handleMine));
+   448→app.post('/api/miner', wrap(handleMine));
+   449→
+   450→app.post(
+   451→  '/api/admin/seed',
+   452→  wrap(async (req, res) => {
+   453→    const result = await seed();
+   454→    invalidateHttpCache();
+   455→    await auditLog({ userid: req.user?.id ?? null, action: 'admin.seed', ip: clientIpOf(req), meta: { added: result.added } });
+   456→    return res.json({ ok: true, ...result });
+   457→  }),
+   458→);
+   459→
+   460→/* ------------------------------ error handling ------------------------------ */
+   461→
+   462→app.use((req, res) => {
+   463→  res.status(404).json({ error: 'Route not found' });
+   464→});
+   465→
+   466→// eslint-disable-next-line no-unused-vars
+   467→app.use((err, req, res, next) => {
+   468→  const status = err.status || 500;
+   469→  logger.error(`[error] ${req.method} ${req.originalUrl} → ${status}: ${err.message}`);
+   470→  res.status(status).json({ error: err.message || 'Internal server error' });
+   471→});
+   472→
+   473→/* ---------------------------------- boot ------------------------------------ */
+   474→
+   475→async function main() {
+   476→  await initDb();
+   477→
+   478→  // Phase-2 platform schema (users, tokens, watchlist, history, comments,
+   479→  // votes, likes, views, subscriptions, audit logs, ai chats) — idempotent.
+   480→  try {
+   481→    await ensurePlatformSchema();
+   482→  } catch (err) {
+   483→    logger.error(`[boot] Platform schema migration failed (platform modules will answer 503): ${err.message}`);
+   484→  }
+   485→
+   486→  // Phase-4 AI Cloud schema (aiusagelogs, agentconversations, aiprofiles +
+   487→  // pgvector attempt) — idempotent; failures degrade to in-memory mode.
+   488→  try {
+   489→    await ensureAicloudSchema();
+   490→    aicloudBoot(); // vector backend init + background content auto-index
+   491→  } catch (err) {
+   492→    logger.warn(`[boot] AI Cloud schema degraded (in-memory mode): ${err.message}`);
+   493→    aicloudBoot();
+   494→  }
+   495→
+   496→  // FAZA 10 (social) schema (follows, reviews, reviewlikes, activityevents,
+   497→  // watchparties, watchpartymembers, partymessages) — idempotent; failures
+   498→  // degrade social routes to 503 without affecting the rest of the platform.
+   499→  try {
+   500→    await ensureSocialSchema();
+   501→    initSocialActivity(); // platform-bus → activityevents mirror + realtime webhook
+   502→  } catch (err) {
+   503→    logger.warn(`[boot] Social schema degraded (social routes will answer 503): ${err.message}`);
+   504→  }
+   505→
+   506→  // FAZA 11 (multi-tenant) schema (tenants, tenantusers, tenantlimits,
+   507→  // tenantconfig, tenantusageevents, tenantinvoices + additive tenantid
+   508→  // columns on vectorembeddings/refreshtokens) — idempotent; failures degrade
+   509→  // tenant routes to 503 while the rest of the platform stays on 'global'.
+   510→  try {
+   511→    await ensureTenantSchema();
+   512→  } catch (err) {
+   513→    logger.warn(`[boot] Tenant schema degraded (tenant routes will answer 503/404): ${err.message}`);
+   514→  }
+   515→
+   516→  // FAZA 12 (miner) schema (miner_jobs, miner_sources, miner_logs,
+   517→  // miner_manifests) — idempotent; failures degrade miner routes to 503
+   518→  // while the rest of the platform is unaffected.
+   519→  let minerReady = false;
+   520→  try {
+   521→    await ensureMinerSchema();
+   522→    minerBoot(); // interrupted-job recovery + metrics collector + queue resume
+   523→    minerReady = true;
+   524→  } catch (err) {
+   525→    logger.warn(`[boot] Miner schema degraded (miner routes will answer 503): ${err.message}`);
+   526→  }
+   527→
+   528→  // FAZA 13 (sharding): shardid columns on content/searchdocs/vectorembeddings — idempotent; failures degrade shard routing to legacy (shard 0).
+   529→  try {
+   530→    await ensureShardingSchema();
+   531→  } catch (err) {
+   532→    logger.warn(`[boot] Sharding schema degraded (shard routing falls back to legacy shard 0): ${err.message}`);
+   533→  }
+   534→
+   535→  // FAZA 14: re-stamp vectorembeddings under the current hash rule (SHARDCOUNT
+   536→  // 4 → 30 changed the correct shardid for existing vector rows). Idempotent,
+   537→  // never throws, no-op once converged.
+   538→  try {
+   539→    await restampVectorShardIds();
+   540→  } catch {
+   541→    /* already never throws — belt and braces */
+   542→  }
+   543→
+   544→  try {
+   545→    const count = await countContent();
+   546→    if (count === 0) {
+   547→      logger.info('[boot] Empty database — seeding initial content…');
+   548→      const result = await seed();
+   549→      logger.info(
+   550→        `[boot] Seeded demo:${result.added.demo} movie:${result.added.movie} tv:${result.added.tv} anime:${result.added.anime} (animeSource=${result.animeSource}, totalItems=${result.totalItems})`,
+   551→      );
+   552→    } else {
+   553→      logger.info(`[boot] Database already has ${count} items — skipping seed`);
+   554→    }
+   555→  } catch (err) {
+   556→    logger.error(`[boot] Seeding failed (non-fatal): ${err.message}`);
+   557→  }
+   558→
+   559→  const info = driverInfo();
+   560→  const server = app.listen(PORT, () => {
+   561→    logger.info('============================================================');
+   562→    logger.info(`  ANIMAXIA BACKEND v${VERSION} — listening on http://localhost:${PORT}`);
+   563→    logger.info(`  DB driver: ${info.driver} (connected: ${info.connected})`);
+   564→    logger.info(`  Env: ${process.env.NODE_ENV || 'development'} · Cache TTL: ${process.env.CACHETTLMS}ms · Miner: ${minerReady ? 'ready' : 'degraded'}`);
+   565→    logger.info('============================================================');
+   566→  });
+   567→
+   568→  const shutdown = async (signal) => {
+   569→    logger.info(`[shutdown] ${signal} received — closing server`);
+   570→    server.close(async () => {
+   571→      await closeDb();
+   572→      await closeShardPools(); // FAZA 13 (sharding): dedicated shard branch pools (main pool closed by closeDb)
+   573→      process.exit(0);
+   574→    });
+   575→    setTimeout(() => process.exit(0), 5000).unref();
+   576→  };
+   577→
+   578→  process.on('SIGINT', () => shutdown('SIGINT'));
+   579→  process.on('SIGTERM', () => shutdown('SIGTERM'));
+   580→  process.on('unhandledRejection', (reason) => {
+   581→    logger.error(`[process] Unhandled rejection: ${reason instanceof Error ? reason.stack || reason.message : reason}`);
+   582→  });
+   583→  process.on('uncaughtException', (err) => {
+   584→    logger.error(`[process] Uncaught exception: ${err instanceof Error ? err.stack || err.message : err}`);
+   585→  });
+   586→}
+   587→
+   588→main().catch((err) => {
+   589→  logger.error(`[boot] Fatal startup error: ${err.stack || err.message}`);
+   590→  process.exit(1);
+   591→});
+   592→

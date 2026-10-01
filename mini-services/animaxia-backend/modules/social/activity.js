@@ -29,7 +29,6 @@
 
 import express from 'express';
 import { rows, one, jsonb, parseJsonb, isoOrNull, num } from '../platform/sql.js';
-import { assertPostgres } from '../platform/sql.js';
 import { requireAuth, attachUser } from '../users/auth.js';
 import { events } from '../platform/events.js';
 import { logger } from '../../utils/logger.js';
@@ -130,7 +129,6 @@ socialActivityRouter.get(
   '/feed/v2',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const limit = Math.min(Math.max(num(req.query.limit, PAGE_SIZE_DEFAULT), 1), PAGE_SIZE_MAX);
     const cursor = decodeCursor(req.query.cursor);
@@ -141,11 +139,11 @@ socialActivityRouter.get(
     );
     const actorIds = [me, ...followingRows.map((r) => num(r.followeeid))].filter((id) => id > 0);
 
-    const params = [actorIds];
-    let where = 'ae.actorid = ANY($1::int[])';
+    const params = [JSON.stringify(actorIds)];
+    let where = 'ae.actorid IN (SELECT value FROM json_each($1))';
     if (cursor) {
       params.push(cursor.ts, cursor.id);
-      where += ' AND (ae.createdat, ae.id) < ($2::timestamptz, $3::int)';
+      where += ' AND (ae.createdat, ae.id) < ($2, $3)';
     }
     params.push(limit + 1);
 
@@ -176,7 +174,6 @@ socialActivityRouter.get(
   '/feed/v2/public',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     const limit = Math.min(Math.max(num(req.query.limit, PAGE_SIZE_DEFAULT), 1), PAGE_SIZE_MAX);
     const cursor = decodeCursor(req.query.cursor);
 
@@ -184,7 +181,7 @@ socialActivityRouter.get(
     let where = 'TRUE';
     if (cursor) {
       params.push(cursor.ts, cursor.id);
-      where = '(ae.createdat, ae.id) < ($1::timestamptz, $2::int)';
+      where = '(ae.createdat, ae.id) < ($1::timestamptz, $2)';
     }
     params.push(limit + 1);
 

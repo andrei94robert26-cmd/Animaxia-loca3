@@ -1,0 +1,14 @@
+      samples_ranked AS (
+        SELECT e.value AS value, content.id AS sid, content.title AS stitle,
+               content.thumbnail AS sthumbnail, content.type AS stype,
+               ROW_NUMBER() OVER (
+                 PARTITION BY e.value
+                 ORDER BY ${RATING_NUM} DESC NULLS LAST, content.id ASC
+               ) AS rn
+        FROM exploded e JOIN content ON content.id = e.id
+      ),
+      samples AS (
+        SELECT value, sid, stitle, sthumbnail, stype
+        FROM samples_ranked
+        WHERE rn = 1
+      )

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://animaxia.internal/schemas/read-router.config.v1.json",
+  "v": 1,
+  "primary": {
+    "region": "eu",
+    "role": "write",
+    "host": "<neon-primary-host>",
+    "notes": "The existing Neon project endpoint. All writes and every path not listed in readSplit.readPaths lands here."
+  },
+  "replicas": [
+    {
+      "region": "eu",
+      "role": "read",
+      "via": "neon-branch",
+      "host": "<neon-read-replica-eu-host>",
+      "notes": "Neon read-only branch + read_only endpoint (terraform/neon-multiregion.tf). Same region as the primary — read scaling inside eu."
+    },
+    {
+      "region": "us",
+      "role": "read",
+      "via": "logical-replication",
+      "host": "<placeholder-us-regional-postgres>",
+      "notes": "PLACEHOLDER — separate regional PostgreSQL fed by Neon logical replication (pgoutput). NOT provisioned by Terraform here; see domain/neon/README.md."
+    },
+    {
+      "region": "asia",
+      "role": "read",
+      "via": "logical-replication",
+      "host": "<placeholder-asia-regional-postgres>",
+      "notes": "PLACEHOLDER — same logical-replication pattern as us."
+    }
+  ],
+  "failoverOrder": ["eu", "us", "asia"],
+  "readSplit": {
+    "enabled": true,
+    "readPaths": [
+      "/api/hub/browse",
+      "/api/hub/feed",
+      "/api/search/advanced",
+      "/api/search/autocomplete"
+    ],
+    "writePaths": [
+      "/api/users",
+      "/api/social",
+      "/api/admin"
+    ]
+  },
+  "notes": [
+    "HONEST LIMITATION: Neon has no native cross-region replication. The eu replica is a real Neon branch + read_only endpoint; us/asia replicas are separate regional PostgreSQL instances fed by Neon logical replication (pgoutput) — placeholders until those instances exist.",
+    "Integration point: the future read-router consumes DATABASE_READ_REPLICA_URLS (env var, documented) — NOT wired into the protected backend in FAZA 22. The backend, its schema, FTS and sharding stay untouched.",
+    "failoverOrder applies to READ path election only; the write primary stays the Neon eu project (single-writer).",
+    "readSplit.writePaths is an explicit allowlist for the primary — anything not in readPaths is treated as a write and routed to the primary by default."
+  ]
+}

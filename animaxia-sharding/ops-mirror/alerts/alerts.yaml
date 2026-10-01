@@ -1,0 +1,141 @@
+# =============================================================================
+# Animaxia — ops alert rules (FAZA 9)
+# =============================================================================
+# PrometheusRule-style file. Consumes the recording rules from slo.yaml
+# (group animaxia_slo). Severity ladder:
+#   critical → page / immediate action
+#   warning  → ticket / investigate soon
+#   info     → awareness, no action required
+# Every alert links a runbook in animaxia-ops/runbooks/ — the full
+# alert → runbook matrix lives in animaxia-ops/alerts/README.md.
+# Metric names/labels follow animaxia-ops/metrics/METRICS.md (canonical).
+# =============================================================================
+
+groups:
+  - name: animaxia-ops-alerts
+    rules:
+      # ── Error budget burn on any SLO route ─────────────────────────────────
+      - alert: AnimaxiaErrorRateHigh
+        expr: slo:availability:error_ratio_1h > 0.02
+        for: 10m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "SLO error rate > 2% ({{ $labels.slo }})"
+          description: "The 1h error ratio for SLO '{{ $labels.slo }}' is {{ $value | humanizePercentage }}, above the 2% error-budget burn threshold (availability target 99.5% over 28d, budget 0.5% ≈ 3.4h downtime). Inspect the affected route on the 'Animaxia — User Experience' dashboard."
+          runbook_url: "animaxia-ops/runbooks/error-budget-burn.md"
+
+      # ── Neon / PostgreSQL connection lost ──────────────────────────────────
+      - alert: AnimaxiaNeonDisconnected
+        expr: animaxia_db_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "Neon (PostgreSQL) disconnected on the Animaxia monolith"
+          description: "animaxia_db_connected has been 0 for 2 minutes — the SQL layer is on the local fallback store and pgvector/RAG is degraded. The documented quick recovery is mini-services/animaxia-backend/restore-env.sh (see runbook)."
+          runbook_url: "animaxia-ops/runbooks/neon-outage.md"
+
+      # ── AI quota 402 spike ─────────────────────────────────────────────────
+      - alert: AnimaxiaAiQuotaSpike
+        expr: sum(rate(animaxia_quota_responses_total[15m])) * 60 > 5
+        for: 15m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "AI quota 402 responses > 5/min for 15m on /api/ai"
+          description: "Sustained 402 (quota exhausted) rate above 5 per minute on the /api/ai* quota gate (animaxia_quota_responses_total). Either an abusive client is hammering AI endpoints or the quota plan/limit is misconfigured. Per-route breakdown: 'Animaxia — AI Cloud' dashboard."
+          runbook_url: "animaxia-ops/runbooks/ai-quota-spike.md"
+
+      # ── AI latency SLO burn ────────────────────────────────────────────────
+      - alert: AnimaxiaAiLatencySLOBurn
+        expr: slo:ai_latency:p95_1h > 1500
+        for: 15m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "AI p95 latency above the 1500 ms SLO ({{ $labels.route }})"
+          description: "slo:ai_latency:p95_1h on route {{ $labels.route }} is {{ $value | humanize }} ms — above the 1500 ms FAZA 9 SLO target for 15 minutes. Check the LLM provider health and whether the degraded/fallback path is serving (animaxia_ai_degraded_total, 'Animaxia — AI Cloud' dashboard)."
+          runbook_url: "animaxia-ops/runbooks/ai-provider-degraded.md"
+
+      # ── AI provider degraded (fallback fired) ──────────────────────────────
+      - alert: AnimaxiaAiProviderDegraded
+        expr: increase(animaxia_ai_degraded_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "AI provider degraded — fallback fired"
+          description: "animaxia_ai_degraded_total increased within the last 15m: the primary LLM provider failed and the fallback path served requests. Expect elevated latency and/or reduced answer quality while this fires."
+          runbook_url: "animaxia-ops/runbooks/ai-provider-degraded.md"
+
+      # ── Edge WAF blocks spike ──────────────────────────────────────────────
+      - alert: AnimaxiaEdgeWafBlocksSpike
+        expr: sum(increase(animaxia_edge_waf_blocks_total[15m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Edge WAF blocked > 50 requests in 15m"
+          description: "WAF blocks across all rules (bot, sqli, xss, traversal, null-byte, query-size) exceeded 50 in 15 minutes. Could be an attack being correctly blocked — or a misconfigured rule eating legitimate traffic. Compare the per-rule breakdown on the 'Animaxia — Edge Gateway' dashboard."
+          runbook_url: "animaxia-ops/runbooks/edge-waf-misconfig.md"
+
+      # ── Edge cache hit ratio low ───────────────────────────────────────────
+      - alert: AnimaxiaEdgeCacheHitRatioLow
+        expr: |
+          sum(rate(animaxia_edge_cache_events_total{state="hit"}[5m]))
+            /
+          sum(rate(animaxia_edge_cache_events_total{state=~"hit|miss"}[5m])) < 0.3
+        for: 30m
+        labels:
+          severity: info
+          team: animaxia-ops
+        annotations:
+          summary: "Edge cache hit ratio below 30% for 30m"
+          description: "Edge cache hit ratio (hit / hit+miss) has been under 0.3 for 30 minutes — origin offload is poor. Check the x-edge-cache states (bypass/disabled/stale share) on the 'Animaxia — Edge Gateway' dashboard and review cache tags/TTLs."
+          runbook_url: "animaxia-ops/runbooks/edge-cache-hit-ratio.md"
+
+      # ── Scrape target down ─────────────────────────────────────────────────
+      - alert: AnimaxiaServiceDown
+        expr: up{job=~"animaxia-.*"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "Animaxia scrape target down: {{ $labels.job }} @ {{ $labels.instance }}"
+          description: "Prometheus has been unable to scrape {{ $labels.instance }} (job {{ $labels.job }}) for 5 minutes — the service is down or its /metrics endpoint is broken. For the monolith the metrics path is /api/metrics."
+          runbook_url: "animaxia-ops/runbooks/service-down.md"
+
+  # ── FAZA 13 (sharding) — per-shard DB + search cluster alerts ──────────────
+  - name: animaxia-sharding-alerts
+    rules:
+      # ── A shard pool lost its connection ───────────────────────────────────
+      - alert: AnimaxiaShardDown
+        expr: animaxia_db_shard_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: animaxia-ops
+        annotations:
+          summary: "DB shard {{ $labels.shard }} ({{ $labels.branch }}) disconnected on the Animaxia monolith"
+          description: "animaxia_db_shard_connected{shard='{{ $labels.shard }}'} has been 0 for 2 minutes. Logical mode (mode='main'): the shard routes through the shared main Neon pool — this means the whole SQL layer is degraded (same signal class as AnimaxiaNeonDisconnected, expect local-fallback / 503s). Physical mode (mode='branch'): the dedicated Neon branch pool for shard {{ $labels.shard }} is down — queriesOnShard falls back to the main pool with a latency penalty per query, and that shard's searchdocs/vectorembeddings are served cross-pool until the branch recovers. Per-shard breakdown: 'Animaxia — DB Shards' dashboard."
+          runbook_url: "animaxia-ops/runbooks/shard-down.md"
+
+      # ── Search cluster lost nodes ──────────────────────────────────────────
+      - alert: AnimaxiaSearchClusterNodeDown
+        expr: animaxia_search_cluster_enabled == 1 and animaxia_search_cluster_nodes_healthy < animaxia_search_cluster_nodes_total
+        for: 5m
+        labels:
+          severity: warning
+          team: animaxia-ops
+        annotations:
+          summary: "Search cluster degraded — fewer healthy nodes than shards"
+          description: "The FAZA 13 search cluster (FTS fan-out over searchdocs per shard) has fewer healthy nodes than shards for 5 minutes. Fan-out still completes over the surviving nodes (a query only fails when ALL nodes fail), but result coverage and latency degrade — per-node docs/latency on the 'Animaxia — DB Shards' dashboard shows which shard is missing. Check whether the underlying shard pool is flapping (AnimaxiaShardDown) or a single node's health ping keeps timing out."
+          runbook_url: "animaxia-ops/runbooks/search-cluster-node-down.md"

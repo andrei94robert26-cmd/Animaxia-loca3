@@ -1,0 +1,65 @@
+# animaxia-edge-ai — Cloudflare Worker config
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# The AI worker accelerates the cloud AI surface (mini-services aicloud
+# router: /api/ai/* + /api/vector/*) behind the preserved /ai/* prefix:
+# two-level RAG caching in EMBEDDINGS_CACHE (L1 answers ans:* + L2 retrieval
+# pre-warm emb:vec:*), streaming-safe assistant passthrough, and SWR caching
+# for the public status/tools endpoints. The gateway routes /ai/* here with
+# the URL preserved. Full logic: src/index.ts.
+
+name = "animaxia-edge-ai"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+# `wrangler whoami` shows your subdomain. Turn off once you route the zone
+# through the gateway worker if you don't want the extra public URL.
+workers_dev = true
+
+# --- Routes ------------------------------------------------------------------
+# Uncomment AFTER the zone (animaxia.com) is on your Cloudflare account and
+# the gateway worker routes /ai/* to this worker via a service binding.
+#
+# routes = [
+#   { pattern = "ai.animaxia.com/*", zone_name = "animaxia.com" },
+# ]
+
+# --- Bindings ----------------------------------------------------------------
+# KV: EDGE_CONFIG — runtime configuration (key "config", shared/config.ts
+# defaults + KV override). Create with:
+#   wrangler kv namespace create EDGE_CONFIG
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EMBEDDINGS_CACHE — L1 RAG answer cache (ans:assistant:*, ans:rag:*)
+# + L2 vector retrieval cache (emb:vec:*); TTLs come from cfg.ai
+# (ragAnswerTtlSec / embeddingsTtlSec in shared/config.ts).
+[[kv_namespaces]]
+binding = "EMBEDDINGS_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_CACHE — SWR / stale-if-error response cache (shared/cache.ts) for
+# the public GET endpoints (/ai/cloud/status, /ai/tools).
+[[kv_namespaces]]
+binding = "EDGE_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# --- Vars --------------------------------------------------------------------
+# Where the cloud monolith / gateway is reached from the edge. The default
+# matches the local mini-services gateway for `wrangler dev` style setups —
+# production must point at the cloud gateway host. Optional per-service
+# overrides (AI_ORIGIN / VECTOR_ORIGIN, see shared/upstream.ts) default to
+# CLOUD_ORIGIN; path rewrites /ai/* → /api/ai/* and /vector/* →
+# /api/vector/* are applied by shared/upstream.ts.
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+
+# --- Secrets -----------------------------------------------------------------
+# This worker requires NO secrets — AI endpoints are proxied with the
+# caller's own Authorization header, and every cache tier stores anonymous
+# (non-personalized) answers only. If you ever need one, NEVER put secrets
+# in this file — use:  wrangler secret put <NAME>   (read from `env.<NAME>`).

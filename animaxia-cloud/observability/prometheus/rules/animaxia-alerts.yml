@@ -1,0 +1,176 @@
+# =============================================================================
+# Animaxia Cloud — Prometheus alerting + recording rules (BLUEPRINT §11)
+# =============================================================================
+# Loaded by the `prometheus` container from /etc/prometheus/rules/ (read-only
+# mount of observability/prometheus/rules/).
+#
+# Groups:
+#   animaxia-availability — services/upstreams down, error rate, open breakers
+#   animaxia-performance  — latency, event-loop lag, memory pressure
+#   animaxia-queue        — backlog, dead letters, stalled workers
+#   animaxia-recordings   — pre-aggregated series used by the Grafana
+#                           dashboards (animaxia-overview / animaxia-queue)
+#
+# Severity levels:
+#   critical — user-visible impact, page someone now
+#   warning  — degradation, investigate soon (hours, not days)
+#
+# Alert delivery: rules populate the Prometheus /alerts UI (and Grafana's
+# alert list) — Alertmanager + notification channels are future work
+# (see observability/README.md → "Alerts & runbook").
+#
+# PromQL notes:
+#   * animaxia_worker_last_heartbeat_seconds is the AGE of the last heartbeat
+#     (gauge, seconds) — >300 means the worker thread went quiet for 5 min.
+#   * animaxia_queue_depth{status="dead"} is a gauge; increase() over 1h
+#     catches fresh dead letters without paging on a stable old backlog.
+# =============================================================================
+
+groups:
+  # ───────────────────────────── availability ───────────────────────────────
+  - name: animaxia-availability
+    rules:
+      - alert: AnimaxiaServiceDown
+        expr: up{job=~"animaxia-.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Animaxia service {{ $labels.job }} is down"
+          description: "Scrape target {{ $labels.job }} ({{ $labels.instance }}) has been unreachable for more than 1 minute. All requests routed to this service are failing or served from cache/fallback."
+          runbook: "check service logs / restart deployment — Grafana → Live logs (or `docker compose logs <service>`), then restart with `docker compose up -d <service>` / `kubectl rollout restart deploy/<service>`."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+      - alert: AnimaxiaGatewayUpstreamDown
+        expr: animaxia_gateway_upstream_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway upstream {{ $labels.service }} failed its /health probe"
+          description: "The gateway's background probe got no healthy answer from {{ $labels.service }} for 2+ minutes. The route to /api/* may already be protected by its circuit breaker."
+          runbook: "Check the upstream container (logs + /health via the debug profile), then the gateway breaker state at GET /api/gateway/routes. Restart the upstream if it stays down."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+      - alert: AnimaxiaHighErrorRate
+        expr: >-
+          sum by (service) (rate(animaxia_http_requests_total{status=~"5.."}[5m]))
+          / sum by (service) (rate(animaxia_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} returns 5xx for >5% of requests"
+          description: "5xx error ratio above 5% (5-minute window) sustained for 5 minutes. Current ratio: {{ $value | humanizePercentage }}."
+          runbook: "Filter live logs to the service (Grafana → Live logs, level=ERROR), check its dependencies (Postgres, external providers) and its circuit breakers. If a provider is down, the breaker should shed load — verify it is not stuck closed."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+      - alert: AnimaxiaCircuitOpen
+        expr: animaxia_circuit_state == 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker {{ $labels.breaker }} (in {{ $labels.service }}) is OPEN"
+          description: "Circuit breaker '{{ $labels.breaker }}' owned by {{ $labels.service }} has been open for over a minute — calls are failing fast instead of being attempted."
+          runbook: "Check the breaker target's health/logs; the breaker half-opens automatically after its cooldown. If it flaps open repeatedly, the upstream is genuinely unhealthy — treat as a downstream incident."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+  # ───────────────────────────── performance ────────────────────────────────
+  - name: animaxia-performance
+    rules:
+      - alert: AnimaxiaHighLatency
+        expr: >-
+          histogram_quantile(0.95, sum by (le, service, route) (rate(animaxia_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency above 1s on {{ $labels.service }} {{ $labels.route }}"
+          description: "Route {{ $labels.route }} on {{ $labels.service }} has a 5-minute p95 of {{ $value | humanizeDuration }} — slower than the 1s SLO."
+          runbook: "Check the slow route's spans in Grafana Explore → Tempo (search by service name), then the service's event-loop lag / memory panels. Slow external providers usually show up as CLIENT spans in the trace."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+      - alert: AnimaxiaEventLoopLag
+        expr: animaxia_event_loop_lag_seconds > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop lag above 500ms on {{ $labels.service }}"
+          description: "Event loop lag on {{ $labels.service }} is {{ $value | humanizeDuration }} — the JS thread is saturated (CPU-bound work, GC pressure or a blocked loop)."
+          runbook: "Look for synchronous work on the hot path (JSON of huge payloads, crypto, provider HTML mining). Scale the service (docker compose --scale / HPA) if load-driven."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+      - alert: AnimaxiaMemoryPressure
+        expr: animaxia_memory_rss_bytes / (1024*1024) > 450
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory pressure on {{ $labels.service }} (RSS {{ $value | humanize }} MiB)"
+          description: "Resident set size of {{ $labels.service }} has been above 450 MiB for 10 minutes — close to the 512 MiB container limit from deploy/docker/docker-compose.yml."
+          runbook: "Check for a leak (RSS slope in Grafana) vs a large working set (cache sizing: ADVANCEDCACHEMAX / CACHETTLMS). Restart the service if it is about to be OOM-killed; lower cache ceilings if it is steady-state."
+          dashboard: "http://localhost:3001/d/animaxia-overview"
+
+  # ───────────────────────────── queue & workers ────────────────────────────
+  - name: animaxia-queue
+    rules:
+      - alert: AnimaxiaQueueBacklog
+        expr: animaxia_queue_depth{status="pending"} > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue backlog: {{ $value }} pending '{{ $labels.type }}' jobs"
+          description: "The pending backlog for job type '{{ $labels.type }}' has been above 100 for 10 minutes — workers are not keeping up (queue-service consumes jobs; check it and the Postgres)."
+          runbook: "Queue dashboard (http://localhost:3001/d/animaxia-queue): check running vs pending and worker task rates. If jobs fail-storm, inspect dead letters; if the queue-service is idle, restart it."
+          dashboard: "http://localhost:3001/d/animaxia-queue"
+
+      - alert: AnimaxiaDeadLetters
+        expr: increase(animaxia_queue_depth{status="dead"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "New dead letters for job type '{{ $labels.type }}'"
+          description: "{{ $value }} job(s) of type '{{ $labels.type }}' exhausted their retries and landed in the dead-letter queue in the last hour."
+          runbook: "GET /api/queue/jobs?status=dead&type={{ $labels.type }} on queue-service, inspect the last error, fix the cause and re-drive with POST /api/queue/jobs/:id/retry (see BLUEPRINT §10)."
+          dashboard: "http://localhost:3001/d/animaxia-queue"
+
+      - alert: AnimaxiaWorkerStalled
+        expr: animaxia_worker_last_heartbeat_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker thread stalled on {{ $labels.service }}"
+          description: "The background worker thread of {{ $labels.service }} has not sent a heartbeat for {{ $value | humanizeDuration }} — periodic maintenance (cleanups, reindex, prewarm) is not running."
+          runbook: "Check {{ $labels.service }} logs for '[worker]' lines — the thread auto-respawns on exit, but a wedged (non-crashed) thread needs a service restart. Heartbeat age resets on restart."
+          dashboard: "http://localhost:3001/d/animaxia-queue"
+
+  # ───────────────────────────── recording rules ────────────────────────────
+  - name: animaxia-recordings
+    rules:
+      # Request rate per service (req/s, 5m window) — overview dashboard.
+      - record: animaxia:http_request_rate:5m
+        expr: sum by (service) (rate(animaxia_http_requests_total[5m]))
+
+      # 5xx error ratio per service. The numerator is a strict subset of the
+      # denominator, so the division is well-defined whenever traffic exists
+      # (0/0 → NaN, which neither plots nor fires AnimaxiaHighErrorRate).
+      - record: animaxia:http_error_ratio:5m
+        expr: >-
+          sum by (service) (rate(animaxia_http_requests_total{status=~"5.."}[5m]))
+          / sum by (service) (rate(animaxia_http_requests_total[5m]))
+
+      # Cache hit ratio per service. clamp_min avoids 0/0 on idle services
+      # (the floor of 1 req/s slightly understates ratios on very low traffic
+      # — acceptable for a dashboard series).
+      - record: animaxia:cache_hit_ratio:5m
+        expr: >-
+          sum by (service) (rate(animaxia_cache_hits_total[5m]))
+          / clamp_min(
+              sum by (service) (rate(animaxia_cache_hits_total[5m]))
+              + sum by (service) (rate(animaxia_cache_misses_total[5m])),
+              1
+            )

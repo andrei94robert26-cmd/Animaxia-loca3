@@ -1,0 +1,112 @@
+# =============================================================================
+# Animaxia Cloud — Promtail configuration (BLUEPRINT §11)
+# =============================================================================
+# Mounted read-only into the `promtail` container (grafana/promtail:3.4.1) by
+# deploy/docker/docker-compose.observability.yml:
+#   promtail -config.file=/etc/promtail/promtail-config.yml
+#
+# Discovers Animaxia containers via the Docker API (docker_sd) and ships their
+# single-line JSON logs (common/logger.js: {ts, level, service, msg,
+# requestId, traceId, ...}) to Loki.
+#
+# *** docker_sd requires the Docker socket *** — the compose file mounts
+#     /var/run/docker.sock read-only into the promtail container. Without that
+#     mount, promtail sees no containers at all. (Alternative for k8s: the
+#     DaemonSet pattern with a kubernetes_sd stage — see README.)
+#
+# Container naming contract (deploy/docker/docker-compose.yml):
+#   animaxia-gateway-service, animaxia-auth-service, ... animaxia-queue-service
+# The docker_sd `name` filter + the `keep` relabel rule both key off the
+# `animaxia-` prefix, so the observability containers themselves (named
+# observability-*, deliberately NOT animaxia-*) are never scraped — this
+# avoids a promtail→Loki self-ingestion feedback loop.
+# =============================================================================
+
+server:
+  http_listen_port: 9080    # /ready + /metrics (container-internal, not published)
+  grpc_listen_port: 0
+
+positions:
+  # Container-local scratch file: offsets reset when the promtail container is
+  # recreated, which can re-ingest a few lines (Loki dedupes in display, and
+  # dev tolerance is fine). Give promtail a volume if that bothers you.
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ── Animaxia microservice containers ───────────────────────────────────────
+  - job_name: animaxia-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+        filters:
+          # Docker API name filter (regex-ish match on container names) — a
+          # cheap first pass; the `keep` relabel below is the strict gate.
+          - name: name
+            values: ["animaxia-"]
+
+    relabel_configs:
+      # 1) Strict gate: only containers whose name starts with /animaxia-
+      #    (docker_sd prefixes the meta label with a slash).
+      - source_labels: [__meta_docker_container_name]
+        regex: "/animaxia-.*"
+        action: keep
+
+      # 2) Human-friendly full container name label (animaxia-auth-service).
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container_name
+        replacement: "$1"
+
+      # 3) Short `service` label from the container name — strips the
+      #    animaxia- prefix and the -service suffix:
+      #      animaxia-auth-service    -> auth
+      #      animaxia-gateway-service -> gateway
+      #    This is the fallback for non-JSON lines (runtime banners, crash
+      #    output). JSON log lines override it with the logger's own
+      #    `service` field ("auth-service") in the pipeline labels stage —
+      #    matching the Tempo service.name resource attribute so
+      #    trace→log jumps line up.
+      - source_labels: [__meta_docker_container_name]
+        regex: "/animaxia-(.+)-service"
+        target_label: service
+        replacement: "$1"
+
+      # 4) Which docker network the container is on (all animaxia-* should be
+      #    `animaxia`; handy when someone adds a sidecar on another network).
+      - source_labels: [__meta_docker_network_name]
+        target_label: network
+
+    # ── Per-line pipeline: parse Animaxia JSON logs ──────────────────────────
+    # Log line shape (common/logger.js):
+    #   {"ts":"2025-01-01T12:00:00.000Z","level":"INFO","service":"auth-service",
+    #    "msg":"GET /api/auth/me 200 3ms","method":"GET","path":"/api/auth/me",
+    #    "status":200,"durationMs":3,"requestId":"...","traceId":"..."}
+    pipeline_stages:
+      # Extract the fields we care about (extra JSON fields are simply left
+      # inside the stored line — nothing is dropped).
+      - json:
+          expressions:
+            ts: ts
+            level: level
+            service: service
+            msg: msg
+            requestId: requestId
+            traceId: traceId
+
+      # Promote to Loki labels (low cardinality: level has 4 values, service
+      # 10). requestId/traceId stay unpromoted (high cardinality) but remain
+      # searchable in the line body.
+      - labels:
+          level:
+          service:
+
+      # Use the logger's own timestamp for ordering (RFC3339 with millis).
+      # Non-JSON lines (bun banners, crash traces) fail this stage and keep
+      # the scrape timestamp instead of being dropped.
+      - timestamp:
+          source: ts
+          format: RFC3339Nano
+          action_on_failure: skip

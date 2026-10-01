@@ -1,0 +1,38 @@
+name: Miner Providers
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  miner-providers:
+    runs-on: ubuntu-latest
+
+    env:
+      TWITCH_PARENT: localhost
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Validate
+        run: |
+          node --check miner.js
+          node --check tests/miner-providers.mjs
+
+      - name: Start Animaxia backend
+        run: |
+          npm start > backend-ci.log 2>&1 &
+          echo $! > backend.pid
+
+      - name: Wait for backend
+        run: sleep 5
+
+      - name: Test providers
+        run: npm run test:providers

@@ -277,6 +277,7 @@ async function reapOrphanCuratorScans() {
   reaperStats.runs += 1;
   reaperStats.lastRunAt = Date.now();
   const info = driverInfo();
+  if (info.driver === 'sqlite') return;
   if (!info.connected) return; // fallback local — nimic de reaped
   try {
     const result = await dbQuery(
@@ -284,8 +285,8 @@ async function reapOrphanCuratorScans() {
        FROM pg_stat_activity
        WHERE datname IS NOT NULL AND pid <> pg_backend_pid()
          AND state = 'active'
-         AND query ILIKE '%similarity(a.title, b.title)%'
-         AND now() - query_start > $1::interval`,
+         AND query LIKE '%similarity(a.title, b.title)%'
+         AND CURRENT_TIMESTAMP - query_start > $1::interval`,
       [`${REAP_AFTER_SEC} seconds`],
     );
     for (const row of result.rows) {

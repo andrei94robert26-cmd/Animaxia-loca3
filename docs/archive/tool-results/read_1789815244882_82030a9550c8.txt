@@ -1,0 +1,850 @@
+   460→  studio?: string;
+   461→  category?: string;
+   462→  sort?: 'score' | 'year' | 'rating' | 'title';
+   463→  fuzzy?: boolean;
+   464→  limit?: number;
+   465→  page?: number;
+   466→}
+   467→
+   468→/** GET /api/search/advanced — Neon FTS engine response (engine='animaxia-neon-fts'). */
+   469→export interface SearchAdvancedResponse {
+   470→  took: number;
+   471→  total: number;
+   472→  max_score: number;
+   473→  page: number;
+   474→  limit: number;
+   475→  engine: string;
+   476→  data: (DbContent & { _score: number })[];
+   477→  /** FAZA 15 — additive flow attribution (how the request was scheduled). */
+   478→  flow?: { priority: SearchFlowPriorityKey; shardid: number; queuedMs: number };
+   479→  /** FAZA 16 — additive pacing block (per-user rhythm the UI should honor). */
+   480→  rate?: SearchRatePacingInfo;
+   481→  /** FAZA 17 — additive optimization provenance: 'neon' = this request ran the
+   482→   *  real FTS, 'batch' = shared an in-flight identical execution, 'cache' =
+   483→   *  served the stored REAL result (≤ cacheTtlMs old), 'bypass' = layer off. */
+   484→  opt?: SearchOptSourceInfo;
+   485→}
+   486→
+   487→/** GET /api/search/autocomplete — prefix + trigram suggestions (max 8). */
+   488→export interface SearchAutocompleteResponse {
+   489→  suggestions: { id: number; title: string; type: string; thumbnail: string | null; rating: number | null }[];
+   490→  /** FAZA 17 — additive optimization provenance (see SearchOptSourceInfo). */
+   491→  opt?: SearchOptSourceInfo;
+   492→}
+   493→
+   494→/** GET /api/search/filters — facet values powering the advanced filter bar. */
+   495→export interface SearchFiltersOptions {
+   496→  genres: AiMetaEntry[];
+   497→  actors: AiMetaEntry[];
+   498→  years: number[];
+   499→  categories: AiMetaEntry[];
+   500→  studios: AiMetaEntry[];
+   501→}
+   502→
+   503→/** GET /api/search/status — live engine health + rolling latency. */
+   504→export interface SearchStatus {
+   505→  docs: number;
+   506→  engine: string;
+   507→  backend: string;
+   508→  extensions: { pg_trgm: boolean };
+   509→  lastSync: string | null;
+   510→  dirty: boolean;
+   511→  latency: { p50Ms: number; p95Ms: number; samples: number };
+   512→  capacity: { indexedDocs: number };
+   513→  /** FAZA 15 — additive search flow control snapshot (optional so existing
+   514→   *  consumers and older backends keep compiling). */
+   515→  flowControl?: SearchFlowControlStatus;
+   516→  /** FAZA 15 — additive windowing snapshot (same additive contract). */
+   517→  windowing?: SearchWindowingStatus;
+   518→  /** FAZA 16 — additive per-user pacing snapshot (pinned: perUserMs, enforced). */
+   519→  rateLimit?: SearchRateLimitStatus;
+   520→  /** FAZA 16 — additive burst control snapshot (pinned: active, maxBurstPerWindow). */
+   521→  burstControl?: SearchRateBurstStatus;
+   522→  /** FAZA 17 — additive batching snapshot (pinned: enabled, activeBatches). */
+   523→  batching?: SearchOptBatchingStatus;
+   524→  /** FAZA 17 — additive cache snapshot (pinned: ttlMs, hits, misses). */
+   525→  cache?: SearchOptCacheStatus;
+   526→  /** FAZA 17 — additive dedup snapshot (pinned: active, deduplicatedRequests). */
+   527→  dedup?: SearchOptDedupStatus;
+   528→  /** FAZA 17 — the deterministic pipeline order every search traverses. */
+   529→  pipeline?: string[];
+   530→}
+   531→
+   532→/* ---------------- FAZA 15: search flow control (queue + windowing) ---------------- */
+   533→
+   534→/** Priority lanes: high = admin/ops/QA, normal = logged-in users, low = anonymous. */
+   535→export type SearchFlowPriorityKey = 'high' | 'normal' | 'low';
+   536→
+   537→/** flowControl block of /api/search/status and /api/search/flow — the live
+   538→ *  queue / inflight / wait / drop counters plus per-priority attribution. */
+   539→export interface SearchFlowControlStatus {
+   540→  queueEnabled: boolean;
+   541→  maxConcurrent: number;
+   542→  queueCap: number;
+   543→  maxWaitMs: number;
+   544→  queueLength: number;
+   545→  inflight: number;
+   546→  maxInflightSeen: number;
+   547→  queueHighWater: number;
+   548→  admitted: number;
+   549→  processed: number;
+   550→  errors: number;
+   551→  dropped: number;
+   552→  timedOut: number;
+   553→  lastDroppedAt: string | null;
+   554→  lastTimedOutAt: string | null;
+   555→  /** Executions per second (rolling). */
+   556→  processingRate: number;
+   557→  waitP50Ms: number;
+   558→  waitP95Ms: number;
+   559→  /** Current queue length per priority lane. */
+   560→  priorities: Record<SearchFlowPriorityKey, number>;
+   561→  /** Human-readable lane policy (high / normal / low / aging keys). */
+   562→  priorityPolicy: Record<string, string>;
+   563→  processedByPriority: Record<SearchFlowPriorityKey, number>;
+   564→  droppedByPriority: Record<SearchFlowPriorityKey, number>;
+   565→  waitP50ByPriority: Record<SearchFlowPriorityKey, number>;
+   566→}
+   567→
+   568→/** windowing block — search executions are dispatched only inside fixed time
+   569→ *  windows (intervalMs), at most batchSize new entries per window. */
+   570→export interface SearchWindowingStatus {
+   571→  intervalMs: number;
+   572→  batchSize: number;
+   573→  windowsFired: number;
+   574→  windowDispatches: number;
+   575→  avgBatchSize: number;
+   576→  maxDispatchPerWindow: number;
+   577→}
+   578→
+   579→/** Runtime flow config: env defaults + admin overrides via
+   580→ *  POST /api/search/flow/settings (server-side clamped). */
+   581→export interface SearchFlowConfig {
+   582→  enabled: boolean;
+   583→  maxConcurrent: number;
+   584→  intervalMs: number;
+   585→  batchSize: number;
+   586→  queueCap: number;
+   587→  maxWaitMs: number;
+   588→  lowPromoteMs: number;
+   589→  normalPromoteMs: number;
+   590→}
+   591→
+   592→/** One rolling 1 s history sample of the flow console (last 180 samples). */
+   593→export interface SearchFlowHistoryPoint {
+   594→  t: string;
+   595→  queueLength: number;
+   596→  inflight: number;
+   597→  rate: number;
+   598→  dropped: number;
+   599→}
+   600→
+   601→/** One per-shard attribution row of the flow console (30 rows under FAZA 14). */
+   602→export interface SearchFlowShardStats {
+   603→  shardid: number;
+   604→  queueLength: number;
+   605→  inflight: number;
+   606→  processed: number;
+   607→  dropped: number;
+   608→}
+   609→
+   610→/** GET /api/search/flow — the full search flow console payload. */
+   611→export interface SearchFlowConsole {
+   612→  flowControl: SearchFlowControlStatus;
+   613→  windowing: SearchWindowingStatus;
+   614→  config: SearchFlowConfig;
+   615→  history: SearchFlowHistoryPoint[];
+   616→  perShard: SearchFlowShardStats[];
+   617→}
+   618→
+   619→/* ------------- FAZA 16: search rate management (pacing + anti-spam) ------------- */
+   620→
+   621→/** Pacing block on every admitted /advanced response — the UI's source of
+   622→ *  truth for its own cooldown affordance (disable ENTER + countdown). */
+   623→export interface SearchRatePacingInfo {
+   624→  perUserMs: number;
+   625→  cooldownMs: number;
+   626→}
+   627→
+   628→/** rateLimit block of /api/search/status — the pinned FAZA 16 contract
+   629→ *  { perUserMs, enforced } plus the live pacing / cooldown / spam state. */
+   630→export interface SearchRateLimitStatus {
+   631→  enabled: boolean;
+   632→  enforced: boolean;
+   633→  perUserMs: number;
+   634→  cooldownMs: number;
+   635→  cooldownEnforced: boolean;
+   636→  spamProtection: { windowMs: number; threshold: number; blockMs: number };
+   637→  hits: number;
+   638→  cooldownBlocks: number;
+   639→  spamBlocked: number;
+   640→  trackedUsers: number;
+   641→  lastRateLimitAt: string | null;
+   642→  lastCooldownAt: string | null;
+   643→  lastSpamAt: string | null;
+   644→}
+   645→
+   646→/** burstControl block of /api/search/status — the pinned FAZA 16 contract
+   647→ *  { active, maxBurstPerWindow } plus live micro-spike detection state. */
+   648→export interface SearchRateBurstStatus {
+   649→  active: boolean;
+   650→  burstActive: boolean;
+   651→  maxBurstPerWindow: number;
+   652→  windowMs: number;
+   653→  events: number;
+   654→  lastBurstAt: string | null;
+   655→  arrivalsInWindow: number;
+   656→  arrivalsPerS: number;
+   657→  peak: number;
+   658→}
+   659→
+   660→/** Runtime rate config: env defaults + admin overrides via
+   661→ *  POST /api/search/rate/settings (server-side clamped). */
+   662→export interface SearchRateConfig {
+   663→  enabled: boolean;
+   664→  perUserMs: number;
+   665→  cooldownMs: number;
+   666→  spamWindowMs: number;
+   667→  spamThreshold: number;
+   668→  spamBlockMs: number;
+   669→  burstWindowMs: number;
+   670→  burstThreshold: number;
+   671→}
+   672→
+   673→/** One rolling 1s history sample of the rate console (last 180 samples). */
+   674→export interface SearchRateHistoryPoint {
+   675→  t: string;
+   676→  arrivals: number;
+   677→  admitted: number;
+   678→  blocked: number;
+   679→  tracked: number;
+   680→}
+   681→
+   682→/** One per-shard attribution row of the rate console (30 rows). */
+   683→export interface SearchRateShardStats {
+   684→  shardid: number;
+   685→  admitted: number;
+   686→  rateLimited: number;
+   687→  cooldownActive: number;
+   688→  spamBlocked: number;
+   689→}
+   690→
+   691→/** GET /api/search/rate — the full Search Rate Management console payload. */
+   692→export interface SearchRateConsole {
+   693→  rateLimit: SearchRateLimitStatus;
+   694→  burstControl: SearchRateBurstStatus;
+   695→  config: SearchRateConfig;
+   696→  counters: {
+   697→    arrivals: number;
+   698→    admitted: number;
+   699→    admittedAdvanced: number;
+   700→    admittedAutocomplete: number;
+   701→    completed: number;
+   702→    rateLimitHits: number;
+   703→    cooldownBlocks: number;
+   704→    spamBlocked: number;
+   705→    burstEvents: number;
+   706→    burstPeak: number;
+   707→    trackedUsersHighWater: number;
+   708→  };
+   709→  history: SearchRateHistoryPoint[];
+   710→  perShard: SearchRateShardStats[];
+   711→}
+   712→
+   713→/* ------------- FAZA 17: search optimization (dedup + batching + cache) ------------- */
+   714→
+   715→/** Optimization provenance block on every /advanced + /autocomplete response:
+   716→ *  WHERE the served result came from — always a REAL result, the source only
+   717→ *  documents how many users shared the underlying Neon query. */
+   718→export interface SearchOptSourceInfo {
+   719→  source: 'neon' | 'batch' | 'cache' | 'bypass' | string;
+   720→  queryHash: string | null;
+   721→  cached: boolean;
+   722→  batched: boolean;
+   723→}
+   724→
+   725→/** batching block of /api/search/status — the pinned FAZA 17 contract
+   726→ *  { enabled: true, activeBatches: N } plus live fan-out state. */
+   727→export interface SearchOptBatchingStatus {
+   728→  enabled: boolean;
+   729→  activeBatches: number;
+   730→  batchHits: number;
+   731→  created: number;
+   732→  completed: number;
+   733→  maxFanout: number;
+   734→  maxConcurrentBatches: number;
+   735→  lastBatchAt: string | null;
+   736→  lastBatchCompletedAt: string | null;
+   737→}
+   738→
+   739→/** cache block of /api/search/status — the pinned FAZA 17 contract
+   740→ *  { ttlMs: 3000, hits: X, misses: Y } plus live entries / ratio state. */
+   741→export interface SearchOptCacheStatus {
+   742→  enabled: boolean;
+   743→  ttlMs: number;
+   744→  hits: number;
+   745→  misses: number;
+   746→  entries: number;
+   747→  hitRatio: number;
+   748→  evictions: number;
+   749→  maxEntries: number;
+   750→  lastHitAt: string | null;
+   751→  lastMissAt: string | null;
+   752→}
+   753→
+   754→/** dedup block of /api/search/status — the pinned FAZA 17 contract
+   755→ *  { active: true, deduplicatedRequests: N } plus the served/Neon split. */
+   756→export interface SearchOptDedupStatus {
+   757→  active: boolean;
+   758→  deduplicatedRequests: number;
+   759→  cacheServed: number;
+   760→  batchServed: number;
+   761→  ftsQueries: number;
+   762→  ftsErrors: number;
+   763→  served: number;
+   764→  bypassed: number;
+   765→  /** Requests served per REAL Neon query (the ×N reduction factor). */
+   766→  reductionFactor: number;
+   767→}
+   768→
+   769→/** Runtime optimization config: env defaults + admin overrides via
+   770→ *  POST /api/search/opt/settings (server-side clamped). */
+   771→export interface SearchOptConfig {
+   772→  enabled: boolean;
+   773→  cacheTtlMs: number;
+   774→  cacheMax: number;
+   775→  batchMax: number;
+   776→}
+   777→
+   778→/** One rolling 1s history sample of the optimization console (last 180). */
+   779→export interface SearchOptHistoryPoint {
+   780→  t: string;
+   781→  requests: number;
+   782→  fts: number;
+   783→  cacheHits: number;
+   784→  batchHits: number;
+   785→  cacheEntries: number;
+   786→  activeBatches: number;
+   787→}
+   788→
+   789→/** One per-shard attribution row of the optimization console (30 rows). */
+   790→export interface SearchOptShardStats {
+   791→  shardid: number;
+   792→  served: number;
+   793→  cacheHits: number;
+   794→  batchHits: number;
+   795→  ftsQueries: number;
+   796→}
+   797→
+   798→/** One live in-flight batch of the console (top 50 by fan-out). */
+   799→export interface SearchOptActiveBatch {
+   800→  queryHash: string;
+   801→  kind: string;
+   802→  describe: string;
+   803→  fanout: number;
+   804→  ageMs: number;
+   805→  shards: number;
+   806→}
+   807→
+   808→/** GET /api/search/opt — the full Search Optimization Layer console payload. */
+   809→export interface SearchOptConsole {
+   810→  batching: SearchOptBatchingStatus;
+   811→  cache: SearchOptCacheStatus;
+   812→  dedup: SearchOptDedupStatus;
+   813→  pipeline: string[];
+   814→  config: SearchOptConfig;
+   815→  counters: {
+   816→    served: number;
+   817→    ftsQueries: number;
+   818→    ftsErrors: number;
+   819→    cacheHits: number;
+   820→    cacheMisses: number;
+   821→    batchHits: number;
+   822→    batchesCreated: number;
+   823→    batchesCompleted: number;
+   824→    batchMaxFanout: number;
+   825→    deduplicatedRequests: number;
+   826→    cacheEvictions: number;
+   827→    bypassed: number;
+   828→    reductionFactor: number;
+   829→  };
+   830→  activeBatches: SearchOptActiveBatch[];
+   831→  history: SearchOptHistoryPoint[];
+   832→  perShard: SearchOptShardStats[];
+   833→}
+   834→
+   835→/** One row of the global `contentsources` dedup registry. */
+   836→export interface IngestSource {
+   837→  id: number;
+   838→  urlhash: string;
+   839→  url: string;
+   840→  originalurl: string;
+   841→  kind: 'link' | 'mp4' | 'm3u8' | 'dash' | 'youtube' | 'vimeo' | 'dailymotion' | 'js' | 'embed' | string;
+   842→  contentid: number | null;
+   843→  externalid: string | null;
+   844→  addedby: string;
+   845→  hits: number;
+   846→  metadata: Record<string, unknown>;
+   847→  createdat: string;
+   848→  lastseenat: string;
+   849→}
+   850→
+   851→/** POST /api/ingest/check — "verify link before adding" lookup. */
+   852→export interface IngestCheckResponse {
+   853→  ok: boolean;
+   854→  exists: boolean;
+   855→  duplicate: boolean;
+   856→  source: IngestSource | null;
+   857→  content: DbContent | null;
+   858→}
+   859→
+   860→/** POST /api/ingest/register — records a URL in the dedup registry. */
+   861→export interface IngestRegisterResponse {
+   862→  ok: boolean;
+   863→  registered: boolean;
+   864→  duplicate: boolean;
+   865→  source: IngestSource;
+   866→}
+   867→
+   868→/** GET /api/ingest/sources?limit&page&kind. */
+   869→export interface IngestSourcesResponse {
+   870→  data: IngestSource[];
+   871→  total: number;
+   872→  page: number;
+   873→}
+   874→
+   875→/** GET /api/ingest/stats. */
+   876→export interface IngestStats {
+   877→  total: number;
+   878→  byKind: Record<string, number>;
+   879→  duplicatesBlocked: number;
+   880→  lastRegisteredAt: string | null;
+   881→  linkedContents: number;
+   882→}
+   883→
+   884→/* ----------------------- FAZA 16: real scale report ------------------------ */
+   885→
+   886→export type ScaleVerdictStatus = 'not-ready' | 'partial' | 'ready';
+   887→export type ScaleGapSeverity = 'critical' | 'high' | 'medium';
+   888→
+   889→export interface ScaleVerdict {
+   890→  target: string;
+   891→  targetKey: 'users' | 'connectedAccounts' | 'contents' | 'concurrentSearches';
+   892→  targetValue: number;
+   893→  status: ScaleVerdictStatus;
+   894→  currentEstimate: string;
+   895→  reasoning: string;
+   896→}
+   897→
+   898→export interface ScaleGap {
+   899→  severity: ScaleGapSeverity;
+   900→  missing: string;
+   901→  recommendation: string;
+   902→}
+   903→
+   904→export interface ScaleMeasured {
+   905→  measuredAt: string;
+   906→  uptimeSec: number;
+   907→  dbLatencyMs: number;
+   908→  searchLatency: { p50Ms: number; p95Ms: number; samples: number };
+   909→  items: number;
+   910→  users: number;
+   911→  searchdocs: number;
+   912→  contentsources: number;
+   913→  dbSizeBytes: number;
+   914→  tableSizes: { name: string; bytes: number }[];
+   915→  cache: { hitRate: number; keys: number };
+   916→  rateLimit: { max: number; windowMs: number };
+   917→  providers: { name: string; state: string; failures: number }[];
+   918→  neon: { branch: string; poolMax: number; pool: { total: number; idle: number; waiting: number } };
+   919→}
+   920→
+   921→/** GET /api/scale/report — live measurements + honest verdicts + gaps. */
+   922→export interface ScaleReport {
+   923→  /** Optional in the current backend payload — measuredAt is the source of truth. */
+   924→  generatedAt?: string;
+   925→  measured: ScaleMeasured;
+   926→  targets: { users: number; connectedAccounts: number; contents: number; concurrentSearches: number };
+   927→  verdicts: ScaleVerdict[];
+   928→  gaps: ScaleGap[];
+   929→  conclusion: string;
+   930→}
+   931→
+   932→/** GET /api/scale/metrics — light version (measured + verdict statuses). */
+   933→export interface ScaleMetrics {
+   934→  measured: ScaleMeasured;
+   935→  verdicts: { target: string; targetKey: ScaleVerdict['targetKey']; status: ScaleVerdictStatus }[];
+   936→  updatedAt: string;
+   937→}
+   938→
+   939→/* --------------------------- FAZA 16: AI Hub ------------------------------- */
+   940→
+   941→export type AiHubKey = 'curator' | 'forecaster' | 'semantic' | 'watchdog' | 'marathon' | 'translator';
+   942→
+   943→/** Per-AI live stats (only the keys relevant for each AI are present). */
+   944→export interface AiHubStats {
+   945→  duplicates?: number;
+   946→  avgCompleteness?: number;
+   947→  eventsAnalyzed?: number;
+   948→  embedded?: number;
+   949→  total?: number;
+   950→  alerts?: number;
+   951→  score?: number;
+   952→  marathons?: number;
+   953→  translations?: number;
+   954→}
+   955→
+   956→export interface AiHubAi {
+   957→  key: AiHubKey;
+   958→  name: string;
+   959→  emoji: string;
+   960→  description: string;
+   961→  enabled: boolean;
+   962→  provider: string;
+   963→  lastRunAt: string | null;
+   964→  stats: AiHubStats;
+   965→}
+   966→
+   967→/** GET /api/ai/hub/status. */
+   968→export interface AiHubStatusResponse {
+   969→  ais: AiHubAi[];
+   970→  existing: { key: string; name: string; emoji: string; enabled: null; note: string }[];
+   971→  generatedAt: string;
+   972→}
+   973→
+   974→/** GET /api/ai/hub/curator/scan. */
+   975→export interface CuratorScan {
+   976→  duplicates: { ids: number[]; titles: string[]; reason: 'similar-title' | 'same-source' | string; similarity: number }[];
+   977→  completeness: { contentId: number; title: string; score: number; missing: string[] }[];
+   978→  avgScore: number;
+   979→  scanned: number;
+   980→  generatedAt: string;
+   981→}
+   982→
+   983→/** POST /api/ai/hub/curator/enrich (auth). */
+   984→export interface CuratorEnrichResponse {
+   985→  ok: boolean;
+   986→  enriched: { contentId: number; title: string; added: string[] }[];
+   987→  provider: string;
+   988→  scanned: number;
+   989→  generatedAt: string;
+   990→}
+   991→
+   992→/** GET /api/ai/hub/trends/forecast?window=1d|7d|30d. */
+   993→export interface TrendForecast {
+   994→  window: string;
+   995→  days: number;
+   996→  eventsAnalyzed: number;
+   997→  source: 'viewevents' | 'library-heuristic' | string;
+   998→  rising: TrendItem[];
+   999→  top: TrendItem[];
+  1000→  narrative: string;
+  1001→  provider: string;
+  1002→  generatedAt: string;
+  1003→}
+  1004→
+  1005→export interface TrendItem {
+  1006→  contentId: number;
+  1007→  title: string;
+  1008→  thumbnail: string | null;
+  1009→  type: string;
+  1010→  recentViews: number | null;
+  1011→  previousViews: number | null;
+  1012→  momentum: number | null;
+  1013→  score: number | null;
+  1014→}
+  1015→
+  1016→/** POST /api/ai/hub/semantic/query. */
+  1017→export interface SemanticQueryResponse {
+  1018→  ok: boolean;
+  1019→  results: { contentId: number; externalid: string; title: string; type: string; thumbnail: string | null; score: number }[];
+  1020→  provider: string;
+  1021→  queryProvider: string;
+  1022→  embeddedDocs: number;
+  1023→}
+  1024→
+  1025→/** GET /api/ai/hub/semantic/similar/:contentId. */
+  1026→export interface SemanticSimilarResponse {
+  1027→  ok: boolean;
+  1028→  contentId: number;
+  1029→  results: SemanticQueryResponse['results'];
+  1030→  provider: string;
+  1031→}
+  1032→
+  1033→/** GET /api/ai/hub/semantic/status. */
+  1034→export interface SemanticStatus {
+  1035→  embedded: number;
+  1036→  total: number;
+  1037→  provider: string;
+  1038→  dims: number;
+  1039→  lastEmbedAt: string | null;
+  1040→}
+  1041→
+  1042→/** GET /api/ai/hub/watchdog/health. */
+  1043→export interface WatchdogHealth {
+  1044→  ok: boolean;
+  1045→  score: number;
+  1046→  alerts: { severity: 'critical' | 'warning' | 'info' | string; area: string; message: string; hint: string }[];
+  1047→  checks: { name: string; status: 'pass' | 'warn' | 'fail' | string; detail: string }[];
+  1048→  diagnosis: string;
+  1049→  provider: string;
+  1050→  checkedAt: string;
+  1051→}
+  1052→
+  1053→/** GET /api/ai/hub/marathon/suggestions. */
+  1054→export interface MarathonSuggestion {
+  1055→  key: string;
+  1056→  title: string;
+  1057→  emoji: string;
+  1058→  count: number;
+  1059→  items: { contentId: number | null; externalId: string; title: string; thumbnail: string | null; year: number | null; order: number }[];
+  1060→  rationale: string;
+  1061→}
+  1062→
+  1063→export interface MarathonSuggestionsResponse {
+  1064→  suggestions: MarathonSuggestion[];
+  1065→}
+  1066→
+  1067→/** POST /api/ai/hub/marathon/create {key} (auth). */
+  1068→export interface MarathonCreateResponse {
+  1069→  ok: boolean;
+  1070→  marathon: {
+  1071→    id: number;
+  1072→    key: string;
+  1073→    userid: number;
+  1074→    title: string;
+  1075→    description: string;
+  1076→    items: MarathonSuggestion['items'];
+  1077→    createdat: string;
+  1078→  };
+  1079→}
+  1080→
+  1081→/** GET /api/ai/hub/marathon/list. */
+  1082→export interface MarathonListResponse {
+  1083→  data: {
+  1084→    id: number;
+  1085→    key: string;
+  1086→    userid: number;
+  1087→    title: string;
+  1088→    description: string;
+  1089→    items: MarathonSuggestion['items'];
+  1090→    createdat: string;
+  1091→    mine: boolean;
+  1092→  }[];
+  1093→}
+  1094→
+  1095→/** POST /api/ai/hub/translate {contentId, lang} (auth, 10/min). */
+  1096→export interface TranslateResponse {
+  1097→  ok: boolean;
+  1098→  contentId: number;
+  1099→  lang: string;
+  1100→  translation: string;
+  1101→  provider: string;
+  1102→}
+  1103→
+  1104→/** GET /api/ai/hub/translate/status. */
+  1105→export interface TranslateStatusResponse {
+  1106→  coverage: { total: number; withTranslations: number; byLang: Record<string, number> };
+  1107→}
+  1108→
+  1109→/**
+  1110→ * Normalized display item used by every card/row/hero component.
+  1111→ * kind:
+  1112→ *  - 'db'       → row in the Animaxia library (dbId present)
+  1113→ *  - 'external' → live provider item (extType + extId present, detail page fetches live)
+  1114→ *  - 'link'     → opens an external URL (news articles, TVmaze entries)
+  1115→ */
+  1116→export interface NormalizedItem {
+  1117→  key: string;
+  1118→  kind: 'db' | 'external' | 'link';
+  1119→  dbId?: number;
+  1120→  extType?: 'movie' | 'tv' | 'anime';
+  1121→  extId?: string;
+  1122→  title: string;
+  1123→  image?: string | null;
+  1124→  backdrop?: string | null;
+  1125→  overview?: string;
+  1126→  rating?: number | null;
+  1127→  year?: string | number | null;
+  1128→  type: string;
+  1129→  genres?: string[];
+  1130→  url?: string;
+  1131→  source?: string;
+  1132→  playable?: boolean;
+  1133→}
+  1134→
+  1135→/* --------------- FAZA 17: stability lab — resilience / stress / 30B --------------- */
+  1136→
+  1137→/** GET /api/platform/stability — live resilience snapshot (uncached, poll 5s). */
+  1138→export interface StabilitySnapshot {
+  1139→  ok: boolean;
+  1140→  uptimeSec: number;
+  1141→  eventLoopLag: { currentMs: number; p50Ms: number; p95Ms: number };
+  1142→  memory: {
+  1143→    rssBytes: number;
+  1144→    heapUsedBytes: number;
+  1145→    heapTotalBytes: number;
+  1146→    externalBytes: number;
+  1147→    rssLimitBytes: number;
+  1148→  };
+  1149→  activeHandles: number | null;
+  1150→  inFlight: number;
+  1151→  inFlightMax: number;
+  1152→  shed: { count: number; lastShedAt: string | null; reason: string | null };
+  1153→  timeouts: number;
+  1154→  memoryPurges: number;
+  1155→  config: {
+  1156→    requestTimeoutMs: number;
+  1157→    rssLimitBytes: number;
+  1158→    shedThresholds: { lagP95Ms: number; lagExtremeMs: number; rssRatio: number };
+  1159→  };
+  1160→  pool: { total: number; idle: number; waiting: number };
+  1161→  search: { coalesced: number; errors: number; offsetCapped: number };
+  1162→}
+  1163→
+  1164→/** POST /api/platform/stress/run request body. */
+  1165→export interface StressRunRequest {
+  1166→  suite: 'search' | 'ingest' | 'virtual30b' | 'mixed';
+  1167→  durationSec?: number;
+  1168→  concurrency?: number;
+  1169→  q?: string;
+  1170→}
+  1171→
+  1172→/**
+  1173→ * Per-suite stress extras. FLAT for single suites (search / ingest /
+  1174→ * virtual30b) and nested under {search, ingest, virtual30b} for 'mixed'
+  1175→ * (verified live against the 17-a backend).
+  1176→ */
+  1177→export interface StressRunExtra {
+  1178→  /* flat keys (single-suite responses) */
+  1179→  queries?: number;
+  1180→  hitQueries?: number;
+  1181→  errors?: number;
+  1182→  unique?: number;
+  1183→  duplicates?: number;
+  1184→  deepestPage?: number;
+  1185→  maxPageMs?: number;
+  1186→  /* nested keys ('mixed' response) */
+  1187→  search?: { queries: number; hitQueries: number; errors: number };
+  1188→  ingest?: { unique: number; duplicates: number };
+  1189→  virtual30b?: { deepestPage: number; maxPageMs: number };
+  1190→}
+  1191→
+  1192→/** POST /api/platform/stress/run response (409/429/400 arrive as ApiError). */
+  1193→export interface StressRunResponse {
+  1194→  ok: boolean;
+  1195→  suite: 'search' | 'ingest' | 'virtual30b' | 'mixed';
+  1196→  durationMs: number;
+  1197→  requests: number;
+  1198→  okCount: number;
+  1199→  errorCount: number;
+  1200→  rps: number;
+  1201→  latency: { p50Ms: number; p95Ms: number; p99Ms: number; maxMs: number };
+  1202→  maxEventLoopLagMs: number;
+  1203→  memory: { beforeRssBytes: number; afterRssBytes: number; deltaBytes: number };
+  1204→  shed: number;
+  1205→  errors: string[];
+  1206→  extra: StressRunExtra;
+  1207→}
+  1208→
+  1209→/** GET /api/platform/scale/virtual item — deterministic synthetic entry. */
+  1210→export interface VirtualCatalogItem {
+  1211→  index: number;
+  1212→  title: string;
+  1213→  type: 'movie' | 'tv' | 'anime' | string;
+  1214→  year: number;
+  1215→  rating: number;
+  1216→  genres: string[];
+  1217→  overview: string;
+  1218→  thumbnail: string | null;
+  1219→  /** Present only on the last item of a page (== nextCursor). */
+  1220→  cursor: string | null;
+  1221→}
+  1222→
+  1223→/** GET /api/platform/scale/virtual response (cursor = base64url {"i","s"}). */
+  1224→export interface VirtualCatalogResponse {
+  1225→  ok: boolean;
+  1226→  engine: string;
+  1227→  addressSpace: number;
+  1228→  page: number;
+  1229→  items: VirtualCatalogItem[];
+  1230→  nextCursor: string | null;
+  1231→  tookMs: number;
+  1232→  simulated: boolean;
+  1233→}
+  1234→
+  1235→/* ------------- FAZA 14: global 30B feed (GET /api/platform/feed/global) ------------- */
+  1236→
+  1237→/**
+  1238→ * One slot of the 30B logical feed: either a REAL content row (virtual:false,
+  1239→ * real:true — the Neon overlay at its own id) or a deterministically generated
+  1240→ * virtual slot (virtual:true, real:false — zero physical storage).
+  1241→ */
+  1242→export interface GlobalFeedItem {
+  1243→  id: number;
+  1244→  shardid: number;
+  1245→  virtual: boolean;
+  1246→  real: boolean;
+  1247→  title: string;
+  1248→  type: string;
+  1249→  year: number;
+  1250→  rating: number;
+  1251→  genres: string[];
+  1252→  overview: string;
+  1253→  thumbnail: string | null;
+  1254→  externalid: string | null;
+  1255→  /** Present only on the last item of a page (== nextCursor). */
+  1256→  cursor: string | null;
+  1257→}
+  1258→
+  1259→/** Per-page + global overlay stats of the 30B feed. */
+  1260→export interface GlobalFeedStats {
+  1261→  addressSpace: number;
+  1262→  shardcount: number;
+  1263→  shardSpan: number;
+  1264→  realCount: number;
+  1265→  realInPage: number;
+  1266→  virtualInPage: number;
+  1267→  /** One entry per shard — real rows living on that shard (30 under FAZA 14). */
+  1268→  perShard: { shardid: number; real: number }[];
+  1269→}
+  1270→
+  1271→/**
+  1272→ * GET /api/platform/feed/global response. The cursor is the same base64url
+  1273→ * {"i","s"} keyset as the virtual catalog — page N (1-based, limit L) maps to
+  1274→ * index i = (N-1)*L over the whole 30B space (global index even when a shard
+  1275→ * filter narrows the window to [shard*1e9, (shard+1)*1e9)).
+  1276→ */
+  1277→export interface GlobalFeedResponse {
+  1278→  ok: boolean;
+  1279→  engine: string;
+  1280→  addressSpace: number;
+  1281→  shardcount: number;
+  1282→  shardSpan: number;
+  1283→  /** Active ?shard=n filter (null = whole 30B space). */
+  1284→  shard: number | null;
+  1285→  mode: string;
+  1286→  page: number;
+  1287→  totalPages: number;
+  1288→  items: GlobalFeedItem[];
+  1289→  nextCursor: string | null;
+  1290→  stats: GlobalFeedStats;
+  1291→  tookMs: number;
+  1292→  simulated: boolean;
+  1293→}
+  1294→
+  1295→/**
+  1296→ * GET /api/player/external?url= response — universal, DB-free source
+  1297→ * resolution (rule 4: playback never depends on the real library size).
+  1298→ * Failures arrive as HTTP 400 {ok:false, error, allowedTypes, url}.
+  1299→ */
+  1300→export interface PlayerExternalResponse {
+  1301→  ok: boolean;
+  1302→  type: PlayerSourceType;
+  1303→  url: string;
+  1304→  embedUrl: string;
+  1305→  label: string;
+  1306→  allowedTypes: string[];
+  1307→  contentFree: boolean;
+  1308→}
+  1309→

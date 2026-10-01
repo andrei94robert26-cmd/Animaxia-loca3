@@ -1,0 +1,13 @@
+{
+  "name": "animaxia-tenant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FAZA 11 — Animaxia Multi-Tenant & Enterprise Scaling: monolith tenant modules (mirror), metered billing, tenant-aware edge layer and the end-to-end tenant smoke suite.",
+  "scripts": {
+    "test:smoke": "bun tests/smoke-tenant.mjs",
+    "test": "bun run test:smoke"
+  },
+  "devDependencies": {
+    "pg": "^8.23.0"
+  }
+}

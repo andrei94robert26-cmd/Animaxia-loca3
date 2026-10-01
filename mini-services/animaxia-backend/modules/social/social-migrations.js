@@ -22,7 +22,7 @@ const DDL_STATEMENTS = [
     id SERIAL PRIMARY KEY,
     followerid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     followeeid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (followerid, followeeid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows (followerid)`,
@@ -34,8 +34,8 @@ const DDL_STATEMENTS = [
     rating INTEGER NOT NULL,
     title TEXT,
     body TEXT NOT NULL,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (userid, contentid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_reviews_content ON reviews (contentid, createdat DESC)`,
@@ -43,7 +43,7 @@ const DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS reviewlikes (
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     reviewid INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (userid, reviewid)
   )`,
   `CREATE TABLE IF NOT EXISTS activityevents (
@@ -52,8 +52,8 @@ const DDL_STATEMENTS = [
     type TEXT NOT NULL,
     contentid INTEGER REFERENCES content(id) ON DELETE SET NULL,
     targetuserid INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    metadata JSONB NOT NULL DEFAULT '{}',
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_activity_actor ON activityevents (actorid, createdat DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_activity_created ON activityevents (createdat DESC, id DESC)`,
@@ -65,16 +65,16 @@ const DDL_STATEMENTS = [
     title TEXT NOT NULL,
     isprivate BOOLEAN NOT NULL DEFAULT FALSE,
     status TEXT NOT NULL DEFAULT 'active',
-    state JSONB NOT NULL DEFAULT '{}'::jsonb,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    state JSONB NOT NULL DEFAULT '{}',
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_watchparties_active ON watchparties (status, updatedat DESC)`,
   `CREATE TABLE IF NOT EXISTS watchpartymembers (
     partyid INTEGER NOT NULL REFERENCES watchparties(id) ON DELETE CASCADE,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role TEXT NOT NULL DEFAULT 'member',
-    joinedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    joinedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (partyid, userid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_watchpartymembers_user ON watchpartymembers (userid)`,
@@ -83,7 +83,7 @@ const DDL_STATEMENTS = [
     partyid INTEGER NOT NULL REFERENCES watchparties(id) ON DELETE CASCADE,
     userid INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     body TEXT NOT NULL,
-    createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_partymessages_party ON partymessages (partyid, id DESC)`,
 ];

@@ -1,0 +1,916 @@
+import { getLocalContentByExternalId, upsertLocalContent } from './modules/local/content.js';
+import { registerSource } from './modules/ingest/dedup.js';
+/**
+ * miner.js — Full metadata/stream miner: fetches a URL (SSRF-safe, redirect-aware,
+ * byte-capped, streamed), extracts title/description/thumbnail plus playable sources
+ * (mp4 / m3u8 / iframe / youtube) via regex + JSON-LD, then UPSERTs into the DB
+ * with merge semantics. Also short-circuits direct .mp4/.m3u8 media URLs.
+ */
+
+import dns from 'node:dns/promises';
+import http2 from 'node:http2';
+import net from 'node:net';
+import zlib from 'node:zlib';
+import { db } from './db.js';
+import { logger } from './utils/logger.js';
+
+const MINER_TIMEOUT_MS = parseInt(process.env.MINERTIMEOUTMS || '15000', 10);
+const MINER_MAX_HTML_BYTES = parseInt(process.env.MINERMAXHTML_BYTES || '5000000', 10);
+const ALLOW_PRIVATE_NETWORK = process.env.MINERALLOWPRIVATE_NETWORK === 'true';
+const MAX_REDIRECTS = 4;
+const ALLOWED_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'application/json', 'text/plain'];
+// Lowercase keys so the same header set works for both fetch() and node:http2.
+const MINER_HEADERS = {
+  'user-agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 AnimaxiaMiner/1.0',
+  accept: 'text/html,application/xhtml+xml,application/json',
+  'accept-language': 'en-US,en;q=0.9',
+};
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Miner failure with an HTTP-ish status for the API layer. */
+export class MinerError extends Error {
+  constructor(message, status = 502) {
+    super(message);
+    this.name = 'MinerError';
+    this.status = status;
+  }
+}
+
+/* ----------------------------- text helpers ----------------------------- */
+
+const NAMED_ENTITIES = {
+  amp: '&',
+  quot: '"',
+  apos: "'",
+  lt: '<',
+  gt: '>',
+  nbsp: ' ',
+  '#39': "'",
+  '#x27': "'",
+};
+
+function safeCodePoint(code) {
+  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return '';
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return '';
+  }
+}
+
+function decodeEntities(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeCodePoint(parseInt(dec, 10)))
+    .replace(/&([a-z#0-9]+);/gi, (m, name) => NAMED_ENTITIES[name.toLowerCase()] ?? m);
+}
+
+function stripTags(str) {
+  if (!str) return '';
+  return decodeEntities(String(str).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+function clamp(str, max) {
+  const s = String(str ?? '');
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function toAbsolute(url, base) {
+  if (!url) return '';
+  try {
+    if (url.startsWith('//')) return `https:${url}`;
+    return new URL(url, base).toString();
+  } catch {
+    return url;
+  }
+}
+
+function dedupeCap(items, cap) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    if (!item) continue;
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+/* ------------------------------ SSRF guards ----------------------------- */
+
+function ipv4IsPrivate(ip) {
+  const parts = ip.split('.').map((p) => parseInt(p, 10));
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
+  const [a, b] = parts;
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 127) return true; // 127.0.0.0/8 (loopback)
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local + cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  return false;
+}
+
+function ipv6IsPrivate(ip) {
+  let addr = String(ip).toLowerCase();
+  if (addr.includes('%')) addr = addr.split('%')[0];
+  const v4mapped = addr.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4mapped) return ipv4IsPrivate(v4mapped[1]);
+  const sections = addr.split('::');
+  if (sections.length > 2) return true;
+  const head = sections[0] ? sections[0].split(':').filter(Boolean) : [];
+  const tail = sections.length === 2 && sections[1] ? sections[1].split(':').filter(Boolean) : [];
+  const groups = [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail].map((g) =>
+    parseInt(g, 16) || 0,
+  );
+  if (groups.length !== 8) return true;
+  const allZero = groups.every((g) => g === 0);
+  if (allZero) return true; // ::
+  const onlyLast = groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0);
+  if (onlyLast) return true; // ::1 loopback
+  if ((groups[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  if ((groups[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  return false;
+}
+
+function ipIsPrivate(ip) {
+  const version = net.isIP(ip);
+  if (version === 4) return ipv4IsPrivate(ip);
+  if (version === 6) return ipv6IsPrivate(ip);
+  return true;
+}
+
+function assertHttpUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl));
+  } catch {
+    throw new MinerError(`Invalid URL: ${rawUrl}`, 400);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new MinerError(`Unsupported protocol: ${parsed.protocol} (only http/https allowed)`, 400);
+  }
+  return parsed;
+}
+
+async function assertPublicHost(hostname) {
+  const host = String(hostname).toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    throw new MinerError(`Blocked hostname for security reasons: ${host}`, 403);
+  }
+  if (net.isIP(host)) {
+    if (ipIsPrivate(host)) {
+      throw new MinerError(`Blocked private/link-local IP for security reasons: ${host}`, 403);
+    }
+    return;
+  }
+  let addresses;
+  try {
+    addresses = await dns.lookup(host, { all: true });
+  } catch (err) {
+    throw new MinerError(`DNS lookup failed for ${host}: ${err.message}`, 502);
+  }
+  if (!addresses.length) {
+    throw new MinerError(`DNS returned no addresses for ${host}`, 502);
+  }
+  for (const { address } of addresses) {
+    if (ipIsPrivate(address)) {
+      throw new MinerError(`Blocked private DNS resolution for ${host} (${address})`, 403);
+    }
+  }
+}
+
+async function assertSafeUrl(rawUrl) {
+  const parsed = assertHttpUrl(rawUrl);
+  if (!ALLOW_PRIVATE_NETWORK) {
+    await assertPublicHost(parsed.hostname);
+  }
+  return parsed;
+}
+
+/* ------------------------------ HTML fetch ------------------------------ */
+
+/**
+ * HTTP/2 GET via node:http2 — needed because some CDNs (e.g. Wikimedia)
+ * reject HTTP/1.1 traffic from datacenter IPs while serving HTTP/2 fine.
+ * Works in both Node and Bun. Resolves { status, headers, body, bytes }.
+ */
+function http2Get(urlString, headers, { timeoutMs, maxBytes }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let session = null;
+    let req = null;
+    let timer = null;
+
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        if (req) req.close(http2.constants.NGHTTP2_CANCEL);
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (session) session.destroy();
+      } catch {
+        /* ignore */
+      }
+      fn();
+    };
+
+    let target;
+    try {
+      target = new URL(urlString);
+    } catch (err) {
+      reject(new MinerError(`Invalid URL: ${urlString}`, 400));
+      return;
+    }
+
+    try {
+      session = http2.connect(target.origin);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    timer = setTimeout(
+      () => finish(() => reject(new MinerError(`Request timed out after ${timeoutMs}ms`, 504))),
+      timeoutMs,
+    );
+    if (typeof timer.unref === 'function') timer.unref();
+
+    session.on('error', (err) => finish(() => reject(err)));
+
+    try {
+      req = session.request({
+        ':method': 'GET',
+        ':path': `${target.pathname}${target.search}`,
+        ...headers,
+      });
+    } catch (err) {
+      finish(() => reject(err));
+      return;
+    }
+
+    req.on('error', (err) => finish(() => reject(err)));
+
+    let responseHeaders = null;
+    const rawChunks = [];
+    let rawReceived = 0;
+
+    req.on('response', (h) => {
+      responseHeaders = h;
+    });
+
+    req.on('data', (chunk) => {
+      if (settled) return;
+      rawReceived += chunk.length;
+      if (rawReceived > maxBytes * 5) {
+        finish(() => reject(new MinerError(`Response exceeds maximum size of ${maxBytes} bytes`, 413)));
+      } else {
+        rawChunks.push(chunk);
+      }
+    });
+
+    req.on('end', () => {
+      if (settled) return;
+      const encoding = String(responseHeaders?.['content-encoding'] || '').toLowerCase();
+      let body;
+      try {
+        const raw = Buffer.concat(rawChunks);
+        if (encoding.includes('br')) body = zlib.brotliDecompressSync(raw);
+        else if (encoding.includes('gzip')) body = zlib.gunzipSync(raw);
+        else if (encoding.includes('deflate')) body = zlib.inflateSync(raw);
+        else body = raw;
+      } catch (err) {
+        finish(() => reject(new MinerError(`Failed to decompress response (${encoding}): ${err.message}`, 502)));
+        return;
+      }
+      if (body.length > maxBytes) {
+        finish(() => reject(new MinerError(`Response exceeds maximum size of ${maxBytes} bytes`, 413)));
+        return;
+      }
+      const flatHeaders = {};
+      for (const [key, value] of Object.entries(responseHeaders || {})) {
+        if (!key.startsWith(':')) flatHeaders[key] = Array.isArray(value) ? value.join(', ') : String(value);
+      }
+      const status = Number(responseHeaders?.[':status']) || 0;
+      finish(() => resolve({ status, headers: flatHeaders, body, bytes: body.length }));
+    });
+
+    req.end();
+  });
+}
+
+/** HTTP/1.1 GET via fetch() with a streamed byte cap. Resolves { status, headers, body, bytes }. */
+async function fetchHop(urlString) {
+  let res;
+  try {
+    res = await fetch(urlString, {
+      redirect: 'manual',
+      headers: MINER_HEADERS,
+      signal: AbortSignal.timeout(MINER_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new MinerError(`Fetch failed for ${urlString}: ${err.message || err.name}`, 502);
+  }
+
+  const headers = {};
+  res.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+
+  if (REDIRECT_STATUSES.includes(res.status) || !res.ok) {
+    try {
+      await res.body?.cancel();
+    } catch {
+      /* ignore */
+    }
+    return { status: res.status, headers, body: Buffer.alloc(0), bytes: 0 };
+  }
+
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > MINER_MAX_HTML_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw new MinerError(`Response exceeds maximum size of ${MINER_MAX_HTML_BYTES} bytes`, 413);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return { status: res.status, headers, body: Buffer.concat(chunks), bytes: received };
+}
+
+/** One request hop: HTTP/2 first for https (with HTTP/1.1 fallback), fetch for http. */
+async function requestHop(urlString) {
+  if (urlString.startsWith('https:')) {
+    try {
+      return await http2Get(urlString, MINER_HEADERS, {
+        timeoutMs: MINER_TIMEOUT_MS,
+        maxBytes: MINER_MAX_HTML_BYTES,
+      });
+    } catch (err) {
+      if (err instanceof MinerError) throw err;
+      logger.debug(`[miner] HTTP/2 hop failed for ${urlString} (${err.message}) — falling back to HTTP/1.1`);
+    }
+  }
+  return fetchHop(urlString);
+}
+
+/** Fetch a URL following up to 4 redirects, re-validating SSRF on every hop. */
+async function fetchWithRedirects(startUrl) {
+  let current = startUrl;
+  for (let hopIndex = 0; hopIndex <= MAX_REDIRECTS; hopIndex += 1) {
+    await assertSafeUrl(current);
+    let hop = await requestHop(current);
+    // One retry on transient upstream throttling (observed on YouTube from datacenter IPs).
+    if (hop.status === 429 || hop.status >= 502) {
+      await sleep(800);
+      hop = await requestHop(current);
+    }
+    const { status, headers, body, bytes } = hop;
+
+    if (REDIRECT_STATUSES.includes(status)) {
+      const location = headers.location;
+      if (!location) throw new MinerError(`Redirect without Location header from ${current}`, 502);
+      if (hopIndex === MAX_REDIRECTS) throw new MinerError('Too many redirects (max 4)', 502);
+      current = new URL(location, current).toString();
+      continue;
+    }
+
+    if (status >= 400) {
+      throw new MinerError(
+        `Upstream responded ${status}`,
+        status >= 400 ? status : 502,
+      );
+    }
+
+    const contentType = String(headers['content-type'] || '').toLowerCase();
+    if (!ALLOWED_CONTENT_TYPES.some((t) => contentType.includes(t))) {
+      throw new MinerError(`Unsupported content type: ${contentType || 'unknown'}`, 415);
+    }
+
+    return { body: body.toString('utf8'), finalUrl: current, contentType, bytesRead: bytes };
+  }
+  throw new MinerError('Too many redirects (max 4)', 502);
+}
+
+/* ------------------------------ extraction ------------------------------ */
+
+function metaContent(html, keys) {
+  for (const key of keys) {
+    const re = new RegExp(
+      `<meta[^>]*?(?:property|name|itemprop)\\s*=\\s*["']${escapeRegex(key)}["'][^>]*?>`,
+      'gi',
+    );
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const tag = m[0];
+      const c = tag.match(/\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const value = c ? (c[1] ?? c[2] ?? '') : '';
+      if (value && value.trim()) return decodeEntities(value).trim();
+    }
+  }
+  return '';
+}
+
+function linkHref(html, rels) {
+  for (const rel of rels) {
+    const re = new RegExp(`<link[^>]*?rel\\s*=\\s*["']${escapeRegex(rel)}["'][^>]*?>`, 'gi');
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const href = m[0].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const value = href ? (href[1] ?? href[2] ?? '') : '';
+      if (value && value.trim()) return decodeEntities(value).trim();
+    }
+  }
+  return '';
+}
+
+function extractJsonLdBlocks(html) {
+  const blocks = [];
+  const re = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      blocks.push(JSON.parse(m[1].trim()));
+    } catch {
+      /* malformed JSON-LD — skip */
+    }
+  }
+  return blocks;
+}
+
+function deepFindKey(node, key) {
+  if (node === null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = deepFindKey(item, key);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node[key] === 'string' && node[key].trim()) return node[key];
+  for (const value of Object.values(node)) {
+    if (value && typeof value === 'object') {
+      const found = deepFindKey(value, key);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function jsonLdValue(html, key) {
+  for (const block of extractJsonLdBlocks(html)) {
+    const found = deepFindKey(block, key);
+    if (found) return found;
+  }
+  return '';
+}
+
+function collectMediaUrls(html, ext) {
+  const urls = [];
+
+  // <video src> / <source src> values ending in .{ext}
+  const srcRe = new RegExp(`<(?:video|source|audio)[^>]*\\bsrc\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'gi');
+  let m;
+  while ((m = srcRe.exec(html)) !== null) {
+    const value = decodeEntities(m[1] ?? m[2] ?? '');
+    if (value.toLowerCase().includes(`.${ext}`)) urls.push(value);
+  }
+
+  // Absolute + protocol-relative URLs anywhere in the document
+  const absRe = new RegExp(`(?:https?:)?\\/\\/[^\\s"'<>\\\\]+\\.${ext}(?:\\?[^\\s"'<>\\\\]*)?`, 'gi');
+  while ((m = absRe.exec(html)) !== null) {
+    const value = m[0];
+    urls.push(value.startsWith('//') ? `https:${value}` : value);
+  }
+
+  // JSON-ish patterns: "file":"https://….{ext}"
+  const jsonRe = new RegExp(`"(?:file|src|url|source|stream)"\\s*:\\s*"([^"]*\\.${ext}[^"]*)"`, 'gi');
+  while ((m = jsonRe.exec(html)) !== null) {
+    urls.push(m[1].replace(/\\\//g, '/').replace(/\\u002F/gi, '/'));
+  }
+
+  return urls;
+}
+
+function collectIframes(html) {
+  const urls = [];
+  const re = /<iframe[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const value = decodeEntities(m[1] ?? m[2] ?? '');
+    if (/^(https?:)?\/\//i.test(value)) urls.push(value);
+  }
+  return urls;
+}
+
+const YOUTUBE_ID_PATTERNS = [
+  /youtube\.com\/embed\/([A-Za-z0-9_-]{6,15})/gi,
+  /youtube\.com\/watch\?v=([A-Za-z0-9_-]{6,15})/gi,
+  /youtu\.be\/([A-Za-z0-9_-]{6,15})/gi,
+  /youtube\.com\/shorts\/([A-Za-z0-9_-]{6,15})/gi,
+  /youtube-nocookie\.com\/embed\/([A-Za-z0-9_-]{6,15})/gi,
+];
+
+function collectYouTubeIds(...texts) {
+  const ids = [];
+  const haystack = texts.filter(Boolean).join('\n');
+  for (const pattern of YOUTUBE_ID_PATTERNS) {
+    pattern.lastIndex = 0;
+    let m;
+    while ((m = pattern.exec(haystack)) !== null) {
+      if (!ids.includes(m[1])) ids.push(m[1]);
+      if (ids.length >= 5) break;
+    }
+  }
+  return ids;
+}
+
+function filenameToTitle(pathname) {
+  const base = pathname.split('/').filter(Boolean).pop() || 'untitled';
+  let name = base;
+  try {
+    name = decodeURIComponent(base);
+  } catch {
+    /* keep raw */
+  }
+  return name.replace(/\.(mp4|m3u8)$/i, '') || 'untitled';
+}
+
+function extractFromHtml(html, finalUrl, sourceUrl, contentType, bytesRead, startedAt) {
+  const youtubeIds = collectYouTubeIds(html, sourceUrl, finalUrl);
+
+  let title = metaContent(html, ['og:title', 'twitter:title']);
+  if (!title) {
+    const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (t) title = stripTags(t[1]);
+  }
+  if (!title) {
+    const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    if (h1) title = stripTags(h1[1]);
+  }
+  if (!title) title = stripTags(jsonLdValue(html, 'name'));
+  if (youtubeIds.length > 0 && (!title || /^[\s|–—-]*(?:YouTube)?[\s|–—-]*$/i.test(title))) {
+    // Degenerate title (e.g. consent-gated page showing “- YouTube”) — use the video id.
+    title = `YouTube video ${youtubeIds[0]}`;
+  }
+  let hostname = 'untitled';
+  try {
+    hostname = new URL(finalUrl).hostname.replace(/^www\./, '');
+  } catch {
+    /* keep fallback */
+  }
+  if (!title) title = hostname;
+
+  let description = metaContent(html, ['og:description', 'description', 'twitter:description']);
+  if (!description) description = jsonLdValue(html, 'description');
+  description = clamp(stripTags(description), 2000);
+
+  let thumbnail = metaContent(html, ['og:image', 'og:image:secure_url', 'twitter:image']);
+  if (!thumbnail) thumbnail = linkHref(html, ['image_src']);
+  if (!thumbnail) {
+    const img = html.match(/<img[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')/i);
+    if (img) thumbnail = decodeEntities(img[1] ?? img[2] ?? '');
+  }
+  if (!thumbnail && youtubeIds.length > 0) {
+    thumbnail = `https://i.ytimg.com/vi/${youtubeIds[0]}/hqdefault.jpg`;
+  }
+  thumbnail = toAbsolute(thumbnail, finalUrl);
+
+  const siteName = metaContent(html, ['og:site_name']);
+
+  const mp4 = dedupeCap(
+    collectMediaUrls(html, 'mp4').map((u) => toAbsolute(u, finalUrl)),
+    12,
+  );
+  const m3u8 = dedupeCap(
+    collectMediaUrls(html, 'm3u8').map((u) => toAbsolute(u, finalUrl)),
+    12,
+  );
+  const iframe = dedupeCap(
+    collectIframes(html).map((u) => toAbsolute(u, finalUrl)),
+    8,
+  );
+  const youtube = youtubeIds.slice(0, 5).map((id) => `https://www.youtube.com/embed/${id}`);
+
+  return {
+    title,
+    description,
+    thumbnail,
+    siteName: siteName || hostname,
+    mp4,
+    m3u8,
+    iframe,
+    youtube,
+    contentType,
+    finalUrl,
+    bytesRead,
+    elapsedMs: Date.now() - startedAt,
+  };
+}
+
+/* ------------------------------ upsert/merge ----------------------------- */
+
+
+function providerEmbed(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const h = u.hostname.toLowerCase().replace(/^www\./,'');
+    const path = decodeURIComponent(u.pathname);
+
+    // Odysee
+    if (h === 'odysee.com') {
+      if (path.startsWith('/$/embed/')) return { type:'iframe', url:u.toString(), label:'Odysee' };
+      const clean = path.replace(/^\/+/, '');
+      if (clean) return {
+        type:'iframe',
+        url:`https://odysee.com/$/embed/${clean}`,
+        label:'Odysee'
+      };
+    }
+
+    // Dailymotion
+    if (h === 'dai.ly' || h.endsWith('dailymotion.com')) {
+      let id = null;
+      if (h === 'dai.ly') id = path.split('/').filter(Boolean)[0];
+      else {
+        const m = path.match(/\/(?:video|embed\/video)\/([^/?]+)/i);
+        if (m) id = m[1];
+      }
+      if (id) return {
+        type:'iframe',
+        url:`https://www.dailymotion.com/embed/video/${id}`,
+        label:'Dailymotion'
+      };
+    }
+
+    // VK / VK Video
+    if (h.includes('vkvideo.ru') || h === 'vk.com' || h.endsWith('.vk.com')) {
+      const m = `${path}${u.search}`.match(/video(-?\d+)_(\d+)/i);
+      if (m) return {
+        type:'iframe',
+        url:`https://vkvideo.ru/video_ext.php?oid=${m[1]}&id=${m[2]}`,
+        label:'VK Video'
+      };
+    }
+
+    // OK.ru fallback
+    if (h === 'ok.ru' || h.endsWith('.ok.ru')) {
+      const m = path.match(/\/(?:video|videoembed)\/(\d+)/i);
+      if (m) return {
+        type:'iframe',
+        url:`https://ok.ru/videoembed/${m[1]}`,
+        label:'OK.ru'
+      };
+    }
+  } catch {}
+
+  return null;
+}
+
+function buildSources(extraction) {
+  const provider = providerEmbed(extraction.finalUrl);
+
+  const iframe = extraction.iframe
+    .filter((url) => {
+      try {
+        const h = new URL(url).hostname.toLowerCase();
+        return !h.includes('accounts.google.com');
+      } catch {
+        return false;
+      }
+    })
+    .map((url) => ({ type: 'iframe', url, label: 'Embed' }));
+
+  const sources = [
+    ...extraction.mp4.map((url) => ({ type: 'mp4', url, label: 'MP4' })),
+    ...extraction.m3u8.map((url) => ({ type: 'm3u8', url, label: 'HLS' })),
+    ...iframe,
+    ...extraction.youtube.map((url) => ({ type: 'youtube', url, label: 'YouTube' })),
+  ];
+
+  if (provider && !sources.some((x) => x.url === provider.url)) {
+    sources.push(provider);
+  }
+
+  return sources;
+}
+
+const YOUTUBE_HOSTS = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'music.youtube.com',
+  'youtu.be',
+  'www.youtu.be',
+  'youtube-nocookie.com',
+  'www.youtube-nocookie.com',
+]);
+
+/** Return the YouTube video id when the given URL itself points at a YouTube host. */
+function youtubeIdFromUrl(urlString) {
+  try {
+    const u = new URL(String(urlString));
+    if (!YOUTUBE_HOSTS.has(u.hostname.toLowerCase())) return null;
+  } catch {
+    return null;
+  }
+  return collectYouTubeIds(urlString)[0] || null;
+}
+
+/** URL-based extraction for throttled YouTube pages, enriched via oEmbed. */
+async function degradedYouTubeExtraction(rawUrl, id, startedAt) {
+  const watchUrl = `https://www.youtube.com/watch?v=${id}`;
+  let title = `YouTube video ${id}`;
+  let thumbnail = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+  let authorName = '';
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(watchUrl)}&format=json`,
+      {
+        headers: { 'user-agent': MINER_HEADERS['user-agent'], accept: 'application/json' },
+        signal: AbortSignal.timeout(6000),
+      },
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data.title) title = data.title;
+      if (data.thumbnail_url) thumbnail = data.thumbnail_url;
+      if (data.author_name) authorName = data.author_name;
+    }
+  } catch {
+    /* keep defaults */
+  }
+  return {
+    title,
+    description: authorName ? `YouTube channel: ${authorName}` : '',
+    thumbnail,
+    siteName: 'youtube.com',
+    mp4: [],
+    m3u8: [],
+    iframe: [],
+    youtube: [`https://www.youtube.com/embed/${id}`],
+    contentType: 'youtube-url',
+    finalUrl: watchUrl,
+    bytesRead: 0,
+    elapsedMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * Mine a URL for metadata + playable sources and UPSERT the result into the DB.
+ * @param {string} rawUrl - the URL to mine (http/https).
+ * @param {{ type?: string, externalId?: string }} [options]
+ * @returns {Promise<{ extraction: object, record: object }>}
+ */
+export async function mineUrl(rawUrl, { type, externalId } = {}) {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    throw new MinerError('A url is required', 400);
+  }
+  const startedAt = Date.now();
+  const parsed = await assertSafeUrl(rawUrl);
+
+  const pathname = parsed.pathname.toLowerCase();
+  let extraction;
+
+  if (pathname.endsWith('.mp4') || pathname.endsWith('.m3u8')) {
+    // Direct media shortcut — no HTML fetch needed.
+    const isMp4 = pathname.endsWith('.mp4');
+    extraction = {
+      title: filenameToTitle(parsed.pathname),
+      description: '',
+      thumbnail: '',
+      siteName: parsed.hostname.replace(/^www\./, ''),
+      mp4: isMp4 ? [parsed.toString()] : [],
+      m3u8: isMp4 ? [] : [parsed.toString()],
+      iframe: [],
+      youtube: [],
+      contentType: 'direct-media',
+      finalUrl: parsed.toString(),
+      bytesRead: 0,
+      elapsedMs: Date.now() - startedAt,
+    };
+  } else {
+    try {
+      const { body, finalUrl, contentType, bytesRead } = await fetchWithRedirects(parsed.toString());
+      extraction = extractFromHtml(body, finalUrl, rawUrl, contentType, bytesRead, startedAt);
+    } catch (err) {
+      // YouTube watch pages are frequently throttled (429) from datacenter IPs.
+      // The video id is in the source URL itself, so fall back to a URL-based
+      // extraction enriched via the oEmbed endpoint instead of failing outright.
+      const ytId = youtubeIdFromUrl(rawUrl);
+
+      let okMatch = null;
+      try {
+        const ou = new URL(rawUrl);
+        if (ou.hostname.toLowerCase().replace(/^www\./,'') === 'ok.ru') {
+          okMatch = ou.pathname.match(/\/(?:video|videoembed)\/(\d+)/i);
+        }
+      } catch {}
+
+      if (okMatch) {
+        extraction = {
+          title: `OK.ru video ${okMatch[1]}`,
+          description: '',
+          thumbnail: '',
+          siteName: 'ok.ru',
+          mp4: [],
+          m3u8: [],
+          iframe: [`https://ok.ru/videoembed/${okMatch[1]}`],
+          youtube: [],
+          contentType: 'okru-url',
+          finalUrl: rawUrl,
+          bytesRead: 0,
+          elapsedMs: Date.now() - startedAt
+        };
+      } else {
+        if (!ytId) throw err;
+      logger.warn(`[miner] HTML fetch failed for ${rawUrl} (${err.message}) — using YouTube URL-based fallback`);
+        extraction = await degradedYouTubeExtraction(rawUrl, ytId, startedAt);
+      }
+    }
+  }
+
+  const builtSources = buildSources(extraction);
+  const externalid = externalId || extraction.finalUrl || rawUrl;
+  const existing = await getLocalContentByExternalId(externalid);
+
+  let record;
+  if (existing) {
+    const newMetadata = {};
+    if (extraction.description) {
+      newMetadata.description = extraction.description;
+      newMetadata.overview = extraction.description;
+    }
+    const mergedMetadata = {
+      ...existing.metadata,
+      ...newMetadata,
+      mined: {
+        at: new Date().toISOString(),
+        url: extraction.finalUrl,
+        siteName: extraction.siteName,
+        mp4: extraction.mp4,
+        m3u8: extraction.m3u8,
+        iframe: extraction.iframe,
+        youtube: extraction.youtube,
+      },
+      player: {
+        sources: builtSources.length > 0 ? builtSources : existing.metadata?.player?.sources || [],
+      },
+    };
+    const upserted = await upsertLocalContent({
+      externalid,
+      type: type || existing.type,
+      title: extraction.title || existing.title,
+      thumbnail: extraction.thumbnail || existing.thumbnail,
+      metadata: mergedMetadata,
+    });
+    record = upserted.record;
+  } else {
+    const metadata = {
+      description: extraction.description,
+      overview: extraction.description,
+      siteName: extraction.siteName,
+      player: { sources: builtSources },
+    };
+    const upserted = await upsertLocalContent({
+      externalid,
+      type: type || 'mined',
+      title: extraction.title,
+      thumbnail: extraction.thumbnail,
+      metadata,
+    });
+    record = upserted.record;
+  }
+
+  await registerSource({
+    url: rawUrl,
+    contentId: record?.id ?? null,
+    metadata: {
+      externalid,
+      title: record?.title || extraction.title
+    }
+  });
+
+  logger.info(
+    `[miner] Mined ${extraction.finalUrl} → "${extraction.title}" (mp4:${extraction.mp4.length} m3u8:${extraction.m3u8.length} iframe:${extraction.iframe.length} youtube:${extraction.youtube.length}) in ${extraction.elapsedMs}ms`,
+  );
+
+  return { extraction, record };
+}

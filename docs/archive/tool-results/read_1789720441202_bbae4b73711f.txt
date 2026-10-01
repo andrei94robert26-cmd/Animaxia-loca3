@@ -1,0 +1,2002 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * ai-view.tsx — AI hub (#/ai). Provider status header + eight tools:
+     5→ * Recommendations (aiRecommendations), Summarize (aiSummarize with a library
+     6→ * content picker), Describe (aiDescribe form) and Chat (auth-gated
+     7→ * content-scoped aiChat) — plus the Phase-4 AI Cloud panes: Personal
+     8→ * (personalized home + weekly recap), Assistant (tool-calling agent),
+     9→ * RAG Lab (vector pipeline: recommend / summarize / explain / chat) and
+    10→ * Tools (catalog + live runner). Plan-quota (402) errors render upgrade
+    11→ * cards; the header shows the live LLM + vector-backend status.
+    12→ */
+    13→
+    14→import { useEffect, useRef, useState } from 'react';
+    15→import {
+    16→  Bot,
+    17→  Brain,
+    18→  ChevronDown,
+    19→  Crown,
+    20→  Database,
+    21→  Dices,
+    22→  Loader2,
+    23→  Search,
+    24→  Send,
+    25→  Sparkles,
+    26→  Wrench,
+    27→  X,
+    28→  Zap,
+    29→} from 'lucide-react';
+    30→import { toast } from 'sonner';
+    31→import {
+    32→  platform,
+    33→  PlatformError,
+    34→  type AiAssistantResponse,
+    35→  type AiChatTurn,
+    36→  type AiPersonalHomeResponse,
+    37→  type AiPersonalRecapResponse,
+    38→  type AiRagChatResponse,
+    39→  type AiRagExplainResponse,
+    40→  type AiRagPick,
+    41→  type AiRagRecommendResponse,
+    42→  type AiRagSummarizeResponse,
+    43→  type AiRecommendation,
+    44→  type AiTool,
+    45→  type AiToolRunResponse,
+    46→  type PlatformUser,
+    47→} from '@/lib/animaxia/platform';
+    48→import { useApi } from '@/lib/animaxia/hooks';
+    49→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    50→import { useAuth } from '@/components/animaxia/auth-provider';
+    51→import { Button } from '@/components/ui/button';
+    52→import { Card, CardContent } from '@/components/ui/card';
+    53→import { Input } from '@/components/ui/input';
+    54→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    55→import { Skeleton } from '@/components/ui/skeleton';
+    56→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    57→import { Textarea } from '@/components/ui/textarea';
+    58→import { cn } from '@/lib/utils';
+    59→import { Container, PageHeader } from '../section';
+    60→import { BrandPlaceholder, EmptyState, ErrorState, LoadingCards, TypeBadge } from '../states';
+    61→
+    62→type AiTab = 'recommendations' | 'summarize' | 'describe' | 'chat' | 'personal' | 'assistant' | 'rag' | 'tools';
+    63→
+    64→const TAB_TRIGGER_CLASS =
+    65→  'shrink-0 whitespace-nowrap rounded-lg px-3 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white sm:px-4';
+    66→
+    67→/* ------------------------------- local helpers ------------------------------ */
+    68→
+    69→interface Suggestion {
+    70→  id: number;
+    71→  title: string;
+    72→  type: string;
+    73→  thumbnail: string | null;
+    74→}
+    75→
+    76→interface ChatMessage {
+    77→  role: 'user' | 'ai';
+    78→  text: string;
+    79→}
+    80→
+    81→async function copyText(text: string) {
+    82→  try {
+    83→    await navigator.clipboard.writeText(text);
+    84→    toast.success('Copied to clipboard');
+    85→  } catch {
+    86→    toast.error('Clipboard is not available in this browser');
+    87→  }
+    88→}
+    89→
+    90→/** Renders AI output: bullet lines ("- " / "• ") become styled list items. */
+    91→function AiText({ text }: { text: string }) {
+    92→  const lines = text
+    93→    .split('\n')
+    94→    .map((l) => l.trim())
+    95→    .filter(Boolean);
+    96→  return (
+    97→    <div className="space-y-2.5">
+    98→      {lines.map((line, i) => {
+    99→        if (line.startsWith('- ') || line.startsWith('• ')) {
+   100→          return (
+   101→            <div key={i} className="flex gap-2.5">
+   102→              <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400" aria-hidden />
+   103→              <p className="text-sm leading-relaxed text-zinc-300">{line.slice(2)}</p>
+   104→            </div>
+   105→          );
+   106→        }
+   107→        return (
+   108→          <p key={i} className="text-sm leading-relaxed text-zinc-300">
+   109→            {line}
+   110→          </p>
+   111→        );
+   112→      })}
+   113→    </div>
+   114→  );
+   115→}
+   116→
+   117→function ProviderBadge({ provider }: { provider: string }) {
+   118→  const isLlm = provider === 'z-ai';
+   119→  return (
+   120→    <span
+   121→      className={cn(
+   122→        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider',
+   123→        isLlm ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+   124→      )}
+   125→    >
+   126→      {isLlm ? <Sparkles className="h-3 w-3" aria-hidden /> : <Zap className="h-3 w-3" aria-hidden />}
+   127→      {provider}
+   128→    </span>
+   129→  );
+   130→}
+   131→
+   132→function UpgradeCard({ message }: { message: string }) {
+   133→  return (
+   134→    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.07] p-6 text-center">
+   135→      <p className="flex items-center justify-center gap-2 font-semibold text-amber-300">
+   136→        <Crown className="h-5 w-5 shrink-0" aria-hidden />
+   137→        Daily AI limit reached
+   138→      </p>
+   139→      <p className="mx-auto mt-1 max-w-md text-sm leading-relaxed text-zinc-400">{message}</p>
+   140→      <Button
+   141→        type="button"
+   142→        className="mt-4 bg-rose-600 font-bold text-white hover:bg-rose-500"
+   143→        onClick={() => navigate('/premium')}
+   144→      >
+   145→        <Crown aria-hidden /> See premium plans
+   146→      </Button>
+   147→    </div>
+   148→  );
+   149→}
+   150→
+   151→function TypingDots() {
+   152→  return (
+   153→    <span className="inline-flex items-center gap-1 py-1" role="status" aria-label="AI is thinking">
+   154→      {[0, 1, 2].map((i) => (
+   155→        <span
+   156→          key={i}
+   157→          className="h-1.5 w-1.5 animate-bounce rounded-full bg-rose-300"
+   158→          style={{ animationDelay: `${i * 150}ms` }}
+   159→        />
+   160→      ))}
+   161→    </span>
+   162→  );
+   163→}
+   164→
+   165→/** Amber "offline / degraded" chip shown when the LLM fell back to mock mode. */
+   166→function DegradedBadge() {
+   167→  return (
+   168→    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+   169→      <Zap className="h-3 w-3" aria-hidden /> offline mode
+   170→    </span>
+   171→  );
+   172→}
+   173→
+   174→/** Shared auth-gated sign-in prompt card (same pattern as the Chat tab). */
+   175→function SignInCard({ title, message, action }: { title: string; message: string; action: string }) {
+   176→  return (
+   177→    <div className="mx-auto max-w-3xl">
+   178→      <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.02] p-10 text-center">
+   179→        <div className="rounded-full bg-rose-500/10 p-3 text-rose-300">
+   180→          <Sparkles className="h-6 w-6" aria-hidden />
+   181→        </div>
+   182→        <div>
+   183→          <p className="font-semibold text-zinc-100">{title}</p>
+   184→          <p className="mt-1 max-w-md text-sm text-zinc-400">{message}</p>
+   185→        </div>
+   186→        <Button
+   187→          type="button"
+   188→          className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   189→          onClick={() => navigate('/auth')}
+   190→        >
+   191→          {action}
+   192→        </Button>
+   193→      </div>
+   194→    </div>
+   195→  );
+   196→}
+   197→
+   198→/** True when the error is a per-minute rate limit (429). */
+   199→function isRateLimited(e: unknown): e is PlatformError {
+   200→  return e instanceof PlatformError && e.status === 429;
+   201→}
+   202→
+   203→/** Best-effort daily-quota (402) detection from a useApi error string — the
+   204→ *  backend replies "Daily AI quota reached for your plan" with upgrade:true. */
+   205→function isQuotaError(message: string | null): boolean {
+   206→  return Boolean(message && /daily ai quota|quota reached|upgrade your plan/i.test(message));
+   207→}
+   208→
+   209→/* ------------------------------ content picker ------------------------------ */
+   210→
+   211→/**
+   212→ * Library content picker: debounced (300 ms) autocomplete dropdown with
+   213→ * thumbnails, keyboard (Escape) and click-outside dismissal, and a selected
+   214→ * chip. Reused by the Summarize and Chat tabs.
+   215→ */
+   216→function ContentPicker({
+   217→  selected,
+   218→  onSelect,
+   219→  label,
+   220→  inputId,
+   221→}: {
+   222→  selected: Suggestion | null;
+   223→  onSelect: (s: Suggestion | null) => void;
+   224→  label: string;
+   225→  inputId: string;
+   226→}) {
+   227→  const [query, setQuery] = useState('');
+   228→  const [open, setOpen] = useState(false);
+   229→  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+   230→  const [loading, setLoading] = useState(false);
+   231→  const rootRef = useRef<HTMLDivElement>(null);
+   232→
+   233→  /* Debounced autocomplete (300 ms while typing; instant clear otherwise —
+   234→     state updates happen inside the async timer to avoid sync setState). */
+   235→  useEffect(() => {
+   236→    const q = query.trim();
+   237→    const timer = setTimeout(
+   238→      () => {
+   239→        if (!open || q.length === 0) {
+   240→          setSuggestions([]);
+   241→          return;
+   242→        }
+   243→        setLoading(true);
+   244→        platform
+   245→          .autocomplete(q)
+   246→          .then((res) => setSuggestions(res.suggestions))
+   247→          .catch(() => setSuggestions([]))
+   248→          .finally(() => setLoading(false));
+   249→      },
+   250→      open && q.length > 0 ? 300 : 0,
+   251→    );
+   252→    return () => clearTimeout(timer);
+   253→  }, [query, open]);
+   254→
+   255→  /* Click-outside closes the dropdown. */
+   256→  useEffect(() => {
+   257→    if (!open) return;
+   258→    const onDown = (e: MouseEvent) => {
+   259→      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+   260→    };
+   261→    document.addEventListener('mousedown', onDown);
+   262→    return () => document.removeEventListener('mousedown', onDown);
+   263→  }, [open]);
+   264→
+   265→  return (
+   266→    <div className="space-y-2" ref={rootRef}>
+   267→      <label htmlFor={inputId} className="text-sm font-semibold text-zinc-300">
+   268→        {label}
+   269→      </label>
+   270→      <div className="relative">
+   271→        <Search
+   272→          className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500"
+   273→          aria-hidden
+   274→        />
+   275→        <Input
+   276→          id={inputId}
+   277→          type="text"
+   278→          role="combobox"
+   279→          aria-expanded={open}
+   280→          aria-controls={`${inputId}-listbox`}
+   281→          aria-autocomplete="list"
+   282→          autoComplete="off"
+   283→          value={query}
+   284→          placeholder="Search the library…"
+   285→          onChange={(e) => {
+   286→            setQuery(e.target.value);
+   287→            setOpen(true);
+   288→          }}
+   289→          onFocus={() => setOpen(true)}
+   290→          onKeyDown={(e) => {
+   291→            if (e.key === 'Escape') setOpen(false);
+   292→          }}
+   293→          className="h-11 rounded-xl border-white/10 bg-white/[0.04] pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   294→        />
+   295→        {open && query.trim().length > 0 && (
+   296→          <div
+   297→            id={`${inputId}-listbox`}
+   298→            role="listbox"
+   299→            aria-label="Library suggestions"
+   300→            className="absolute z-30 mt-2 max-h-72 w-full overflow-y-auto rounded-xl border border-white/10 bg-[#12121c] p-2 shadow-2xl shadow-black/70 custom-scrollbar"
+   301→          >
+   302→            {loading ? (
+   303→              <p className="px-2 py-3 text-xs text-zinc-500">Searching the library…</p>
+   304→            ) : suggestions.length === 0 ? (
+   305→              <p className="px-2 py-3 text-xs text-zinc-500">No titles match that search.</p>
+   306→            ) : (
+   307→              suggestions.map((s) => (
+   308→                <button
+   309→                  key={s.id}
+   310→                  type="button"
+   311→                  role="option"
+   312→                  aria-selected={selected?.id === s.id}
+   313→                  onClick={() => {
+   314→                    onSelect(s);
+   315→                    setQuery('');
+   316→                    setOpen(false);
+   317→                  }}
+   318→                  className="flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   319→                >
+   320→                  <span className="h-12 w-9 shrink-0 overflow-hidden rounded-md border border-white/10 bg-white/[0.03]">
+   321→                    {s.thumbnail ? (
+   322→                      <img src={s.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+   323→                    ) : (
+   324→                      <BrandPlaceholder title={s.title} />
+   325→                    )}
+   326→                  </span>
+   327→                  <span className="min-w-0 flex-1">
+   328→                    <span className="block truncate text-sm font-semibold text-zinc-100">{s.title}</span>
+   329→                  </span>
+   330→                  <TypeBadge type={s.type} />
+   331→                </button>
+   332→              ))
+   333→            )}
+   334→          </div>
+   335→        )}
+   336→      </div>
+   337→      {selected && (
+   338→        <div className="flex items-center gap-2">
+   339→          <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-rose-500/30 bg-rose-500/10 py-1 pl-1 pr-2 text-sm text-rose-200">
+   340→            <span className="h-7 w-7 shrink-0 overflow-hidden rounded-full border border-white/10 bg-white/[0.03]">
+   341→              {selected.thumbnail ? (
+   342→                <img src={selected.thumbnail} alt="" className="h-full w-full object-cover" />
+   343→              ) : (
+   344→                <BrandPlaceholder title={selected.title} />
+   345→              )}
+   346→            </span>
+   347→            <span className="truncate font-medium">{selected.title}</span>
+   348→            <button
+   349→              type="button"
+   350→              onClick={() => onSelect(null)}
+   351→              aria-label={`Clear ${selected.title}`}
+   352→              className="rounded-full p-1 text-rose-300/70 transition hover:bg-rose-500/20 hover:text-rose-100"
+   353→            >
+   354→              <X className="h-3.5 w-3.5" aria-hidden />
+   355→            </button>
+   356→          </span>
+   357→        </div>
+   358→      )}
+   359→    </div>
+   360→  );
+   361→}
+   362→
+   363→/* ---------------------------------- view ---------------------------------- */
+   364→
+   365→export function AiView(_route: { route: AppRoute }) {
+   366→  const { user } = useAuth();
+   367→  const [tab, setTab] = useState<AiTab>('recommendations');
+   368→
+   369→  const status = useApi('ai-status', () => platform.aiStatus());
+   370→  const statusData = status.data;
+   371→  /* Phase-4 AI Cloud status (LLM + vector backend + quota). */
+   372→  const cloud = useApi('ai-cloud-status', () => platform.aiCloudStatus());
+   373→  const cloudData = cloud.data;
+   374→
+   375→  return (
+   376→    <Container className="space-y-8 py-8 sm:py-10">
+   377→      <PageHeader title="AI hub" subtitle="Powered by Animaxia Intelligence">
+   378→        <div className="flex flex-wrap items-center gap-2 pt-1">
+   379→          {statusData ? (
+   380→            statusData.provider === 'z-ai' && statusData.available ? (
+   381→              <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-300">
+   382→                <Sparkles className="h-3.5 w-3.5" aria-hidden /> LLM online
+   383→              </span>
+   384→            ) : (
+   385→              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
+   386→                <Zap className="h-3.5 w-3.5" aria-hidden /> {statusData.provider || 'offline'} mode
+   387→              </span>
+   388→            )
+   389→          ) : (
+   390→            <Skeleton className="h-7 w-28 rounded-full" />
+   391→          )}
+   392→          {cloudData ? (
+   393→            <span
+   394→              className="inline-flex items-center gap-1.5 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-1 text-xs font-semibold text-fuchsia-300"
+   395→              title={`Vector backend: ${cloudData.vector.backend} · ${cloudData.vector.dims} dimensions · indexed ${Object.values(cloudData.vector.counts).reduce((a, b) => a + b, 0)} vectors`}
+   396→            >
+   397→              <Database className="h-3.5 w-3.5" aria-hidden /> {cloudData.vector.backend} · {cloudData.vector.dims}d
+   398→            </span>
+   399→          ) : (
+   400→            !cloud.error && <Skeleton className="h-7 w-32 rounded-full" />
+   401→          )}
+   402→          {statusData && (
+   403→            <span className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-zinc-400">
+   404→              {statusData.requestsToday} requests today
+   405→            </span>
+   406→          )}
+   407→          {statusData &&
+   408→            (['free', 'plus', 'pro'] as const)
+   409→              .filter((plan) => statusData.quota?.[plan] != null)
+   410→              .map((plan) => (
+   411→                <span
+   412→                  key={plan}
+   413→                  className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-zinc-400"
+   414→                >
+   415→                  <Crown className="h-3 w-3 text-amber-300/80" aria-hidden />
+   416→                  {plan} · {statusData.quota[plan]}/day
+   417→                </span>
+   418→              ))}
+   419→        </div>
+   420→      </PageHeader>
+   421→
+   422→      <Tabs value={tab} onValueChange={(v) => setTab(v as AiTab)}>
+   423→        <TabsList className="custom-scrollbar h-10 w-full justify-start gap-1 overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   424→          <TabsTrigger value="recommendations" className={TAB_TRIGGER_CLASS}>
+   425→            Recommendations
+   426→          </TabsTrigger>
+   427→          <TabsTrigger value="summarize" className={TAB_TRIGGER_CLASS}>
+   428→            Summarize
+   429→          </TabsTrigger>
+   430→          <TabsTrigger value="describe" className={TAB_TRIGGER_CLASS}>
+   431→            Describe
+   432→          </TabsTrigger>
+   433→          <TabsTrigger value="chat" className={TAB_TRIGGER_CLASS}>
+   434→            Chat
+   435→          </TabsTrigger>
+   436→          <TabsTrigger value="personal" className={TAB_TRIGGER_CLASS}>
+   437→            Personal
+   438→          </TabsTrigger>
+   439→          <TabsTrigger value="assistant" className={TAB_TRIGGER_CLASS}>
+   440→            Assistant
+   441→          </TabsTrigger>
+   442→          <TabsTrigger value="rag" className={TAB_TRIGGER_CLASS}>
+   443→            RAG Lab
+   444→          </TabsTrigger>
+   445→          <TabsTrigger value="tools" className={TAB_TRIGGER_CLASS}>
+   446→            Tools
+   447→          </TabsTrigger>
+   448→        </TabsList>
+   449→
+   450→        <TabsContent value="recommendations" className="pt-6">
+   451→          <RecommendationsTab user={user} />
+   452→        </TabsContent>
+   453→        <TabsContent value="summarize" className="pt-6">
+   454→          <SummarizeTab user={user} />
+   455→        </TabsContent>
+   456→        <TabsContent value="describe" className="pt-6">
+   457→          <DescribeTab />
+   458→        </TabsContent>
+   459→        <TabsContent value="chat" className="pt-6">
+   460→          <ChatTab user={user} />
+   461→        </TabsContent>
+   462→        <TabsContent value="personal" className="pt-6">
+   463→          <PersonalTab user={user} />
+   464→        </TabsContent>
+   465→        <TabsContent value="assistant" className="pt-6">
+   466→          <AssistantTab user={user} />
+   467→        </TabsContent>
+   468→        <TabsContent value="rag" className="pt-6">
+   469→          <RagLabTab user={user} />
+   470→        </TabsContent>
+   471→        <TabsContent value="tools" className="pt-6">
+   472→          <ToolsTab user={user} />
+   473→        </TabsContent>
+   474→      </Tabs>
+   475→    </Container>
+   476→  );
+   477→}
+   478→
+   479→/* ---------------------------- recommendations tab ---------------------------- */
+   480→
+   481→function RecommendationsTab({ user }: { user: PlatformUser | null }) {
+   482→  const [picks, setPicks] = useState<AiRecommendation[] | null>(null);
+   483→  const [provider, setProvider] = useState('');
+   484→  const [loading, setLoading] = useState(false);
+   485→  const [error, setError] = useState<string | null>(null);
+   486→  const [upgrade, setUpgrade] = useState<string | null>(null);
+   487→
+   488→  async function fetchPicks() {
+   489→    if (loading) return;
+   490→    setLoading(true);
+   491→    setError(null);
+   492→    setUpgrade(null);
+   493→    try {
+   494→      const res = await platform.aiRecommendations(8);
+   495→      setPicks(res.data);
+   496→      setProvider(res.provider);
+   497→    } catch (e) {
+   498→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+   499→      else setError(e instanceof Error ? e.message : 'Could not get AI picks');
+   500→    } finally {
+   501→      setLoading(false);
+   502→    }
+   503→  }
+   504→
+   505→  return (
+   506→    <div className="space-y-6">
+   507→      {/* Hero */}
+   508→      <div className="rounded-2xl bg-gradient-to-br from-rose-500/50 via-fuchsia-500/30 to-amber-500/40 p-[1px]">
+   509→        <div className="rounded-2xl bg-[#0d0d14] p-5 sm:p-7">
+   510→          <div className="flex flex-wrap items-end justify-between gap-4">
+   511→            <div>
+   512→              <h2 className="flex items-center gap-2.5 text-xl font-black tracking-tight text-white sm:text-2xl">
+   513→                <Dices className="h-6 w-6 text-rose-400" aria-hidden />
+   514→                AI picks for you
+   515→              </h2>
+   516→              <p className="mt-1 max-w-xl text-sm text-zinc-400">
+   517→                {user
+   518→                  ? 'Eight picks ranked by the Animaxia LLM against your taste profile and watch history.'
+   519→                  : 'Eight LLM-ranked picks from the library. Sign in for picks personalized to your taste profile.'}
+   520→              </p>
+   521→            </div>
+   522→            <Button
+   523→              type="button"
+   524→              size="lg"
+   525→              onClick={fetchPicks}
+   526→              disabled={loading}
+   527→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   528→            >
+   529→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Dices aria-hidden />}
+   530→              {loading ? 'Thinking…' : picks ? 'Regenerate' : 'Get AI picks'}
+   531→            </Button>
+   532→          </div>
+   533→        </div>
+   534→      </div>
+   535→
+   536→      {upgrade && <UpgradeCard message={upgrade} />}
+   537→      {error && !upgrade && <ErrorState message={error} onRetry={fetchPicks} />}
+   538→      {loading && <LoadingCards count={8} />}
+   539→
+   540→      {!loading && picks && picks.length === 0 && (
+   541→        <EmptyState
+   542→          title="No picks right now"
+   543→          message="The library is too sparse for the LLM to work with — add a few more titles and try again."
+   544→        />
+   545→      )}
+   546→
+   547→      {!loading && picks && picks.length > 0 && (
+   548→        <>
+   549→          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   550→            {picks.map((rec) => (
+   551→              <RecommendationCard key={rec.content.id} rec={rec} />
+   552→            ))}
+   553→          </div>
+   554→          <p className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+   555→            Picks generated by Animaxia Intelligence <ProviderBadge provider={provider} />
+   556→          </p>
+   557→        </>
+   558→      )}
+   559→    </div>
+   560→  );
+   561→}
+   562→
+   563→function RecommendationCard({ rec }: { rec: AiRecommendation }) {
+   564→  const [imgError, setImgError] = useState(false);
+   565→  const c = rec.content;
+   566→  const md = c.metadata || {};
+   567→  const poster = c.thumbnail || (typeof md.backdrop === 'string' ? md.backdrop : null);
+   568→  const showImage = Boolean(poster) && !imgError;
+   569→
+   570→  return (
+   571→    <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+   572→      <div className="aspect-[2/3] w-full overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
+   573→        {showImage ? (
+   574→          <img
+   575→            src={poster as string}
+   576→            alt={`${c.title} poster`}
+   577→            loading="lazy"
+   578→            onError={() => setImgError(true)}
+   579→            className="h-full w-full object-cover"
+   580→          />
+   581→        ) : (
+   582→          <BrandPlaceholder title={c.title} />
+   583→        )}
+   584→      </div>
+   585→      <p className="line-clamp-4 text-sm italic leading-relaxed text-zinc-300">
+   586→        <span className="font-bold text-rose-400">&ldquo;</span>
+   587→        {rec.reason}
+   588→        <span className="font-bold text-rose-400">&rdquo;</span>
+   589→      </p>
+   590→      <div className="mt-auto space-y-2.5">
+   591→        <p className="line-clamp-1 text-sm font-semibold text-zinc-100">{c.title}</p>
+   592→        <div className="flex items-center justify-between gap-2">
+   593→          <TypeBadge type={c.type} />
+   594→          <Button
+   595→            type="button"
+   596→            size="sm"
+   597→            variant="outline"
+   598→            onClick={() => navigate(`/content/${c.id}`)}
+   599→            className="h-9 border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   600→          >
+   601→            View
+   602→          </Button>
+   603→        </div>
+   604→      </div>
+   605→    </div>
+   606→  );
+   607→}
+   608→
+   609→/* ------------------------------- summarize tab ------------------------------- */
+   610→
+   611→function SummarizeTab({ user }: { user: PlatformUser | null }) {
+   612→  const [selected, setSelected] = useState<Suggestion | null>(null);
+   613→  const [result, setResult] = useState<{ summary: string; provider: string } | null>(null);
+   614→  const [loading, setLoading] = useState(false);
+   615→  const [error, setError] = useState<string | null>(null);
+   616→  const [upgrade, setUpgrade] = useState<string | null>(null);
+   617→
+   618→  async function summarize() {
+   619→    if (!selected || loading) return;
+   620→    setLoading(true);
+   621→    setError(null);
+   622→    setUpgrade(null);
+   623→    try {
+   624→      const res = await platform.aiSummarize(selected.id);
+   625→      setResult({ summary: res.summary, provider: res.provider });
+   626→    } catch (e) {
+   627→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+   628→      else setError(e instanceof Error ? e.message : 'Could not generate a summary');
+   629→    } finally {
+   630→      setLoading(false);
+   631→    }
+   632→  }
+   633→
+   634→  return (
+   635→    <div className="mx-auto max-w-3xl space-y-6">
+   636→      <Card className="border-white/10 bg-white/[0.03]">
+   637→        <CardContent className="space-y-4 p-5 sm:p-6">
+   638→          <ContentPicker
+   639→            selected={selected}
+   640→            onSelect={(s) => {
+   641→              setSelected(s);
+   642→              setResult(null);
+   643→            }}
+   644→            label="Pick a title from your library"
+   645→            inputId="summarize-picker"
+   646→          />
+   647→          <div className="flex flex-wrap items-center justify-between gap-3">
+   648→            <p className="text-xs text-zinc-500">
+   649→              {!user && 'Anonymous visitors get 5 AI requests per day — sign in for higher daily limits.'}
+   650→            </p>
+   651→            <Button
+   652→              type="button"
+   653→              onClick={summarize}
+   654→              disabled={!selected || loading}
+   655→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   656→            >
+   657→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+   658→              {loading ? 'Summarizing…' : 'Summarize'}
+   659→            </Button>
+   660→          </div>
+   661→        </CardContent>
+   662→      </Card>
+   663→
+   664→      {upgrade && <UpgradeCard message={upgrade} />}
+   665→      {error && !upgrade && <ErrorState message={error} onRetry={summarize} />}
+   666→
+   667→      {loading && (
+   668→        <Card className="border-white/10 bg-white/[0.03]" aria-busy="true">
+   669→          <CardContent className="space-y-2.5 p-5 sm:p-6">
+   670→            <Skeleton className="h-5 w-2/5" />
+   671→            <Skeleton className="h-4 w-full" />
+   672→            <Skeleton className="h-4 w-11/12" />
+   673→            <Skeleton className="h-4 w-4/5" />
+   674→          </CardContent>
+   675→        </Card>
+   676→      )}
+   677→
+   678→      {!loading && result && (
+   679→        <Card className="border-white/10 bg-white/[0.03]">
+   680→          <CardContent className="space-y-4 p-5 sm:p-6">
+   681→            <div className="flex flex-wrap items-center justify-between gap-2">
+   682→              <h3 className="text-base font-bold text-zinc-100">{selected?.title}</h3>
+   683→              <ProviderBadge provider={result.provider} />
+   684→            </div>
+   685→            <AiText text={result.summary} />
+   686→            <div className="flex justify-end border-t border-white/5 pt-3">
+   687→              <Button
+   688→                type="button"
+   689→                variant="outline"
+   690→                size="sm"
+   691→                onClick={() => void copyText(result.summary)}
+   692→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   693→              >
+   694→                Copy summary
+   695→              </Button>
+   696→            </div>
+   697→          </CardContent>
+   698→        </Card>
+   699→      )}
+   700→    </div>
+   701→  );
+   702→}
+   703→
+   704→/* -------------------------------- describe tab -------------------------------- */
+   705→
+   706→const DESCRIBE_TYPES = ['movie', 'tv', 'anime', 'sports', 'news'] as const;
+   707→
+   708→const DESCRIBE_EXAMPLES: { label: string; title: string; type: (typeof DESCRIBE_TYPES)[number]; genres: string }[] = [
+   709→  { label: 'Neon cyberpunk revenge saga', title: 'Neon Requiem', type: 'movie', genres: 'Sci-Fi, Action, Thriller' },
+   710→  { label: 'Cozy slice-of-life bakery anime', title: 'Flour & Feelings', type: 'anime', genres: 'Slice of Life, Comedy, Gourmet' },
+   711→];
+   712→
+   713→function DescribeTab() {
+   714→  const [title, setTitle] = useState('');
+   715→  const [type, setType] = useState<(typeof DESCRIBE_TYPES)[number]>('movie');
+   716→  const [genres, setGenres] = useState('');
+   717→  const [result, setResult] = useState<{ description: string; provider: string } | null>(null);
+   718→  const [loading, setLoading] = useState(false);
+   719→  const [error, setError] = useState<string | null>(null);
+   720→  const [upgrade, setUpgrade] = useState<string | null>(null);
+   721→
+   722→  async function describe() {
+   723→    const trimmed = title.trim();
+   724→    if (!trimmed || loading) return;
+   725→    setLoading(true);
+   726→    setError(null);
+   727→    setUpgrade(null);
+   728→    try {
+   729→      const genreList = genres
+   730→        .split(',')
+   731→        .map((g) => g.trim())
+   732→        .filter(Boolean);
+   733→      const res = await platform.aiDescribe({ title: trimmed, type, genres: genreList.length ? genreList : undefined });
+   734→      setResult({ description: res.description, provider: res.provider });
+   735→    } catch (e) {
+   736→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+   737→      else setError(e instanceof Error ? e.message : 'Could not generate a description');
+   738→    } finally {
+   739→      setLoading(false);
+   740→    }
+   741→  }
+   742→
+   743→  return (
+   744→    <div className="mx-auto max-w-3xl space-y-6">
+   745→      <Card className="border-white/10 bg-white/[0.03]">
+   746→        <CardContent className="space-y-4 p-5 sm:p-6">
+   747→          <div className="space-y-2">
+   748→            <label htmlFor="describe-title" className="text-sm font-semibold text-zinc-300">
+   749→              Title
+   750→            </label>
+   751→            <Input
+   752→              id="describe-title"
+   753→              value={title}
+   754→              onChange={(e) => setTitle(e.target.value)}
+   755→              placeholder="e.g. Neon Requiem"
+   756→              maxLength={200}
+   757→              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   758→            />
+   759→          </div>
+   760→
+   761→          <div className="grid gap-4 sm:grid-cols-2">
+   762→            <div className="space-y-2">
+   763→              <label htmlFor="describe-type" className="text-sm font-semibold text-zinc-300">
+   764→                Type
+   765→              </label>
+   766→              <Select value={type} onValueChange={(v) => setType(v as (typeof DESCRIBE_TYPES)[number])}>
+   767→                <SelectTrigger
+   768→                  id="describe-type"
+   769→                  className="h-11 w-full rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 focus-visible:ring-rose-500/30"
+   770→                >
+   771→                  <SelectValue />
+   772→                </SelectTrigger>
+   773→                <SelectContent className="border-white/10 bg-[#12121c] text-zinc-100">
+   774→                  {DESCRIBE_TYPES.map((t) => (
+   775→                    <SelectItem key={t} value={t} className="capitalize focus:bg-white/10 focus:text-white">
+   776→                      <span className="capitalize">{t}</span>
+   777→                    </SelectItem>
+   778→                  ))}
+   779→                </SelectContent>
+   780→              </Select>
+   781→            </div>
+   782→            <div className="space-y-2">
+   783→              <label htmlFor="describe-genres" className="text-sm font-semibold text-zinc-300">
+   784→                Genres <span className="font-normal text-zinc-500">(comma separated)</span>
+   785→              </label>
+   786→              <Input
+   787→                id="describe-genres"
+   788→                value={genres}
+   789→                onChange={(e) => setGenres(e.target.value)}
+   790→                placeholder="e.g. Sci-Fi, Action, Thriller"
+   791→                maxLength={200}
+   792→                className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+   793→              />
+   794→            </div>
+   795→          </div>
+   796→
+   797→          <div className="flex flex-wrap items-center gap-2">
+   798→            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Try</span>
+   799→            {DESCRIBE_EXAMPLES.map((ex) => (
+   800→              <button
+   801→                key={ex.label}
+   802→                type="button"
+   803→                onClick={() => {
+   804→                  setTitle(ex.title);
+   805→                  setType(ex.type);
+   806→                  setGenres(ex.genres);
+   807→                }}
+   808→                className="rounded-full border border-rose-500/25 bg-rose-500/10 px-3 py-1 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20 hover:text-rose-200"
+   809→              >
+   810→                {ex.label}
+   811→              </button>
+   812→            ))}
+   813→          </div>
+   814→
+   815→          <div className="flex justify-end">
+   816→            <Button
+   817→              type="button"
+   818→              onClick={describe}
+   819→              disabled={!title.trim() || loading}
+   820→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   821→            >
+   822→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+   823→              {loading ? 'Writing…' : 'Generate description'}
+   824→            </Button>
+   825→          </div>
+   826→        </CardContent>
+   827→      </Card>
+   828→
+   829→      {upgrade && <UpgradeCard message={upgrade} />}
+   830→      {error && !upgrade && <ErrorState message={error} onRetry={describe} />}
+   831→
+   832→      {loading && (
+   833→        <Card className="border-white/10 bg-white/[0.03]" aria-busy="true">
+   834→          <CardContent className="space-y-2.5 p-5 sm:p-6">
+   835→            <Skeleton className="h-5 w-2/5" />
+   836→            <Skeleton className="h-4 w-full" />
+   837→            <Skeleton className="h-4 w-11/12" />
+   838→          </CardContent>
+   839→        </Card>
+   840→      )}
+   841→
+   842→      {!loading && result && (
+   843→        <Card className="border-white/10 bg-white/[0.03]">
+   844→          <CardContent className="space-y-4 p-5 sm:p-6">
+   845→            <div className="flex flex-wrap items-center justify-between gap-2">
+   846→              <h3 className="text-base font-bold text-zinc-100">{title.trim()}</h3>
+   847→              <ProviderBadge provider={result.provider} />
+   848→            </div>
+   849→            <AiText text={result.description} />
+   850→            <div className="flex justify-end border-t border-white/5 pt-3">
+   851→              <Button
+   852→                type="button"
+   853→                variant="outline"
+   854→                size="sm"
+   855→                onClick={() => void copyText(result.description)}
+   856→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   857→              >
+   858→                Copy description
+   859→              </Button>
+   860→            </div>
+   861→          </CardContent>
+   862→        </Card>
+   863→      )}
+   864→    </div>
+   865→  );
+   866→}
+   867→
+   868→/* ---------------------------------- chat tab ---------------------------------- */
+   869→
+   870→function ChatTab({ user }: { user: PlatformUser | null }) {
+   871→  const [selected, setSelected] = useState<Suggestion | null>(null);
+   872→  const [messages, setMessages] = useState<ChatMessage[]>([]);
+   873→  const [input, setInput] = useState('');
+   874→  const [busy, setBusy] = useState(false);
+   875→  const [quotaError, setQuotaError] = useState<string | null>(null);
+   876→  const scrollRef = useRef<HTMLDivElement>(null);
+   877→
+   878→  useEffect(() => {
+   879→    const el = scrollRef.current;
+   880→    if (el) el.scrollTop = el.scrollHeight;
+   881→  }, [messages, busy]);
+   882→
+   883→  if (!user) {
+   884→    return (
+   885→      <div className="mx-auto max-w-3xl">
+   886→        <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.02] p-10 text-center">
+   887→          <div className="rounded-full bg-rose-500/10 p-3 text-rose-300">
+   888→            <Sparkles className="h-6 w-6" aria-hidden />
+   889→          </div>
+   890→          <div>
+   891→            <p className="font-semibold text-zinc-100">Sign in to chat with Animaxia AI</p>
+   892→            <p className="mt-1 max-w-md text-sm text-zinc-400">
+   893→              Ask anything about any title in the library — characters, plots, watch order, hidden gems.
+   894→            </p>
+   895→          </div>
+   896→          <Button
+   897→            type="button"
+   898→            className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   899→            onClick={() => navigate('/auth')}
+   900→          >
+   901→            Sign in to chat
+   902→          </Button>
+   903→        </div>
+   904→      </div>
+   905→    );
+   906→  }
+   907→
+   908→  async function send() {
+   909→    const text = input.trim();
+   910→    if (!text || !selected || busy) return;
+   911→    setBusy(true);
+   912→    setQuotaError(null);
+   913→    setMessages((prev) => [...prev, { role: 'user', text }]);
+   914→    setInput('');
+   915→    try {
+   916→      const res = await platform.aiChat(selected.id, text);
+   917→      setMessages((prev) => [...prev, { role: 'ai', text: res.reply }]);
+   918→    } catch (e) {
+   919→      if (e instanceof PlatformError && e.upgrade) {
+   920→        setQuotaError(e.message);
+   921→      } else {
+   922→        setMessages((prev) => [...prev, { role: 'ai', text: e instanceof Error ? e.message : 'Something went wrong.' }]);
+   923→      }
+   924→    } finally {
+   925→      setBusy(false);
+   926→    }
+   927→  }
+   928→
+   929→  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+   930→    if (e.key === 'Enter' && !e.shiftKey) {
+   931→      e.preventDefault();
+   932→      void send();
+   933→    }
+   934→  };
+   935→
+   936→  return (
+   937→    <div className="mx-auto max-w-3xl space-y-4">
+   938→      <Card className="border-white/10 bg-white/[0.03]">
+   939→        <CardContent className="p-5 sm:p-6">
+   940→          <ContentPicker
+   941→            selected={selected}
+   942→            onSelect={(s) => {
+   943→              setSelected(s);
+   944→              setMessages([]);
+   945→              setQuotaError(null);
+   946→            }}
+   947→            label="Pick a title to talk about"
+   948→            inputId="chat-picker"
+   949→          />
+   950→        </CardContent>
+   951→      </Card>
+   952→
+   953→      <div
+   954→        ref={scrollRef}
+   955→        className="custom-scrollbar max-h-96 space-y-3 overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-4"
+   956→        aria-live="polite"
+   957→        aria-label="Chat conversation"
+   958→      >
+   959→        {messages.length === 0 && !busy && !quotaError && (
+   960→          <p className="py-8 text-center text-xs leading-relaxed text-zinc-500">
+   961→            {selected
+   962→              ? `Ask anything about ${selected.title} — the AI knows the title's details and your conversation history.`
+   963→              : 'Pick a title above, then ask anything — characters, plot, where to start…'}
+   964→          </p>
+   965→        )}
+   966→        {messages.map((m, i) => (
+   967→          <div key={i} className={cn('flex gap-2.5', m.role === 'user' ? 'justify-end' : 'justify-start')}>
+   968→            {m.role === 'ai' && (
+   969→              <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+   970→                <Sparkles className="h-3.5 w-3.5 text-rose-300" aria-hidden />
+   971→              </span>
+   972→            )}
+   973→            <div
+   974→              className={cn(
+   975→                'max-w-[85%] whitespace-pre-wrap break-words px-3.5 py-2 text-sm leading-relaxed',
+   976→                m.role === 'user'
+   977→                  ? 'rounded-2xl rounded-br-sm bg-rose-600/20 text-rose-50'
+   978→                  : 'rounded-2xl rounded-bl-sm bg-white/5 text-zinc-200',
+   979→              )}
+   980→            >
+   981→              {m.text}
+   982→            </div>
+   983→          </div>
+   984→        ))}
+   985→        {busy && (
+   986→          <div className="flex justify-start">
+   987→            <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+   988→              <Sparkles className="h-3.5 w-3.5 text-rose-300" aria-hidden />
+   989→            </span>
+   990→            <div className="rounded-2xl rounded-bl-sm bg-white/5 px-3.5 py-2">
+   991→              <TypingDots />
+   992→            </div>
+   993→          </div>
+   994→        )}
+   995→      </div>
+   996→
+   997→      {quotaError && <UpgradeCard message={quotaError} />}
+   998→
+   999→      <div className="flex items-end gap-2">
+  1000→        <Textarea
+  1001→          value={input}
+  1002→          onChange={(e) => setInput(e.target.value)}
+  1003→          onKeyDown={onKeyDown}
+  1004→          placeholder={selected ? `Ask about ${selected.title}…` : 'Pick a title first…'}
+  1005→          aria-label="Message Animaxia AI"
+  1006→          rows={2}
+  1007→          maxLength={1000}
+  1008→          disabled={!selected}
+  1009→          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30 disabled:opacity-50"
+  1010→        />
+  1011→        <Button
+  1012→          type="button"
+  1013→          onClick={() => void send()}
+  1014→          disabled={busy || !selected || !input.trim()}
+  1015→          aria-label="Send message"
+  1016→          className="h-11 bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1017→        >
+  1018→          {busy ? <Loader2 className="animate-spin" aria-hidden /> : <Send aria-hidden />}
+  1019→        </Button>
+  1020→      </div>
+  1021→      <div className="flex items-center justify-between gap-3">
+  1022→        <p className="text-[11px] text-zinc-600">Enter to send · Shift+Enter for a new line</p>
+  1023→        {messages.length > 0 && (
+  1024→          <button
+  1025→            type="button"
+  1026→            onClick={() => {
+  1027→              setMessages([]);
+  1028→              setQuotaError(null);
+  1029→            }}
+  1030→            className="text-[11px] font-semibold text-zinc-500 transition hover:text-zinc-300"
+  1031→          >
+  1032→            Clear conversation
+  1033→          </button>
+  1034→        )}
+  1035→      </div>
+  1036→    </div>
+  1037→  );
+  1038→}
+  1039→
+  1040→/* ------------------------------- personal tab ------------------------------- */
+  1041→
+  1042→function PersonalTab({ user }: { user: PlatformUser | null }) {
+  1043→  /* Hook order: fetch runs only while signed in; the sign-in card below is
+  1044→     the same auth-gate pattern as the Chat tab. */
+  1045→  const home = useApi(`ai-personal-home-${user?.id ?? 'anon'}`, () => platform.aiPersonalHome(), {
+  1046→    enabled: Boolean(user),
+  1047→  });
+  1048→
+  1049→  if (!user) {
+  1050→    return (
+  1051→      <SignInCard
+  1052→        title="Sign in to unlock your personal AI home"
+  1053→        message="Daily picks ranked against your taste profile, a weekly recap and because-you-watched picks — generated by Animaxia Intelligence."
+  1054→        action="Sign in to personalize"
+  1055→      />
+  1056→    );
+  1057→  }
+  1058→
+  1059→  if (home.loading && !home.data) {
+  1060→    return (
+  1061→      <div className="space-y-6" aria-busy="true">
+  1062→        <Skeleton className="h-28 w-full rounded-2xl" />
+  1063→        <LoadingCards count={6} />
+  1064→        <Skeleton className="h-32 w-full rounded-2xl" />
+  1065→      </div>
+  1066→    );
+  1067→  }
+  1068→
+  1069→  if (home.error) {
+  1070→    if (isQuotaError(home.error)) {
+  1071→      return <UpgradeCard message={home.error} />;
+  1072→    }
+  1073→    return <ErrorState message={home.error} onRetry={home.refetch} />;
+  1074→  }
+  1075→
+  1076→  const data = home.data;
+  1077→  if (!data) return null;
+  1078→
+  1079→  return (
+  1080→    <div className="space-y-8">
+  1081→      {/* Greeting + mood + quota */}
+  1082→      <div className="rounded-2xl bg-gradient-to-br from-rose-500/50 via-fuchsia-500/30 to-amber-500/40 p-[1px]">
+  1083→        <div className="space-y-4 rounded-2xl bg-[#0d0d14] p-5 sm:p-7">
+  1084→          <div className="flex flex-wrap items-start justify-between gap-4">
+  1085→            <div className="min-w-0">
+  1086→              <p className="text-lg font-black leading-snug tracking-tight text-white sm:text-2xl">{data.greeting}</p>
+  1087→              <div className="mt-2 flex flex-wrap items-center gap-2">
+  1088→                <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-300">
+  1089→                  <Sparkles className="h-3.5 w-3.5" aria-hidden /> mood: {data.mood}
+  1090→                </span>
+  1091→                <ProviderBadge provider={data.provider} />
+  1092→                {data.degraded && <DegradedBadge />}
+  1093→              </div>
+  1094→            </div>
+  1095→            <QuotaMeter quota={data.quota} />
+  1096→          </div>
+  1097→          {(data.aiProfile.tags.length > 0 || data.aiProfile.summary) && (
+  1098→            <div className="space-y-2 border-t border-white/5 pt-4">
+  1099→              <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-zinc-500">
+  1100→                <Brain className="h-3.5 w-3.5 text-fuchsia-400" aria-hidden /> Your AI taste profile
+  1101→              </p>
+  1102→              {data.aiProfile.summary && <p className="text-sm leading-relaxed text-zinc-300">{data.aiProfile.summary}</p>}
+  1103→              {data.aiProfile.tags.length > 0 && (
+  1104→                <div className="flex flex-wrap gap-1.5">
+  1105→                  {data.aiProfile.tags.map((tag) => (
+  1106→                    <span
+  1107→                      key={tag}
+  1108→                      className="rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 px-2.5 py-0.5 text-[11px] font-medium text-fuchsia-300"
+  1109→                    >
+  1110→                      {tag}
+  1111→                    </span>
+  1112→                  ))}
+  1113→                </div>
+  1114→              )}
+  1115→            </div>
+  1116→          )}
+  1117→        </div>
+  1118→      </div>
+  1119→
+  1120→      {/* Daily picks */}
+  1121→      <section aria-labelledby="personal-daily-picks" className="space-y-4">
+  1122→        <h2 id="personal-daily-picks" className="text-lg font-bold tracking-tight text-zinc-100 sm:text-xl">
+  1123→          Daily picks for you
+  1124→        </h2>
+  1125→        {data.dailyPicks.length === 0 ? (
+  1126→          <EmptyState
+  1127→            title="No picks yet"
+  1128→            message="Watch and rate a few titles so the AI can learn your taste."
+  1129→          />
+  1130→        ) : (
+  1131→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-6">
+  1132→            {data.dailyPicks.map((pick) => (
+  1133→              <DailyPickCard key={pick.id} pick={pick} />
+  1134→            ))}
+  1135→          </div>
+  1136→        )}
+  1137→      </section>
+  1138→
+  1139→      {/* Because you watched */}
+  1140→      {data.becauseYouWatched.length > 0 && (
+  1141→        <section aria-labelledby="personal-because" className="space-y-4">
+  1142→          <h2 id="personal-because" className="text-lg font-bold tracking-tight text-zinc-100 sm:text-xl">
+  1143→            Because you watched…
+  1144→          </h2>
+  1145→          <div className="custom-scrollbar flex gap-3 overflow-x-auto pb-2 sm:gap-4">
+  1146→            {data.becauseYouWatched.map((item) => (
+  1147→              <BecauseCard key={item.id} item={item} />
+  1148→            ))}
+  1149→          </div>
+  1150→        </section>
+  1151→      )}
+  1152→
+  1153→      {/* Weekly recap */}
+  1154→      <RecapCard preview={data.recapPreview} />
+  1155→    </div>
+  1156→  );
+  1157→}
+  1158→
+  1159→function QuotaMeter({ quota }: { quota: AiPersonalHomeResponse['quota'] }) {
+  1160→  const pct = quota.limit > 0 ? Math.min(100, Math.round((quota.used / quota.limit) * 100)) : 0;
+  1161→  const nearLimit = pct >= 80;
+  1162→  return (
+  1163→    <div className="w-full max-w-xs shrink-0 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+  1164→      <div className="flex items-center justify-between gap-2 text-xs">
+  1165→        <span className="font-semibold capitalize text-zinc-300">
+  1166→          {quota.plan} · {quota.used}/{quota.limit} AI calls today
+  1167→        </span>
+  1168→        {nearLimit && (
+  1169→          <button
+  1170→            type="button"
+  1171→            onClick={() => navigate('/premium')}
+  1172→            className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300 transition hover:bg-amber-500/20"
+  1173→          >
+  1174→            upgrade
+  1175→          </button>
+  1176→        )}
+  1177→      </div>
+  1178→      <div
+  1179→        role="progressbar"
+  1180→        aria-label="Daily AI quota used"
+  1181→        aria-valuenow={pct}
+  1182→        aria-valuemin={0}
+  1183→        aria-valuemax={100}
+  1184→        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10"
+  1185→      >
+  1186→        <div
+  1187→          className={cn('h-full rounded-full transition-all', nearLimit ? 'bg-amber-400' : 'bg-rose-500')}
+  1188→          style={{ width: `${pct}%` }}
+  1189→        />
+  1190→      </div>
+  1191→      {quota.perMinute > 0 && (
+  1192→        <p className="mt-1.5 text-[10px] text-zinc-500">burst limit {quota.perMinute}/min</p>
+  1193→      )}
+  1194→    </div>
+  1195→  );
+  1196→}
+  1197→
+  1198→function DailyPickCard({ pick }: { pick: AiRagPick }) {
+  1199→  const [imgError, setImgError] = useState(false);
+  1200→  const showImage = Boolean(pick.thumbnail) && !imgError;
+  1201→  return (
+  1202→    <button
+  1203→      type="button"
+  1204→      onClick={() => navigate(`/content/${pick.id}`)}
+  1205→      aria-label={`Open ${pick.title}`}
+  1206→      className="group flex h-full flex-col gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] p-2.5 text-left transition hover:border-rose-500/40 hover:bg-white/[0.06] focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+  1207→    >
+  1208→      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
+  1209→        {showImage ? (
+  1210→          <img
+  1211→            src={pick.thumbnail as string}
+  1212→            alt={`${pick.title} poster`}
+  1213→            loading="lazy"
+  1214→            onError={() => setImgError(true)}
+  1215→            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+  1216→          />
+  1217→        ) : (
+  1218→          <BrandPlaceholder title={pick.title} />
+  1219→        )}
+  1220→        <span className="absolute right-1.5 top-1.5">
+  1221→          <TypeBadge type={pick.type} />
+  1222→        </span>
+  1223→      </div>
+  1224→      <p className="line-clamp-1 text-sm font-semibold text-zinc-100">{pick.title}</p>
+  1225→      <p className="line-clamp-3 text-xs italic leading-relaxed text-zinc-400">{pick.reason}</p>
+  1226→    </button>
+  1227→  );
+  1228→}
+  1229→
+  1230→function BecauseCard({ item }: { item: AiPersonalHomeResponse['becauseYouWatched'][number] }) {
+  1231→  const [imgError, setImgError] = useState(false);
+  1232→  const showImage = Boolean(item.thumbnail) && !imgError;
+  1233→  return (
+  1234→    <button
+  1235→      type="button"
+  1236→      onClick={() => navigate(`/content/${item.id}`)}
+  1237→      aria-label={`Open ${item.title}`}
+  1238→      className="group w-[150px] shrink-0 space-y-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60 sm:w-[176px]"
+  1239→    >
+  1240→      <div className="aspect-[2/3] w-full overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] transition group-hover:border-rose-500/40">
+  1241→        {showImage ? (
+  1242→          <img
+  1243→            src={item.thumbnail as string}
+  1244→            alt={`${item.title} poster`}
+  1245→            loading="lazy"
+  1246→            onError={() => setImgError(true)}
+  1247→            className="h-full w-full object-cover"
+  1248→          />
+  1249→        ) : (
+  1250→          <BrandPlaceholder title={item.title} />
+  1251→        )}
+  1252→      </div>
+  1253→      <div>
+  1254→        <p className="line-clamp-1 text-sm font-semibold text-zinc-100">{item.title}</p>
+  1255→        <p className="line-clamp-2 text-[11px] leading-relaxed text-zinc-500">{item.because}</p>
+  1256→      </div>
+  1257→    </button>
+  1258→  );
+  1259→}
+  1260→
+  1261→/** Recap preview with a lazy "See full recap" expander (fetches on first open). */
+  1262→function RecapCard({ preview }: { preview: string }) {
+  1263→  const [open, setOpen] = useState(false);
+  1264→  const [recap, setRecap] = useState<AiPersonalRecapResponse | null>(null);
+  1265→  const [loading, setLoading] = useState(false);
+  1266→  const [error, setError] = useState<string | null>(null);
+  1267→
+  1268→  function loadRecap() {
+  1269→    setOpen((prev) => !prev);
+  1270→    if (!open && !recap && !loading) {
+  1271→      setLoading(true);
+  1272→      setError(null);
+  1273→      platform
+  1274→        .aiPersonalRecap()
+  1275→        .then(setRecap)
+  1276→        .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not load the recap'))
+  1277→        .finally(() => setLoading(false));
+  1278→    }
+  1279→  }
+  1280→
+  1281→  return (
+  1282→    <Card className="border-white/10 bg-white/[0.03]">
+  1283→      <CardContent className="space-y-4 p-5 sm:p-6">
+  1284→        <div className="flex flex-wrap items-center justify-between gap-3">
+  1285→          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-100">
+  1286→            <Bot className="h-4 w-4 text-rose-400" aria-hidden /> Your week on Animaxia
+  1287→          </h3>
+  1288→          <Button
+  1289→            type="button"
+  1290→            variant="outline"
+  1291→            size="sm"
+  1292→            onClick={loadRecap}
+  1293→            aria-expanded={open}
+  1294→            className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+  1295→          >
+  1296→            {open ? 'Hide full recap' : 'See full recap'}
+  1297→            <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-180')} aria-hidden />
+  1298→          </Button>
+  1299→        </div>
+  1300→        {!open && <p className="text-sm leading-relaxed text-zinc-300">{preview}</p>}
+  1301→        {open &&
+  1302→          (loading ? (
+  1303→            <div className="space-y-2.5" aria-busy="true">
+  1304→              <Skeleton className="h-4 w-full" />
+  1305→              <Skeleton className="h-4 w-11/12" />
+  1306→              <Skeleton className="h-4 w-2/3" />
+  1307→            </div>
+  1308→          ) : error ? (
+  1309→            <ErrorState compact message={error} onRetry={loadRecap} />
+  1310→          ) : recap ? (
+  1311→            <div className="space-y-4">
+  1312→              <div className="flex flex-wrap items-center gap-2">
+  1313→                <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 font-mono text-[11px] text-zinc-400">
+  1314→                  {recap.week}
+  1315→                </span>
+  1316→                <span className="rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-rose-300">
+  1317→                  {recap.stats.watched} watched
+  1318→                </span>
+  1319→                {recap.stats.topGenres.slice(0, 3).map((g) => (
+  1320→                  <span key={g} className="rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 px-2.5 py-0.5 text-[11px] text-fuchsia-300">
+  1321→                    {g}
+  1322→                  </span>
+  1323→                ))}
+  1324→              </div>
+  1325→              <AiText text={recap.recap} />
+  1326→              {recap.stats.topTitles.length > 0 && (
+  1327→                <p className="text-xs text-zinc-500">
+  1328→                  Top titles: <span className="text-zinc-300">{recap.stats.topTitles.join(' · ')}</span>
+  1329→                </p>
+  1330→              )}
+  1331→            </div>
+  1332→          ) : null)}
+  1333→      </CardContent>
+  1334→    </Card>
+  1335→  );
+  1336→}
+  1337→
+  1338→/* ------------------------------ assistant tab ------------------------------ */
+  1339→
+  1340→interface AssistantMessage {
+  1341→  role: 'user' | 'assistant';
+  1342→  text: string;
+  1343→  meta?: {
+  1344→    provider: string;
+  1345→    degraded: boolean;
+  1346→    toolsUsed: AiAssistantResponse['toolsUsed'];
+  1347→    memoriesUsed: number;
+  1348→    refused: boolean;
+  1349→  };
+  1350→}
+  1351→
+  1352→function AssistantTab({ user }: { user: PlatformUser | null }) {
+  1353→  const [messages, setMessages] = useState<AssistantMessage[]>([]);
+  1354→  const [input, setInput] = useState('');
+  1355→  const [busy, setBusy] = useState(false);
+  1356→  const [quotaError, setQuotaError] = useState<string | null>(null);
+  1357→  const [historyLoading, setHistoryLoading] = useState(true);
+  1358→  const scrollRef = useRef<HTMLDivElement>(null);
+  1359→
+  1360→  useEffect(() => {
+  1361→    const el = scrollRef.current;
+  1362→    if (el) el.scrollTop = el.scrollHeight;
+  1363→  }, [messages, busy]);
+  1364→
+  1365→  /* Restore the persisted conversation (oldest → newest) on mount. */
+  1366→  useEffect(() => {
+  1367→    if (!user) {
+  1368→      setHistoryLoading(false);
+  1369→      return;
+  1370→    }
+  1371→    let cancelled = false;
+  1372→    setHistoryLoading(true);
+  1373→    platform
+  1374→      .aiAssistantHistory(20)
+  1375→      .then((res) => {
+  1376→        if (cancelled) return;
+  1377→        const turns: { at: number; role: 'user' | 'assistant'; text: string }[] = [];
+  1378→        for (const t of res.data) {
+  1379→          if (t.role !== 'user' && t.role !== 'assistant') continue;
+  1380→          const at = Date.parse(t.createdat);
+  1381→          turns.push({ at: Number.isNaN(at) ? 0 : at, role: t.role, text: t.message });
+  1382→        }
+  1383→        turns.sort((a, b) => a.at - b.at);
+  1384→        setMessages(turns.map(({ role, text }) => ({ role, text })));
+  1385→      })
+  1386→      .catch(() => {
+  1387→        /* history is best-effort — start a fresh conversation */
+  1388→      })
+  1389→      .finally(() => {
+  1390→        if (!cancelled) setHistoryLoading(false);
+  1391→      });
+  1392→    return () => {
+  1393→      cancelled = true;
+  1394→    };
+  1395→  }, [user]);
+  1396→
+  1397→  if (!user) {
+  1398→    return (
+  1399→      <SignInCard
+  1400→        title="Sign in to talk to the Animaxia Assistant"
+  1401→        message="A tool-calling agent that searches the library, reads your history, checks trends and plans — with long-term memory of your conversations."
+  1402→        action="Sign in to chat"
+  1403→      />
+  1404→    );
+  1405→  }
+  1406→
+  1407→  async function send() {
+  1408→    const text = input.trim();
+  1409→    if (!text || busy) return;
+  1410→    setBusy(true);
+  1411→    setQuotaError(null);
+  1412→    setMessages((prev) => [...prev, { role: 'user', text }]);
+  1413→    setInput('');
+  1414→    try {
+  1415→      const history: AiChatTurn[] = messages
+  1416→        .filter((m) => m.role === 'user' || m.role === 'assistant')
+  1417→        .slice(-8)
+  1418→        .map((m) => ({ role: m.role, content: m.text }));
+  1419→      const res: AiAssistantResponse = await platform.aiAssistant(text, history);
+  1420→      setMessages((prev) => [
+  1421→        ...prev,
+  1422→        {
+  1423→          role: 'assistant',
+  1424→          text: res.reply,
+  1425→          meta: {
+  1426→            provider: res.provider,
+  1427→            degraded: res.degraded,
+  1428→            toolsUsed: res.toolsUsed ?? [],
+  1429→            memoriesUsed: res.memoriesUsed ?? 0,
+  1430→            refused: Boolean(res.refused),
+  1431→          },
+  1432→        },
+  1433→      ]);
+  1434→    } catch (e) {
+  1435→      if (e instanceof PlatformError && e.upgrade) {
+  1436→        setQuotaError(e.message);
+  1437→      } else if (isRateLimited(e)) {
+  1438→        toast.error('Per-minute AI limit hit — give it a few seconds and try again.');
+  1439→      } else {
+  1440→        setMessages((prev) => [
+  1441→          ...prev,
+  1442→          { role: 'assistant', text: e instanceof Error ? e.message : 'Something went wrong.' },
+  1443→        ]);
+  1444→      }
+  1445→    } finally {
+  1446→      setBusy(false);
+  1447→    }
+  1448→  }
+  1449→
+  1450→  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  1451→    if (e.key === 'Enter' && !e.shiftKey) {
+  1452→      e.preventDefault();
+  1453→      void send();
+  1454→    }
+  1455→  };
+  1456→
+  1457→  return (
+  1458→    <div className="mx-auto max-w-3xl space-y-4">
+  1459→      <div className="flex flex-wrap items-center justify-between gap-2">
+  1460→        <p className="flex items-center gap-2 text-sm text-zinc-400">
+  1461→          <Bot className="h-4 w-4 text-rose-400" aria-hidden />
+  1462→          The Animaxia Assistant can call platform tools (search, trending, feed, plans, queue) and remembers past
+  1463→          conversations.
+  1464→        </p>
+  1465→        {historyLoading && (
+  1466→          <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
+  1467→            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> loading history…
+  1468→          </span>
+  1469→        )}
+  1470→      </div>
+  1471→
+  1472→      <div
+  1473→        ref={scrollRef}
+  1474→        className="custom-scrollbar max-h-96 space-y-3 overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-4"
+  1475→        aria-live="polite"
+  1476→        aria-label="Assistant conversation"
+  1477→      >
+  1478→        {messages.length === 0 && !busy && !quotaError && !historyLoading && (
+  1479→          <p className="py-8 text-center text-xs leading-relaxed text-zinc-500">
+  1480→            Ask anything — &ldquo;what should I watch tonight?&rdquo;, &ldquo;what&apos;s trending?&rdquo;, &ldquo;how
+  1481→            much is the pro plan?&rdquo;…
+  1482→          </p>
+  1483→        )}
+  1484→        {messages.map((m, i) => (
+  1485→          <div key={i} className={cn('flex gap-2.5', m.role === 'user' ? 'justify-end' : 'justify-start')}>
+  1486→            {m.role === 'assistant' && (
+  1487→              <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+  1488→                <Bot className="h-3.5 w-3.5 text-rose-300" aria-hidden />
+  1489→              </span>
+  1490→            )}
+  1491→            <div className={cn('max-w-[85%]', m.role === 'user' && 'flex flex-col items-end')}>
+  1492→              <div
+  1493→                className={cn(
+  1494→                  'whitespace-pre-wrap break-words px-3.5 py-2 text-sm leading-relaxed',
+  1495→                  m.role === 'user'
+  1496→                    ? 'rounded-2xl rounded-br-sm bg-rose-600/20 text-rose-50'
+  1497→                    : 'rounded-2xl rounded-bl-sm bg-white/5 text-zinc-200',
+  1498→                )}
+  1499→              >
+  1500→                {m.text}
+  1501→              </div>
+  1502→              {m.role === 'assistant' && m.meta && (
+  1503→                <div className="mt-1.5 space-y-1.5">
+  1504→                  <div className="flex flex-wrap items-center gap-1.5">
+  1505→                    {m.meta.toolsUsed.map((t, ti) => (
+  1506→                      <span
+  1507→                        key={`${t.name}-${ti}`}
+  1508→                        className={cn(
+  1509→                          'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold',
+  1510→                          t.ok
+  1511→                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+  1512→                            : 'border-rose-500/30 bg-rose-500/10 text-rose-300',
+  1513→                        )}
+  1514→                        title={`${t.name}(${JSON.stringify(t.args)})`}
+  1515→                      >
+  1516→                        <Wrench className="h-3 w-3" aria-hidden /> {t.name} · {t.ms}ms
+  1517→                      </span>
+  1518→                    ))}
+  1519→                    {m.meta.memoriesUsed > 0 && (
+  1520→                      <span className="inline-flex items-center gap-1 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-fuchsia-300">
+  1521→                        <Brain className="h-3 w-3" aria-hidden /> {m.meta.memoriesUsed}{' '}
+  1522→                        {m.meta.memoriesUsed === 1 ? 'memory' : 'memories'}
+  1523→                      </span>
+  1524→                    )}
+  1525→                    <ProviderBadge provider={m.meta.provider} />
+  1526→                    {m.meta.degraded && <DegradedBadge />}
+  1527→                  </div>
+  1528→                  {m.meta.refused && (
+  1529→                    <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5 text-[11px] leading-relaxed text-amber-300">
+  1530→                      The assistant declined this request — it only helps with Animaxia-related topics.
+  1531→                    </p>
+  1532→                  )}
+  1533→                </div>
+  1534→              )}
+  1535→            </div>
+  1536→          </div>
+  1537→        ))}
+  1538→        {busy && (
+  1539→          <div className="flex justify-start">
+  1540→            <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+  1541→              <Bot className="h-3.5 w-3.5 text-rose-300" aria-hidden />
+  1542→            </span>
+  1543→            <div className="rounded-2xl rounded-bl-sm bg-white/5 px-3.5 py-2">
+  1544→              <TypingDots />
+  1545→            </div>
+  1546→          </div>
+  1547→        )}
+  1548→      </div>
+  1549→
+  1550→      {quotaError && <UpgradeCard message={quotaError} />}
+  1551→
+  1552→      <div className="flex items-end gap-2">
+  1553→        <Textarea
+  1554→          value={input}
+  1555→          onChange={(e) => setInput(e.target.value)}
+  1556→          onKeyDown={onKeyDown}
+  1557→          placeholder="Ask the Animaxia Assistant…"
+  1558→          aria-label="Message the Animaxia Assistant"
+  1559→          rows={2}
+  1560→          maxLength={1000}
+  1561→          className="min-h-11 flex-1 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+  1562→        />
+  1563→        <Button
+  1564→          type="button"
+  1565→          onClick={() => void send()}
+  1566→          disabled={busy || !input.trim()}
+  1567→          aria-label="Send message"
+  1568→          className="h-11 bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1569→        >
+  1570→          {busy ? <Loader2 className="animate-spin" aria-hidden /> : <Send aria-hidden />}
+  1571→        </Button>
+  1572→      </div>
+  1573→      <div className="flex items-center justify-between gap-3">
+  1574→        <p className="text-[11px] text-zinc-600">Enter to send · Shift+Enter for a new line</p>
+  1575→        {messages.length > 0 && (
+  1576→          <button
+  1577→            type="button"
+  1578→            onClick={() => {
+  1579→              setMessages([]);
+  1580→              setQuotaError(null);
+  1581→            }}
+  1582→            className="text-[11px] font-semibold text-zinc-500 transition hover:text-zinc-300"
+  1583→          >
+  1584→            Clear conversation
+  1585→          </button>
+  1586→        )}
+  1587→      </div>
+  1588→    </div>
+  1589→  );
+  1590→}
+  1591→
+  1592→/* -------------------------------- rag lab tab -------------------------------- */
+  1593→
+  1594→type RagMode = 'recommend' | 'summarize' | 'explain' | 'chat';
+  1595→
+  1596→const RAG_MODES: { key: RagMode; label: string }[] = [
+  1597→  { key: 'recommend', label: 'Recommend' },
+  1598→  { key: 'summarize', label: 'Summarize' },
+  1599→  { key: 'explain', label: 'Explain' },
+  1600→  { key: 'chat', label: 'Chat with content' },
+  1601→];
+  1602→
+  1603→function RagLabTab({ user }: { user: PlatformUser | null }) {
+  1604→  const [mode, setMode] = useState<RagMode>('recommend');
+  1605→  return (
+  1606→    <div className="mx-auto max-w-3xl space-y-4">
+  1607→      <p className="rounded-xl border border-white/10 bg-black/30 px-3.5 py-2.5 font-mono text-[11px] leading-relaxed text-zinc-400">
+  1608→        query <span className="text-rose-400">→</span> retrieve (vector) <span className="text-rose-400">→</span> rank{' '}
+  1609→        <span className="text-rose-400">→</span> prompt <span className="text-rose-400">→</span> LLM
+  1610→        <span className="ml-2 text-zinc-600">· every answer is grounded in the indexed library</span>
+  1611→      </p>
+  1612→
+  1613→      <div role="group" aria-label="RAG mode" className="flex flex-wrap gap-1.5">
+  1614→        {RAG_MODES.map((m) => (
+  1615→          <button
+  1616→            key={m.key}
+  1617→            type="button"
+  1618→            onClick={() => setMode(m.key)}
+  1619→            aria-pressed={mode === m.key}
+  1620→            className={cn(
+  1621→              'rounded-full border px-3.5 py-1.5 text-xs font-semibold transition',
+  1622→              mode === m.key
+  1623→                ? 'border-rose-500/60 bg-rose-600 text-white shadow-lg shadow-rose-900/30'
+  1624→                : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+  1625→            )}
+  1626→          >
+  1627→            {m.label}
+  1628→          </button>
+  1629→        ))}
+  1630→      </div>
+  1631→
+  1632→      {mode === 'recommend' && <RagRecommendMode />}
+  1633→      {mode === 'summarize' && <RagSummarizeMode />}
+  1634→      {mode === 'explain' && <RagExplainMode />}
+  1635→      {mode === 'chat' && <RagChatMode user={user} />}
+  1636→    </div>
+  1637→  );
+  1638→}
+  1639→
+  1640→const RAG_LIMITS = [4, 6, 8, 12] as const;
+  1641→
+  1642→function RagRecommendMode() {
+  1643→  const [query, setQuery] = useState('');
+  1644→  const [limit, setLimit] = useState<number>(6);
+  1645→  const [result, setResult] = useState<AiRagRecommendResponse | null>(null);
+  1646→  const [loading, setLoading] = useState(false);
+  1647→  const [error, setError] = useState<string | null>(null);
+  1648→  const [upgrade, setUpgrade] = useState<string | null>(null);
+  1649→
+  1650→  async function run() {
+  1651→    if (loading) return;
+  1652→    setLoading(true);
+  1653→    setError(null);
+  1654→    setUpgrade(null);
+  1655→    try {
+  1656→      setResult(await platform.aiRagRecommend({ query: query.trim() || undefined, limit }));
+  1657→    } catch (e) {
+  1658→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+  1659→      else if (isRateLimited(e)) {
+  1660→        toast.error('Per-minute AI limit hit — give it a few seconds and try again.');
+  1661→        setError(e.message);
+  1662→      } else setError(e instanceof Error ? e.message : 'The RAG pipeline failed');
+  1663→    } finally {
+  1664→      setLoading(false);
+  1665→    }
+  1666→  }
+  1667→
+  1668→  return (
+  1669→    <div className="space-y-4">
+  1670→      <Card className="border-white/10 bg-white/[0.03]">
+  1671→        <CardContent className="space-y-4 p-5 sm:p-6">
+  1672→          <div className="space-y-2">
+  1673→            <label htmlFor="rag-recommend-query" className="text-sm font-semibold text-zinc-300">
+  1674→              What are you in the mood for?
+  1675→            </label>
+  1676→            <Input
+  1677→              id="rag-recommend-query"
+  1678→              value={query}
+  1679→              onChange={(e) => setQuery(e.target.value)}
+  1680→              onKeyDown={(e) => {
+  1681→                if (e.key === 'Enter') void run();
+  1682→              }}
+  1683→              placeholder="e.g. mind-bending sci-fi with a great ending"
+  1684→              maxLength={300}
+  1685→              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+  1686→            />
+  1687→          </div>
+  1688→          <div className="flex flex-wrap items-center justify-between gap-3">
+  1689→            <div className="flex items-center gap-2">
+  1690→              <label htmlFor="rag-recommend-limit" className="text-xs font-semibold text-zinc-500">
+  1691→                Results
+  1692→              </label>
+  1693→              <Select value={String(limit)} onValueChange={(v) => setLimit(Number(v))}>
+  1694→                <SelectTrigger
+  1695→                  id="rag-recommend-limit"
+  1696→                  className="h-9 w-[72px] rounded-lg border-white/10 bg-white/[0.04] text-sm text-zinc-100"
+  1697→                >
+  1698→                  <SelectValue />
+  1699→                </SelectTrigger>
+  1700→                <SelectContent className="border-white/10 bg-[#12121c] text-zinc-100">
+  1701→                  {RAG_LIMITS.map((n) => (
+  1702→                    <SelectItem key={n} value={String(n)} className="focus:bg-white/10 focus:text-white">
+  1703→                      {n}
+  1704→                    </SelectItem>
+  1705→                  ))}
+  1706→                </SelectContent>
+  1707→              </Select>
+  1708→            </div>
+  1709→            <Button
+  1710→              type="button"
+  1711→              onClick={run}
+  1712→              disabled={loading}
+  1713→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1714→            >
+  1715→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Search aria-hidden />}
+  1716→              {loading ? 'Retrieving…' : 'Run RAG'}
+  1717→            </Button>
+  1718→          </div>
+  1719→        </CardContent>
+  1720→      </Card>
+  1721→
+  1722→      {upgrade && <UpgradeCard message={upgrade} />}
+  1723→      {error && !upgrade && <ErrorState compact message={error} onRetry={run} />}
+  1724→      {loading && <LoadingCards count={limit} />}
+  1725→
+  1726→      {!loading && result && result.data.length === 0 && (
+  1727→        <EmptyState title="No matches" message="The vector index found nothing close to that query — try different words." />
+  1728→      )}
+  1729→
+  1730→      {!loading && result && result.data.length > 0 && (
+  1731→        <div className="space-y-3">
+  1732→          {result.intro && (
+  1733→            <p className="rounded-xl border border-white/10 bg-white/[0.03] p-3.5 text-sm italic leading-relaxed text-zinc-300">
+  1734→              <span className="font-bold text-rose-400">&ldquo;</span>
+  1735→              {result.intro}
+  1736→              <span className="font-bold text-rose-400">&rdquo;</span>
+  1737→            </p>
+  1738→          )}
+  1739→          <ul className="space-y-2.5">
+  1740→            {result.data.map((pick) => (
+  1741→              <li key={pick.id}>
+  1742→                <button
+  1743→                  type="button"
+  1744→                  onClick={() => navigate(`/content/${pick.id}`)}
+  1745→                  aria-label={`Open ${pick.title}`}
+  1746→                  className="flex w-full items-start gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 text-left transition hover:border-rose-500/40 hover:bg-white/[0.06] focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+  1747→                >
+  1748→                  <span className="h-16 w-11 shrink-0 overflow-hidden rounded-md border border-white/10 bg-white/[0.03]">
+  1749→                    {pick.thumbnail ? (
+  1750→                      <img src={pick.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+  1751→                    ) : (
+  1752→                      <BrandPlaceholder title={pick.title} />
+  1753→                    )}
+  1754→                  </span>
+  1755→                  <span className="min-w-0 flex-1 space-y-1">
+  1756→                    <span className="flex flex-wrap items-center gap-2">
+  1757→                      <span className="truncate text-sm font-semibold text-zinc-100">{pick.title}</span>
+  1758→                      <TypeBadge type={pick.type} />
+  1759→                    </span>
+  1760→                    <span className="block line-clamp-2 text-xs leading-relaxed text-zinc-400">{pick.reason}</span>
+  1761→                  </span>
+  1762→                  <span className="shrink-0 rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-fuchsia-300">
+  1763→                    {pick.score.toFixed(2)}
+  1764→                  </span>
+  1765→                </button>
+  1766→              </li>
+  1767→            ))}
+  1768→          </ul>
+  1769→          <p className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+  1770→            sources: {result.data.length} · {result.personalized ? 'personalized ranking' : 'anonymous ranking'}
+  1771→            <ProviderBadge provider={result.provider} />
+  1772→            {result.degraded && <DegradedBadge />}
+  1773→          </p>
+  1774→        </div>
+  1775→      )}
+  1776→    </div>
+  1777→  );
+  1778→}
+  1779→
+  1780→function RagSummarizeMode() {
+  1781→  const [selected, setSelected] = useState<Suggestion | null>(null);
+  1782→  const [result, setResult] = useState<AiRagSummarizeResponse | null>(null);
+  1783→  const [loading, setLoading] = useState(false);
+  1784→  const [error, setError] = useState<string | null>(null);
+  1785→  const [upgrade, setUpgrade] = useState<string | null>(null);
+  1786→
+  1787→  async function run() {
+  1788→    if (!selected || loading) return;
+  1789→    setLoading(true);
+  1790→    setError(null);
+  1791→    setUpgrade(null);
+  1792→    try {
+  1793→      setResult(await platform.aiRagSummarize(selected.id));
+  1794→    } catch (e) {
+  1795→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+  1796→      else if (isRateLimited(e)) {
+  1797→        toast.error('Per-minute AI limit hit — give it a few seconds and try again.');
+  1798→        setError(e.message);
+  1799→      } else setError(e instanceof Error ? e.message : 'The RAG pipeline failed');
+  1800→    } finally {
+  1801→      setLoading(false);
+  1802→    }
+  1803→  }
+  1804→
+  1805→  return (
+  1806→    <div className="space-y-4">
+  1807→      <Card className="border-white/10 bg-white/[0.03]">
+  1808→        <CardContent className="space-y-4 p-5 sm:p-6">
+  1809→          <ContentPicker
+  1810→            selected={selected}
+  1811→            onSelect={(s) => {
+  1812→              setSelected(s);
+  1813→              setResult(null);
+  1814→            }}
+  1815→            label="Pick a title to summarize (RAG-grounded)"
+  1816→            inputId="rag-summarize-picker"
+  1817→          />
+  1818→          <div className="flex justify-end">
+  1819→            <Button
+  1820→              type="button"
+  1821→              onClick={run}
+  1822→              disabled={!selected || loading}
+  1823→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1824→            >
+  1825→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+  1826→              {loading ? 'Summarizing…' : 'Summarize'}
+  1827→            </Button>
+  1828→          </div>
+  1829→        </CardContent>
+  1830→      </Card>
+  1831→
+  1832→      {upgrade && <UpgradeCard message={upgrade} />}
+  1833→      {error && !upgrade && <ErrorState compact message={error} onRetry={run} />}
+  1834→
+  1835→      {loading && (
+  1836→        <Card className="border-white/10 bg-white/[0.03]" aria-busy="true">
+  1837→          <CardContent className="space-y-2.5 p-5 sm:p-6">
+  1838→            <Skeleton className="h-5 w-2/5" />
+  1839→            <Skeleton className="h-4 w-full" />
+  1840→            <Skeleton className="h-4 w-11/12" />
+  1841→            <Skeleton className="h-4 w-4/5" />
+  1842→          </CardContent>
+  1843→        </Card>
+  1844→      )}
+  1845→
+  1846→      {!loading && result && (
+  1847→        <Card className="border-white/10 bg-white/[0.03]">
+  1848→          <CardContent className="space-y-4 p-5 sm:p-6">
+  1849→            <div className="flex flex-wrap items-center justify-between gap-2">
+  1850→              <h3 className="text-base font-bold text-zinc-100">{result.title || selected?.title}</h3>
+  1851→              <span className="flex items-center gap-2">
+  1852→                <ProviderBadge provider={result.provider} />
+  1853→                {result.degraded && <DegradedBadge />}
+  1854→              </span>
+  1855→            </div>
+  1856→            <AiText text={result.summary} />
+  1857→          </CardContent>
+  1858→        </Card>
+  1859→      )}
+  1860→    </div>
+  1861→  );
+  1862→}
+  1863→
+  1864→function RagExplainMode() {
+  1865→  const [selected, setSelected] = useState<Suggestion | null>(null);
+  1866→  const [question, setQuestion] = useState('');
+  1867→  const [result, setResult] = useState<AiRagExplainResponse | null>(null);
+  1868→  const [loading, setLoading] = useState(false);
+  1869→  const [error, setError] = useState<string | null>(null);
+  1870→  const [upgrade, setUpgrade] = useState<string | null>(null);
+  1871→
+  1872→  async function run() {
+  1873→    if (!selected || loading) return;
+  1874→    setLoading(true);
+  1875→    setError(null);
+  1876→    setUpgrade(null);
+  1877→    try {
+  1878→      setResult(await platform.aiRagExplain(selected.id, question.trim() || undefined));
+  1879→    } catch (e) {
+  1880→      if (e instanceof PlatformError && e.upgrade) setUpgrade(e.message);
+  1881→      else if (isRateLimited(e)) {
+  1882→        toast.error('Per-minute AI limit hit — give it a few seconds and try again.');
+  1883→        setError(e.message);
+  1884→      } else setError(e instanceof Error ? e.message : 'The RAG pipeline failed');
+  1885→    } finally {
+  1886→      setLoading(false);
+  1887→    }
+  1888→  }
+  1889→
+  1890→  return (
+  1891→    <div className="space-y-4">
+  1892→      <Card className="border-white/10 bg-white/[0.03]">
+  1893→        <CardContent className="space-y-4 p-5 sm:p-6">
+  1894→          <ContentPicker
+  1895→            selected={selected}
+  1896→            onSelect={(s) => {
+  1897→              setSelected(s);
+  1898→              setResult(null);
+  1899→            }}
+  1900→            label="Pick a title to explain"
+  1901→            inputId="rag-explain-picker"
+  1902→          />
+  1903→          <div className="space-y-2">
+  1904→            <label htmlFor="rag-explain-question" className="text-sm font-semibold text-zinc-300">
+  1905→              Focus question <span className="font-normal text-zinc-500">(optional)</span>
+  1906→            </label>
+  1907→            <Input
+  1908→              id="rag-explain-question"
+  1909→              value={question}
+  1910→              onChange={(e) => setQuestion(e.target.value)}
+  1911→              placeholder="e.g. Why would I like this? Is the ending good?"
+  1912→              maxLength={300}
+  1913→              className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
+  1914→            />
+  1915→          </div>
+  1916→          <div className="flex justify-end">
+  1917→            <Button
+  1918→              type="button"
+  1919→              onClick={run}
+  1920→              disabled={!selected || loading}
+  1921→              className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+  1922→            >
+  1923→              {loading ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+  1924→              {loading ? 'Explaining…' : 'Explain'}
+  1925→            </Button>
+  1926→          </div>
+  1927→        </CardContent>
+  1928→      </Card>
+  1929→
+  1930→      {upgrade && <UpgradeCard message={upgrade} />}
+  1931→      {error && !upgrade && <ErrorState compact message={error} onRetry={run} />}
+  1932→
+  1933→      {loading && (
+  1934→        <Card className="border-white/10 bg-white/[0.03]" aria-busy="true">
+  1935→          <CardContent className="space-y-2.5 p-5 sm:p-6">
+  1936→            <Skeleton className="h-5 w-2/5" />
+  1937→            <Skeleton className="h-4 w-full" />
+  1938→            <Skeleton className="h-4 w-11/12" />
+  1939→            <Skeleton className="h-4 w-3/4" />
+  1940→          </CardContent>
+  1941→        </Card>
+  1942→      )}
+  1943→
+  1944→      {!loading && result && (
+  1945→        <Card className="border-white/10 bg-white/[0.03]">
+  1946→          <CardContent className="space-y-4 p-5 sm:p-6">
+  1947→            <div className="flex flex-wrap items-center justify-between gap-2">
+  1948→              <h3 className="text-base font-bold text-zinc-100">{result.title || selected?.title}</h3>
+  1949→              <span className="flex items-center gap-2">
+  1950→                <ProviderBadge provider={result.provider} />
+  1951→                {result.degraded && <DegradedBadge />}
+  1952→              </span>
+  1953→            </div>
+  1954→            <AiText text={result.explanation} />
+  1955→            {result.similar.length > 0 && (
+  1956→              <div className="space-y-2 border-t border-white/5 pt-3">
+  1957→                <p className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Retrieved neighbors</p>
+  1958→                <div className="flex flex-wrap gap-1.5">
+  1959→                  {result.similar.map((s) => (
+  1960→                    <button
+  1961→                      key={s.id}
+  1962→                      type="button"
+  1963→                      onClick={() => navigate(`/content/${s.id}`)}
+  1964→                      className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition hover:border-rose-500/40 hover:text-rose-200"
+  1965→                    >
+  1966→                      {s.title} <span className="font-mono text-fuchsia-400">· {s.score.toFixed(2)}</span>
+  1967→                    </button>
+  1968→                  ))}
+  1969→                </div>
+  1970→              </div>
+  1971→            )}
+  1972→          </CardContent>
+  1973→        </Card>
+  1974→      )}
+  1975→    </div>
+  1976→  );
+  1977→}
+  1978→
+  1979→interface RagChatMessage {
+  1980→  role: 'user' | 'assistant';
+  1981→  text: string;
+  1982→  sources?: AiRagChatResponse['sources'];
+  1983→}
+  1984→
+  1985→function RagChatMode({ user }: { user: PlatformUser | null }) {
+  1986→  const [selected, setSelected] = useState<Suggestion | null>(null);
+  1987→  const [messages, setMessages] = useState<RagChatMessage[]>([]);
+  1988→  const [input, setInput] = useState('');
+  1989→  const [busy, setBusy] = useState(false);
+  1990→  const [quotaError, setQuotaError] = useState<string | null>(null);
+  1991→  const scrollRef = useRef<HTMLDivElement>(null);
+  1992→
+  1993→  useEffect(() => {
+  1994→    const el = scrollRef.current;
+  1995→    if (el) el.scrollTop = el.scrollHeight;
+  1996→  }, [messages, busy]);
+  1997→
+  1998→  if (!user) {
+  1999→    return (
+  2000→      <SignInCard
+
+[showing lines 1-2000 of 2336; use offset=2001 with limit to continue reading]

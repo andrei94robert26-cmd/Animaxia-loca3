@@ -1,0 +1,119 @@
+# animaxia-edge-gateway — the front door of the Animaxia edge layer (FAZA 8).
+#
+# Pipeline (src/index.ts):
+#   request id → CORS preflight → KV runtime config (EDGE_CONFIG, key "config")
+#   → maintenance mode (503, /edge/* exempt) → WAF (bots / SQLi / XSS /
+#   traversal / null-byte / oversized query; events logged to EDGE_CACHE
+#   waf:{ts}:{id}) → rate limiting (per-IP + per-user + heavy tier on
+#   /ai/* and /vector/*; tiers: this worker's RateLimiterDurable → KV →
+#   per-isolate memory) → smart routing → response decoration (security
+#   headers, CORS, x-request-id, X-RateLimit-* trio).
+#
+# Routing (service binding first, cloud fallback when a sub-worker is not
+# deployed — every binding is optional at runtime):
+#   /edge/*                      management (health public; admin endpoints
+#                                need EDGE_ADMIN_JWT / EDGE_INTERNAL_TOKEN)
+#   /api/*                       cloud gateway — public GETs cached
+#                                (60s fresh + SWR + stale-if-error)
+#   /ai/*                        SVC_AI → ai upstream (streaming passthrough)
+#   /vector/*                    vector upstream (heavy tier)
+#   /mobile/*                    mobile upstream — public GETs cached
+#   /search/*, /autocomplete     SVC_SEARCH → cloud /api/search/*
+#   /auth/*                      SVC_AUTH → cloud /api/auth/*
+#   /player/*, /hls              SVC_PLAYER → cloud /api/mobile/player/*
+#   /analytics/*, /beacon        SVC_ANALYTICS → cloud /api/analytics/*
+#   /media/*                     R2 MEDIA_BUCKET (thumbnails, offline-test.mp4)
+#   /ws/*                        WebSocket proxy → WS_ORIGIN (assistant live)
+#
+# Deploy order: deploy the sub-workers FIRST, this gateway LAST (its service
+# bindings reference them). See deploy/deploy-all.sh.
+
+name = "animaxia-edge-gateway"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+workers_dev = true
+
+# --- KV namespaces ------------------------------------------------------------
+# Create each once and paste the printed id:
+#   wrangler kv namespace create EDGE_CONFIG     # runtime config (key "config")
+#   wrangler kv namespace create EDGE_CACHE      # SWR/SIE cache + WAF/cron logs
+#   wrangler kv namespace create EDGE_RATELIMIT  # KV rate-limit tier
+
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+[[kv_namespaces]]
+binding = "EDGE_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+[[kv_namespaces]]
+binding = "EDGE_RATELIMIT"
+id = "REPLACE_WITH_KV_ID"
+
+# --- R2 media ------------------------------------------------------------------
+#   wrangler r2 bucket create animaxia-media
+#   wrangler r2 object put animaxia-media/offline-test.mp4 \
+#     --file ../animaxia-desktop/public/offline-test.mp4
+# Thumbnails follow the same pattern under thumbnails/.
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "animaxia-media"
+
+# --- Service bindings (sub-workers) --------------------------------------------
+# Optional at runtime: without a binding the gateway falls back to direct
+# cloud routing for that prefix (see src/index.ts fallback closures).
+
+[[services]]
+binding = "SVC_SEARCH"
+service = "animaxia-edge-search"
+
+[[services]]
+binding = "SVC_AI"
+service = "animaxia-edge-ai"
+
+[[services]]
+binding = "SVC_AUTH"
+service = "animaxia-edge-auth"
+
+[[services]]
+binding = "SVC_PLAYER"
+service = "animaxia-edge-player"
+
+[[services]]
+binding = "SVC_ANALYTICS"
+service = "animaxia-edge-analytics"
+
+# --- Durable Object (rate-limit tier 1) -----------------------------------------
+
+[durable_objects]
+bindings = [{ name = "RATE_LIMITER", class_name = "RateLimiterDurable" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiterDurable"]
+
+# --- Vars -----------------------------------------------------------------------
+
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+# Optional per-service origin overrides (default: follow CLOUD_ORIGIN with the
+# documented path rewrites — see shared/upstream.ts):
+#   AI_ORIGIN     = "https://ai.internal.animaxia.com"
+#   VECTOR_ORIGIN = "https://vector.internal.animaxia.com"
+#   MOBILE_ORIGIN = "https://mobile.internal.animaxia.com"
+#   WS_ORIGIN     = "wss://assistant.animaxia.com"
+
+# --- Secrets (wrangler secret put <NAME>) ---------------------------------------
+#   JWT_SECRET          — exact HS256 secret, used ONLY to sniff the caller
+#                         identity for per-user rate limiting (the origin
+#                         always re-verifies Authorization). Alternative:
+#                         the AUTHSECRET + DATABASEURL pair — shared/jwt.ts
+#                         derives the identical secret locally.
+#   EDGE_ADMIN_JWT      — bearer token for /edge/* admin endpoints.
+#   EDGE_INTERNAL_TOKEN — x-internal-token value for edge → edge internal
+#                         calls (cron flush, cache purge).

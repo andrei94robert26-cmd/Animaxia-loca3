@@ -29,7 +29,6 @@
 
 import express from 'express';
 import { rows, one, jsonb, parseJsonb, isoOrNull, num } from '../platform/sql.js';
-import { assertPostgres } from '../platform/sql.js';
 import { requireAuth, attachUser } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import { insertActivityEvent } from './activity-events.js';
@@ -138,8 +137,8 @@ async function isMember(partyId, userId) {
 async function expireStaleParties() {
   try {
     await rows(
-      `UPDATE watchparties SET status = 'ended', updatedat = NOW()
-       WHERE status = 'active' AND updatedat < NOW() - INTERVAL '24 hours'`,
+      `UPDATE watchparties SET status = 'ended', updatedat = CURRENT_TIMESTAMP
+       WHERE status = 'active' AND updatedat < datetime('now','-24 hours')`,
     );
   } catch (err) {
     logger.warn(`[social] stale party expiry failed: ${err.message}`);
@@ -156,7 +155,6 @@ socialPartyRouter.post(
   requireAuth,
   createLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const contentId = parseId(req.body?.contentId);
     if (!Number.isInteger(contentId)) return res.status(400).json({ error: 'contentId (positive integer) is required' });
@@ -171,7 +169,7 @@ socialPartyRouter.post(
 
     /* End my previous active hosted parties (one active host party at a time). */
     await rows(
-      `UPDATE watchparties SET status = 'ended', updatedat = NOW()
+      `UPDATE watchparties SET status = 'ended', updatedat = CURRENT_TIMESTAMP
        WHERE hostid = $1 AND status = 'active'`,
       [me],
     );
@@ -180,7 +178,7 @@ socialPartyRouter.post(
     for (let attempt = 0; attempt < 5 && !party; attempt += 1) {
       party = await one(
         `INSERT INTO watchparties (code, hostid, contentid, title, isprivate, state)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (code) DO NOTHING
          RETURNING *`,
         [randomCode(), me, contentId, title, isprivate, jsonb(sanitizeState(null))],
@@ -214,7 +212,6 @@ socialPartyRouter.get(
   '/parties',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     await expireStaleParties();
 
     const me = req.user ? num(req.user.id) : null;
@@ -251,7 +248,6 @@ socialPartyRouter.get(
   '/party/:id',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid party id' });
 
@@ -292,7 +288,6 @@ socialPartyRouter.post(
   requireAuth,
   joinLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid party id' });
@@ -308,7 +303,7 @@ socialPartyRouter.post(
          ON CONFLICT DO NOTHING`,
         [id, me],
       );
-      await rows(`UPDATE watchparties SET updatedat = NOW() WHERE id = $1`, [id]);
+      await rows(`UPDATE watchparties SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
       if (num(party.hostid) !== me) {
         await insertActivityEvent({
           actorid: me,
@@ -330,7 +325,6 @@ socialPartyRouter.post(
   '/party/:id/leave',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid party id' });
@@ -344,7 +338,7 @@ socialPartyRouter.post(
     await rows(`DELETE FROM watchpartymembers WHERE partyid = $1 AND userid = $2`, [id, me]);
 
     if (role === 'host' || num(party.hostid) === me) {
-      await rows(`UPDATE watchparties SET status = 'ended', updatedat = NOW() WHERE id = $1`, [id]);
+      await rows(`UPDATE watchparties SET status = 'ended', updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
       await insertActivityEvent({
         actorid: me,
         type: 'party:ended',
@@ -354,7 +348,7 @@ socialPartyRouter.post(
       return res.json({ ok: true, status: 'ended' });
     }
 
-    await rows(`UPDATE watchparties SET updatedat = NOW() WHERE id = $1`, [id]);
+    await rows(`UPDATE watchparties SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
     res.json({ ok: true, status: 'active' });
   }),
 );
@@ -364,7 +358,6 @@ socialPartyRouter.post(
   '/party/:id/sync',
   requireAuth,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid party id' });
@@ -375,7 +368,7 @@ socialPartyRouter.post(
 
     const state = sanitizeState(req.body?.state || req.body);
     await rows(
-      `UPDATE watchparties SET state = $2::jsonb, updatedat = NOW() WHERE id = $1`,
+      `UPDATE watchparties SET state = $2, updatedat = CURRENT_TIMESTAMP WHERE id = $1`,
       [id, jsonb(state)],
     );
     res.json({ ok: true, state });
@@ -387,7 +380,6 @@ socialPartyRouter.get(
   '/party/:id/messages',
   attachUser,
   wrap(async (req, res) => {
-    assertPostgres();
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid party id' });
     const beforeId = parseId(req.query.beforeId || '');
@@ -428,7 +420,6 @@ socialPartyRouter.post(
   requireAuth,
   messageLimiter,
   wrap(async (req, res) => {
-    assertPostgres();
     const me = num(req.user.id);
     const id = parseId(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid party id' });
@@ -449,7 +440,7 @@ socialPartyRouter.post(
       `INSERT INTO partymessages (partyid, userid, body) VALUES ($1, $2, $3) RETURNING id, createdat`,
       [id, me, body],
     );
-    await rows(`UPDATE watchparties SET updatedat = NOW() WHERE id = $1`, [id]);
+    await rows(`UPDATE watchparties SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
     res.status(201).json({
       ok: true,
       message: {
@@ -466,7 +457,6 @@ socialPartyRouter.post(
 socialPartyRouter.post(
   '/party/join-code',
   wrap(async (req, res) => {
-    assertPostgres();
     const code = String(req.body?.code || '').trim().toUpperCase();
     if (!/^[2-9A-HJKMNP-Z]{6}$/.test(code)) {
       return res.status(400).json({ error: 'Code must be 6 characters (no 0/O/1/I/L)' });

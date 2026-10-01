@@ -1,0 +1,259 @@
+/**
+ * modules/player/subtitles.js — FAZA 21: WebVTT subtitle tracks per content.
+ *
+ * Mount: app.use('/api/player/subtitles', subtitlesRouter) — NO auth at mount
+ * level: the two read routes are PUBLIC (the anonymous player must be able to
+ * load subtitle tracks), while every mutation/management route applies
+ * requireAuth + requireAdmin at the route level.
+ *
+ * NOTE: the pre-existing player route is GET /api/content/:id/player — the
+ * /api/player/* namespace was unused before FAZA 21 (verified), so there is
+ * zero route conflict.
+ *
+ * Routes:
+ *   GET  /content/:id/subtitles   PUBLIC  → { ok, contentId, data: [{ id, lang, label, src }] }
+ *                                          (src = /api/player/subtitles/{id}.vtt — metadata only,
+ *                                           no VTT body in the listing)
+ *   GET  /:idVtt (e.g. 12.vtt)    PUBLIC  → the raw WebVTT body,
+ *                                          Content-Type: text/vtt; charset=utf-8,
+ *                                          Cache-Control: public, max-age=3600 (404 when missing)
+ *   GET  /list                    ADMIN   → all tracks + content titles (playerhub management)
+ *   POST /  { contentId, lang?, label?, vtt }  ADMIN → upsert (unique content+lang+label)
+ *   DELETE /:id                   ADMIN   → { ok, deleted }
+ *
+ * VTT validation (honest 400s): body 8..512KB, must start with 'WEBVTT'
+ * (after leading whitespace), must contain at least one cue ('-->') and at
+ * most 500 cues.
+ */
+
+import express from 'express';
+import { rows, one, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+import { requireAuth, requireAdmin } from '../users/auth.js';
+import { auditLog, clientIpOf } from '../security/security.js';
+
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/* -------------------------------- validation -------------------------------- */
+
+const VTT_MIN_BYTES = 8;
+const VTT_MAX_BYTES = 512 * 1024; // 512KB
+const VTT_MAX_CUES = 500;
+const LANG_MAX = 10;
+const LABEL_MAX = 60;
+
+/** Default human label for a language code (fallback: the code itself). */
+const LANG_LABELS = { ro: 'Română', en: 'English', de: 'Deutsch', fr: 'Français', es: 'Español' };
+function labelForLang(lang) {
+  return LANG_LABELS[lang] || lang;
+}
+
+/** Parse a positive-integer route param → number, or NaN when invalid. */
+function parseId(value) {
+  const n = Number.parseInt(value, 10);
+  return Number.isInteger(n) && n > 0 ? n : NaN;
+}
+
+/**
+ * Validate a WebVTT body. Returns null when valid, or an honest reason string.
+ * Checks: size, 'WEBVTT' magic (after leading whitespace), ≥1 cue, ≤500 cues.
+ */
+function validateVtt(vtt) {
+  if (typeof vtt !== 'string') return 'vtt must be a string';
+  if (vtt.length < VTT_MIN_BYTES || vtt.length > VTT_MAX_BYTES) {
+    return `vtt length must be between ${VTT_MIN_BYTES} and ${VTT_MAX_BYTES} bytes (got ${vtt.length})`;
+  }
+  if (!vtt.trimStart().startsWith('WEBVTT')) {
+    return "vtt must start with the 'WEBVTT' magic line";
+  }
+  const cues = vtt.split('-->').length - 1;
+  if (cues < 1) return 'vtt must contain at least one cue (a "-->" timing line)';
+  if (cues > VTT_MAX_CUES) return `vtt has ${cues} cues — the limit is ${VTT_MAX_CUES}`;
+  return null;
+}
+
+/** Serialize a subtitles row into the public track shape (no VTT body). */
+function trackMeta(row, withSrc = false) {
+  if (!row) return null;
+  const track = {
+    id: num(row.id),
+    contentId: num(row.contentid),
+    lang: row.lang,
+    label: row.label,
+  };
+  if (withSrc) track.src = `/api/player/subtitles/${num(row.id)}.vtt`;
+  return track;
+}
+
+/* ---------------------------------- router ---------------------------------- */
+
+const router = express.Router();
+
+const OPENSUBTITLES_BASE = 'https://api.opensubtitles.com/api/v1';
+const OPENSUBTITLES_KEY = process.env.OPENSUBTITLES_API_KEY || '';
+
+router.get('/opensubtitles/search', wrap(async (req, res) => {
+  if (!OPENSUBTITLES_KEY) {
+    return res.status(503).json({ error: 'OPENSUBTITLES_API_KEY missing' });
+  }
+
+  const params = new URLSearchParams();
+
+  if (req.query.imdb_id) params.set('imdb_id', String(req.query.imdb_id).replace(/^tt/i, ''));
+  if (req.query.tmdb_id) params.set('tmdb_id', String(req.query.tmdb_id));
+  if (req.query.query) params.set('query', String(req.query.query));
+  if (req.query.languages) params.set('languages', String(req.query.languages));
+
+  if (![...params].length) {
+    return res.status(400).json({
+      error: 'Use imdb_id, tmdb_id or query'
+    });
+  }
+
+  const response = await fetch(`${OPENSUBTITLES_BASE}/subtitles?${params}`, {
+    headers: {
+      'Api-Key': OPENSUBTITLES_KEY,
+      'User-Agent': 'Animaxia v1.0'
+    }
+  });
+
+  const payload = await response.json();
+
+  if (!response.ok) {
+    return res.status(response.status).json({
+      error: 'OpenSubtitles request failed',
+      details: payload
+    });
+  }
+
+  return res.json(payload);
+}));
+
+
+/** GET /content/:id/subtitles — PUBLIC track listing for a content row. */
+router.get('/content/:id/subtitles', wrap(async (req, res) => {
+  assertPostgres();
+  const contentId = parseId(req.params.id);
+  if (Number.isNaN(contentId)) return res.status(400).json({ error: 'Invalid content id' });
+
+  const data = await rows(
+    `SELECT id, contentid, lang, label FROM subtitles WHERE contentid = $1 ORDER BY id ASC`,
+    [contentId],
+  );
+  return res.json({ ok: true, contentId, data: data.map((r) => trackMeta(r, true)) });
+}));
+
+/** GET /list — ADMIN: every track with its content title + honest stats
+ *  (cue count derived in SQL from '-->' occurrences; no bodies returned). */
+router.get('/list', requireAuth, requireAdmin, wrap(async (req, res) => {
+  assertPostgres();
+  const data = await rows(
+    `SELECT s.id, s.contentid, s.lang, s.label, s.createdat, c.title AS contenttitle,
+            length(s.vtt) AS bytes,
+            (length(s.vtt) - length(replace(s.vtt, '-->', ''))) / 3 AS cues
+     FROM subtitles s
+     LEFT JOIN content c ON c.id = s.contentid
+     ORDER BY s.contentid ASC, s.id ASC`,
+  );
+  return res.json({
+    ok: true,
+    data: data.map((r) => ({
+      id: num(r.id),
+      contentId: num(r.contentid),
+      contentTitle: r.contenttitle ?? null,
+      lang: r.lang,
+      label: r.label,
+      bytes: num(r.bytes),
+      cues: num(r.cues),
+      createdat: isoOrNull(r.createdat),
+    })),
+  });
+}));
+
+/** GET /:idVtt — PUBLIC: serve one track as {id}.vtt (e.g. /12.vtt).
+ *  Route-order note: this generic single-segment pattern is registered AFTER
+ *  /content/:id/subtitles and /list so those literal paths win. */
+router.get('/:idVtt', wrap(async (req, res) => {
+  const raw = String(req.params.idVtt || '');
+  if (!/^\d+\.vtt$/.test(raw)) {
+    return res.status(400).json({ error: "Expected a subtitle file path like 12.vtt" });
+  }
+  assertPostgres();
+  const id = parseId(raw.slice(0, -4));
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid subtitle id' });
+
+  const row = await one(`SELECT id, vtt FROM subtitles WHERE id = $1`, [id]);
+  if (!row) return res.status(404).json({ error: 'Subtitle not found' });
+
+  // Anonymous players fetch these on every playback — cacheable for an hour.
+  res.set('Content-Type', 'text/vtt; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=3600');
+  return res.send(row.vtt);
+}));
+
+/** POST / — ADMIN upsert of a track (unique per content+lang+label). */
+router.post('/', requireAuth, requireAdmin, wrap(async (req, res) => {
+  assertPostgres();
+  const body = req.body || {};
+
+  const contentId = Number(body.contentId);
+  if (!Number.isInteger(contentId) || contentId <= 0) {
+    return res.status(400).json({ error: 'contentId is required and must be a positive integer' });
+  }
+
+  const lang = (body.lang === undefined || body.lang === null ? 'ro' : String(body.lang).trim().toLowerCase()) || 'ro';
+  if (lang.length < 2 || lang.length > LANG_MAX) {
+    return res.status(400).json({ error: `lang must be 2-${LANG_MAX} characters (e.g. 'ro', 'en')` });
+  }
+
+  const label = (body.label === undefined || body.label === null || String(body.label).trim() === ''
+    ? labelForLang(lang)
+    : String(body.label).trim()).slice(0, LABEL_MAX);
+
+  const vtt = body.vtt;
+  const vttProblem = validateVtt(vtt);
+  if (vttProblem) return res.status(400).json({ error: vttProblem });
+
+  const content = await one(`SELECT id, title FROM content WHERE id = $1`, [contentId]);
+  if (!content) return res.status(404).json({ error: 'Content not found' });
+
+  // Upsert: same content+lang+label replaces the body (xmax=0 ⇒ fresh insert).
+  const saved = await one(
+    `INSERT INTO subtitles (contentid, lang, label, vtt, createdby)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (contentid, lang, label)
+     DO UPDATE SET vtt = EXCLUDED.vtt, createdby = EXCLUDED.createdby
+     RETURNING id, contentid, lang, label, (xmax = 0) AS inserted`,
+    [contentId, lang, label, vtt, req.user.id],
+  );
+  await auditLog({
+    userid: req.user.id,
+    action: 'subtitle.upsert',
+    ip: clientIpOf(req),
+    meta: { subtitleId: num(saved.id), contentId, lang, label, created: Boolean(saved.inserted) },
+  });
+  return res.json({
+    ok: true,
+    subtitle: trackMeta(saved),
+    created: Boolean(saved.inserted),
+  });
+}));
+
+/** DELETE /:id — ADMIN: remove a track. */
+router.delete('/:id', requireAuth, requireAdmin, wrap(async (req, res) => {
+  assertPostgres();
+  const id = parseId(req.params.id);
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid subtitle id' });
+
+  const deleted = await one(`DELETE FROM subtitles WHERE id = $1 RETURNING id, contentid`, [id]);
+  if (!deleted) return res.status(404).json({ error: 'Subtitle not found' });
+
+  await auditLog({
+    userid: req.user.id,
+    action: 'subtitle.delete',
+    ip: clientIpOf(req),
+    meta: { subtitleId: id, contentId: num(deleted.contentid) },
+  });
+  return res.json({ ok: true, deleted: id });
+}));
+
+export default router;

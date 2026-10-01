@@ -1,0 +1,74 @@
+# animaxia-edge-auth — Cloudflare Worker config
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# The AUTH worker terminates JWT verification at the edge (HS256 with the
+# cloud's exact secret derivation), enforces anti-replay (jti registry in the
+# EDGE_REPLAY KV), device binding (dvp claim ↔ x-animaxia-device header),
+# mints device-bound wrapper tokens (/auth/device/token) and proxies
+# login/register/refresh/logout/forgot/reset to the cloud auth API.
+# Full logic: src/index.ts.
+
+name = "animaxia-edge-auth"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Expose the Worker on <name>.<subdomain>.workers.dev for testing.
+# `wrangler whoami` shows your subdomain. Turn off once you route the zone
+# through the gateway worker if you don't want the extra public URL.
+workers_dev = true
+
+# --- Routes ------------------------------------------------------------------
+# Uncomment AFTER the zone (animaxia.com) is on your Cloudflare account and
+# the gateway worker routes /auth/* to this worker via a service binding.
+#
+# routes = [
+#   { pattern = "auth.animaxia.com/*", zone_name = "animaxia.com" },
+# ]
+
+# --- Bindings ----------------------------------------------------------------
+# KV: EDGE_CONFIG — runtime configuration (key "config", shared/config.ts
+# defaults + KV override). Create with:
+#   wrangler kv namespace create EDGE_CONFIG
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "EDGE_CONFIG"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_CACHE — SWR / stale-if-error response cache (shared/cache.ts).
+[[kv_namespaces]]
+binding = "EDGE_CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# KV: EDGE_REPLAY — anti-replay jti registry (shared/jwt.ts::assertNotReplayed;
+# entries live for the token lifetime, so the namespace must be dedicated).
+[[kv_namespaces]]
+binding = "EDGE_REPLAY"
+id = "REPLACE_WITH_KV_ID"
+
+# --- Vars --------------------------------------------------------------------
+# Where the cloud monolith / gateway is reached from the edge. The default
+# matches the local mini-services gateway for `wrangler dev` style setups —
+# production must point at the cloud gateway host (e.g.
+# "https://api.animaxia.com"): Workers run on Cloudflare's edge, not inside
+# your cluster.
+[vars]
+CLOUD_ORIGIN = "http://127.0.0.1:4000"
+EDGE_ENV = "development"
+
+# --- Secrets -----------------------------------------------------------------
+# This worker REQUIRES a secret to verify tokens. NEVER put secrets in this
+# file — use:  wrangler secret put <NAME>   (read them from `env.<NAME>`).
+#
+#   JWT_SECRET         — the EXACT HS256 secret. Set this when the cloud
+#                        auth-service runs with an explicit AUTHSECRET; the
+#                        edge must share the identical secret bytes.
+#
+#   AUTHSECRET +       — alternative pair: when the cloud runs with the
+#   DATABASEURL          derived secret sha256hex("animaxia-auth:<DATABASEURL>"),
+#                        set these two passthrough vars instead and the edge
+#                        derives the IDENTICAL secret locally.
+#                        Precedence (shared/jwt.ts::resolveAuthSecret):
+#                        JWT_SECRET → AUTHSECRET → derived(DATABASEURL).
+#
+#   EDGE_INTERNAL_TOKEN — optional shared token for edge → cloud internal
+#                        calls (x-internal-token header).

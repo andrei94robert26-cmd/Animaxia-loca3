@@ -1,0 +1,32 @@
+# =============================================================================
+# Animaxia Cloud — shared data volume (PersistentVolumeClaim "animaxia-data")
+#
+# Mounted by content-service and queue-service at /app/data (LOCALDATADIR) for
+# thumbnails and the local JSON fallback store.
+#
+# NOTE: ReadWriteOnce means the volume can only be attached to ONE node at a
+# time. content-service (2 replicas) and queue-service (1 replica) both mount
+# it, so ALL their pods must be schedulable on the same node (single-node /
+# dev clusters: minikube, kind, k3s — fine). For multi-AZ production either:
+#   - switch accessModes to ReadWriteMany (requires a RWX storage class, e.g.
+#     NFS / CephFS / cloud shared FS), or
+#   - split into per-service PVCs and schedule each service's pods per volume.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: animaxia-data
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName intentionally OMITTED → cluster default StorageClass
+  # (dynamic provisioning). To pin a class, set e.g. storageClassName: standard
+  # NOTE: setting it to "" (empty string) would DISABLE dynamic provisioning.
+  resources:
+    requests:
+      storage: 10Gi

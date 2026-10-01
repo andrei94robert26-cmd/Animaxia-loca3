@@ -290,7 +290,7 @@ if ((process.env.WORKERSBOOTSWEEP ?? '0') === '1') {
  * has .svg files on disk (e.g. the pre-existing 1385.svg), import them once. */
 async function migrateThumbnailFilesToNeon() {
   try {
-    const countRow = await one('SELECT COUNT(*)::int AS n FROM thumbnailcache');
+    const countRow = await one('SELECT COUNT(*) AS n FROM thumbnailcache');
     if (Number(countRow?.n ?? 0) > 0) return 0;
     if (!fs.existsSync(THUMBNAILS_DIR)) return 0;
     const files = fs.readdirSync(THUMBNAILS_DIR).filter((f) => f.endsWith('.svg'));

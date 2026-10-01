@@ -1,0 +1,32 @@
+# =============================================================================
+# Animaxia Cloud — Grafana dashboard provider (BLUEPRINT §11)
+# =============================================================================
+# Mounted read-only into the `grafana` container by
+# deploy/docker/docker-compose.observability.yml
+# (/etc/grafana/provisioning/dashboards/dashboards.yml).
+#
+# The dashboards themselves are mounted at
+#   /var/lib/grafana/dashboards  (observability/grafana/dashboards/)
+#     animaxia-overview.json  — uid animaxia-overview
+#     animaxia-queue.json     — uid animaxia-queue
+# and appear in Grafana under the "Animaxia" folder at
+# http://localhost:3001/d/animaxia-overview and /d/animaxia-queue.
+#
+# allowUiUpdates: false → edits in the UI are not persisted (the JSON files
+# in git are the source of truth; "Save as" a copy to experiment).
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: animaxia
+    orgId: 1
+    folder: Animaxia
+    folderUid: animaxia
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

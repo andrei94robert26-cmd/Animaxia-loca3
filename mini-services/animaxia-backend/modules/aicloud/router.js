@@ -91,7 +91,7 @@ export async function ensureAicloudSchema() {
       degraded BOOLEAN NOT NULL DEFAULT FALSE,
       errormessage TEXT,
       promptsnippet TEXT,
-      createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE INDEX IF NOT EXISTS idx_aiusagelogs_created ON aiusagelogs (createdat DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_aiusagelogs_feature ON aiusagelogs (feature)`,
@@ -101,17 +101,17 @@ export async function ensureAicloudSchema() {
       role TEXT NOT NULL,
       message TEXT NOT NULL,
       traceid TEXT,
-      toolsused JSONB NOT NULL DEFAULT '{}'::jsonb,
-      createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      toolsused JSONB NOT NULL DEFAULT '{}',
+      createdat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE INDEX IF NOT EXISTS idx_agentconversations_user ON agentconversations (userid, createdat DESC)`,
     `CREATE TABLE IF NOT EXISTS aiprofiles (
       userid INTEGER PRIMARY KEY,
       summary TEXT,
-      tastetags JSONB NOT NULL DEFAULT '{}'::jsonb,
+      tastetags JSONB NOT NULL DEFAULT '{}',
       lastrecap TEXT,
       lastrecapat TIMESTAMPTZ,
-      updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      updatedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
   ];
   for (const statement of DDL) {

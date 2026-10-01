@@ -1,0 +1,369 @@
+# =============================================================================
+# Animaxia Cloud — CronJobs (schedule enforcers for the PG-backed queue)
+#
+# Each CronJob POSTs {"job":"<type>","payload":{...}} to the queue-service tick
+# endpoint `POST /api/queue/cron/tick` (BLUEPRINT §10), which evaluates the
+# schedule and enqueues the matching job type.
+#
+# NOTE: queue-service ALSO ships an internal cron scheduler (QUEUESCHEDULERENABLED
+# in animaxia-config). These CronJobs are belt & braces: if the internal
+# scheduler is disabled or a pod was down at tick time, the CronJob still
+# delivers the tick. Duplicate ticks are safe — the queue dedupes per job type.
+#
+# To disable the k8s side (keep only the internal scheduler):
+#   kubectl -n animaxia delete -f 90-cronjobs.yaml
+# and set QUEUESCHEDULERENABLED=true in animaxia-config.
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: animaxia-cron-tmdb-refresh
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-cron
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: scheduler
+    animaxia.io/cron: tmdb-refresh
+spec:
+  # every 6 hours → providers.refresh {source: tmdb}
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: animaxia-cron
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - '{"job":"providers.refresh","payload":{"source":"tmdb"}}'
+                - http://queue-service:4009/api/queue/cron/tick
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: animaxia-cron-jikan-refresh
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-cron
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: scheduler
+    animaxia.io/cron: jikan-refresh
+spec:
+  # every 6h, offset 30min from the TMDB refresh → providers.refresh {source: jikan}
+  schedule: "30 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: animaxia-cron
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - '{"job":"providers.refresh","payload":{"source":"jikan"}}'
+                - http://queue-service:4009/api/queue/cron/tick
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: animaxia-cron-cleanup-logs
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-cron
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: scheduler
+    animaxia.io/cron: cleanup-logs
+spec:
+  # daily 03:00 → maintenance.cleanup-logs
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: animaxia-cron
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - '{"job":"maintenance.cleanup-logs","payload":{}}'
+                - http://queue-service:4009/api/queue/cron/tick
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: animaxia-cron-cleanup-audit
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-cron
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: scheduler
+    animaxia.io/cron: cleanup-audit
+spec:
+  # daily 03:15 → maintenance.cleanup-audit
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: animaxia-cron
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - '{"job":"maintenance.cleanup-audit","payload":{}}'
+                - http://queue-service:4009/api/queue/cron/tick
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: animaxia-cron-cleanup-sessions
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-cron
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: scheduler
+    animaxia.io/cron: cleanup-sessions
+spec:
+  # hourly → maintenance.cleanup-sessions (expired/revoked refresh tokens)
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: animaxia-cron
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - '{"job":"maintenance.cleanup-sessions","payload":{}}'
+                - http://queue-service:4009/api/queue/cron/tick
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: animaxia-cron-reindex
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-cron
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: scheduler
+    animaxia.io/cron: reindex
+spec:
+  # daily 04:00 → maintenance.reindex (search-service full reindex)
+  schedule: "0 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: animaxia-cron
+            app.kubernetes.io/part-of: animaxia-cloud
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tick
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - -fsS
+                - --max-time
+                - "90"
+                - -X
+                - POST
+                - -H
+                - "Content-Type: application/json"
+                - -d
+                - '{"job":"maintenance.reindex","payload":{}}'
+                - http://queue-service:4009/api/queue/cron/tick
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL

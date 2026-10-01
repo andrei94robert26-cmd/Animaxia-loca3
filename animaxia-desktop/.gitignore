@@ -1,0 +1,8 @@
+# dependencies / build output
+node_modules/
+dist-renderer/
+release/
+*.log
+.env
+.env.local
+.DS_Store

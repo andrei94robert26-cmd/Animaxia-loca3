@@ -29,12 +29,12 @@ const DDL_STATEMENTS = [
     type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     tenantid TEXT NOT NULL DEFAULT 'global',
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload JSONB NOT NULL DEFAULT '{}',
     result JSONB,
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     createdby INTEGER,
-    queuedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    queuedat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     startedat TIMESTAMPTZ,
     finishedat TIMESTAMPTZ
   )`,
@@ -48,7 +48,7 @@ const DDL_STATEMENTS = [
     contentid INTEGER NOT NULL,
     tenantid TEXT NOT NULL DEFAULT 'global',
     meta JSONB,
-    lastsync TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lastsync TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (provider, externalid, tenantid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_miner_sources_tenant ON miner_sources (tenantid, provider)`,
@@ -58,7 +58,7 @@ const DDL_STATEMENTS = [
     jobid TEXT NOT NULL,
     level TEXT NOT NULL DEFAULT 'info',
     message TEXT NOT NULL,
-    ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_miner_logs_job ON miner_logs (jobid, ts DESC)`,
   `CREATE TABLE IF NOT EXISTS miner_manifests (
@@ -68,7 +68,7 @@ const DDL_STATEMENTS = [
     host TEXT,
     tenantid TEXT NOT NULL DEFAULT 'global',
     status TEXT NOT NULL DEFAULT 'unknown',
-    lastchecked TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lastchecked TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (contentid, manifesturl, tenantid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_miner_manifests_tenant ON miner_manifests (tenantid, lastchecked DESC)`,

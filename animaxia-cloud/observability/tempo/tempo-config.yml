@@ -1,0 +1,55 @@
+# =============================================================================
+# Animaxia Cloud — Tempo single-binary configuration (BLUEPRINT §11)
+# =============================================================================
+# Mounted read-only into the `tempo` container (grafana/tempo:2.7.0) by
+# deploy/docker/docker-compose.observability.yml:
+#   tempo -config.file=/etc/tempo/tempo-config.yml
+#
+# Minimal single-binary Tempo for local development:
+#   * receives OTLP traces (gRPC :4317 / HTTP :4318) — fed by the OTel
+#     Collector's otlphttp exporter; the collector is the only client, but
+#     the ports accept any OTLP sender
+#   * local-backend storage under /var/tempo (named volume `tempo-data`)
+#   * 48h trace retention (compactor drops older blocks)
+#   * queried from Grafana (datasource uid `animaxia-tempo`, http://tempo:3200)
+#
+# The Animaxia services speak W3C traceparent end-to-end: the gateway injects
+# trace ids into upstream serviceFetch calls, every service also returns the
+# trace id in the `x-trace-id` response header — that value is the Tempo
+# trace id (Grafana Explore → Tempo → search by TraceID).
+# =============================================================================
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal             # write-ahead log (explicit: keep it on the volume)
+    local:
+      path: /var/tempo/traces          # blocks live here (volume `tempo-data`)
+    pool:
+      max_workers: 100                 # pooler for local-backend block reads
+
+# Drop trace blocks older than 48h (dev retention; raise for staging).
+compactor:
+  compaction:
+    block_retention: 48h
+
+# No need to phone home from a dev box.
+usage_report:
+  reporting_enabled: false
+
+# NOTE — Kubernetes / production: switch backend to S3/GCS (or the Tempo
+# Helm chart with distributed mode). Local filesystem storage is for the
+# single-binary docker profile only (see observability/README.md).

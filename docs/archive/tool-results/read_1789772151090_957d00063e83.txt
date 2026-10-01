@@ -1,0 +1,859 @@
+     1→/**
+     2→ * modules/aicloud/vector-service.js — Vector DB + embeddings (Phase 4, req 2).
+     3→ *
+     4→ * Embeds three families of Animaxia data and answers similarity searches:
+     5→ *   • content embeddings — titles, descriptions, genres, tags of every
+     6→ *     library row (auto-indexed at boot and on the `content:changed` event)
+     7→ *   • user embeddings    — preferences + watch-history + likes per user
+     8→ *   • feed embeddings    — recent platform activity (comments, new content)
+     9→ *   • memory embeddings  — animaxiaAssistant long-term memory (kind 'memory')
+    10→ *
+    11→ * Pluggable backend selected by VECTOR_BACKEND (default 'auto'):
+    12→ *   • 'pgvector'  — Neon Postgres + pgvector (`vectorembeddings` table,
+    13→ *                   cosine via the `<=>` operator, ivfflat index)
+    14→ *   • 'mock'      — in-memory store with JS cosine (offline fallback, always
+    15→ *                   available — the "mock vector" of the config contract)
+    16→ *   • 'qdrant'    — external Qdrant adapter (QDRANTURL[, QDRANTAPIKEY]),
+    17→ *                   one collection per kind (animaxia-content, animaxia-user…)
+    18→ *   • 'pinecone'  — external Pinecone adapter (PINECONEURL + PINECONEAPIKEY)
+    19→ *   • 'auto'      — pgvector when the extension + table initialized, else mock
+    20→ * Any backend failure (offline adapter, SQL hiccup) auto-degrades to mock.
+    21→ *
+    22→ * Embedding provider: 'local-hash-256' by default (deterministic FNV-1a
+    23→ * bag-of-words + bigrams over 256 dims — no key needed); when
+    24→ * AI_PROVIDER=openai + AI_API_KEY are set, OpenAI text-embedding-3-small with
+    25→ * dimensions=256 is used instead. All vectors are L2-normalized.
+    26→ *
+    27→ * Programmatic API (used by rag-engine / tools / agent / personal):
+    28→ *   initVectorBackend(), vectorStatus(), embedTexts(texts),
+    29→ *   indexContent({ids}), indexUser(user), indexFeed(limit),
+    30→ *   vectorSearch({ query, kind, topK, userId }),
+    31→ *   storeMemory(userId, text, metadata), searchMemories(userId, query, k)
+    32→ */
+    33→
+    34→import crypto from 'node:crypto';
+    35→import { listContent, getContentById } from '../../db.js';
+    36→import { rows, one, jsonb, parseJsonb } from '../platform/sql.js';
+    37→import { events } from '../platform/events.js';
+    38→import { logger } from '../../utils/logger.js';
+    39→
+    40→const EMBED_DIMS = 256;
+    41→const MEMORY_CAP_PER_USER = 50; // mock backend retention cap
+    42→const CONTENT_INDEX_CAP = 600; // max content rows to index per pass
+    43→
+    44→/* ------------------------------ text utilities ----------------------------- */
+    45→
+    46→/** Lowercase, split on non-alphanumerics, drop tokens shorter than 2 chars. */
+    47→function tokenize(text) {
+    48→  return String(text || '')
+    49→    .toLowerCase()
+    50→    .split(/[^a-z0-9]+/)
+    51→    .filter((t) => t.length >= 2);
+    52→}
+    53→
+    54→/** FNV-1a 32-bit hash of a token. */
+    55→function hashToken(token) {
+    56→  let h = 0x811c9dc5;
+    57→  for (let i = 0; i < token.length; i += 1) {
+    58→    h ^= token.charCodeAt(i);
+    59→    h = Math.imul(h, 0x01000193) >>> 0;
+    60→  }
+    61→  return h >>> 0;
+    62→}
+    63→
+    64→/** Deterministic local embedding: unigrams + bigrams hashed into EMBED_DIMS. */
+    65→function embedLocal(text) {
+    66→  const vec = new Array(EMBED_DIMS).fill(0);
+    67→  const tokens = tokenize(text);
+    68→  const grams = [...tokens];
+    69→  for (let i = 0; i + 1 < tokens.length; i += 1) grams.push(`${tokens[i]}_${tokens[i + 1]}`);
+    70→  for (const gram of grams) vec[hashToken(gram) % EMBED_DIMS] += 1;
+    71→  const norm = Math.sqrt(vec.reduce((acc, v) => acc + v * v, 0)) || 1;
+    72→  return vec.map((v) => v / norm);
+    73→}
+    74→
+    75→/** Cosine similarity between two equal-length vectors. */
+    76→function cosine(a, b) {
+    77→  let dot = 0;
+    78→  let na = 0;
+    79→  let nb = 0;
+    80→  for (let i = 0; i < a.length; i += 1) {
+    81→    dot += a[i] * b[i];
+    82→    na += a[i] * a[i];
+    83→    nb += b[i] * b[i];
+    84→  }
+    85→  if (!na || !nb) return 0;
+    86→  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+    87→}
+    88→
+    89→function refKey(item) {
+    90→  return `${item.kind}:${item.refid ?? 0}:${item.userid ?? 0}`;
+    91→}
+    92→
+    93→/* ---------------------------- embedding provider --------------------------- */
+    94→
+    95→let embedProvider = 'local-hash-256';
+    96→
+    97→/** Batch-embed texts with the active embedding provider. */
+    98→export async function embedTexts(texts) {
+    99→  const list = Array.isArray(texts) ? texts : [texts];
+   100→  const useOpenai =
+   101→    (process.env.AI_PROVIDER || 'z-ai').toLowerCase() === 'openai' && Boolean(process.env.AI_API_KEY);
+   102→  if (useOpenai) {
+   103→    try {
+   104→      const controller = new AbortController();
+   105→      const timer = setTimeout(() => controller.abort(), 20000);
+   106→      if (typeof timer.unref === 'function') timer.unref();
+   107→      const res = await fetch('https://api.openai.com/v1/embeddings', {
+   108→        method: 'POST',
+   109→        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AI_API_KEY}` },
+   110→        body: JSON.stringify({ model: 'text-embedding-3-small', input: list, dimensions: EMBED_DIMS }),
+   111→        signal: controller.signal,
+   112→      });
+   113→      clearTimeout(timer);
+   114→      if (!res.ok) throw new Error(`openai embeddings ${res.status}`);
+   115→      const json = await res.json();
+   116→      const vectors = json.data
+   117→        .sort((a, b) => a.index - b.index)
+   118→        .map((d) => d.embedding.map(Number));
+   119→      if (vectors.length === list.length) {
+   120→        embedProvider = 'openai-256';
+   121→        return vectors;
+   122→      }
+   123→      throw new Error('embedding count mismatch');
+   124→    } catch (err) {
+   125→      logger.warn(`[aicloud] openai embeddings failed (${err.message}) — using local-hash`);
+   126→    }
+   127→  }
+   128→  embedProvider = 'local-hash-256';
+   129→  return list.map((t) => embedLocal(t));
+   130→}
+   131→
+   132→/* ------------------------------ mock backend ------------------------------- */
+   133→
+   134→class MemoryBackend {
+   135→  constructor() {
+   136→    this.name = 'mock';
+   137→    /** @type {Map<string, object>} refkey → record */
+   138→    this.store = new Map();
+   139→  }
+   140→
+   141→  async upsert(items) {
+   142→    for (const item of items) {
+   143→      const key = refKey(item);
+   144→      this.store.set(key, {
+   145→        kind: item.kind,
+   146→        refid: item.refid ?? 0,
+   147→        userid: item.userid ?? null,
+   148→        vector: item.vector,
+   149→        text: item.text || '',
+   150→        metadata: item.metadata || {},
+   151→        updatedat: new Date().toISOString(),
+   152→      });
+   153→    }
+   154→    // Memory retention cap (per user, newest wins).
+   155→    if (items.some((i) => i.kind === 'memory')) {
+   156→      const byUser = new Map();
+   157→      for (const rec of [...this.store.values()].filter((r) => r.kind === 'memory')) {
+   158→        const uid = rec.userid ?? 0;
+   159→        if (!byUser.has(uid)) byUser.set(uid, []);
+   160→        byUser.get(uid).push(rec);
+   161→      }
+   162→      for (const [uid, recs] of byUser) {
+   163→        if (recs.length > MEMORY_CAP_PER_USER) {
+   164→          recs.sort((a, b) => String(a.updatedat).localeCompare(String(b.updatedat)));
+   165→          for (const old of recs.slice(0, recs.length - MEMORY_CAP_PER_USER)) {
+   166→            this.store.delete(refKey({ kind: 'memory', refid: old.refid, userid: uid }));
+   167→          }
+   168→        }
+   169→      }
+   170→    }
+   171→    return items.length;
+   172→  }
+   173→
+   174→  async search({ vector, kind, topK, userId }) {
+   175→    const results = [];
+   176→    for (const rec of this.store.values()) {
+   177→      if (kind && rec.kind !== kind) continue;
+   178→      if (userId != null && rec.userid !== userId) continue;
+   179→      if (kind === 'memory' && userId == null) continue; // memories are private
+   180→      results.push({
+   181→        refkey: refKey(rec),
+   182→        kind: rec.kind,
+   183→        refid: rec.refid,
+   184→        userid: rec.userid,
+   185→        score: cosine(vector, rec.vector),
+   186→        text: rec.text,
+   187→        metadata: rec.metadata,
+   188→      });
+   189→    }
+   190→    results.sort((a, b) => b.score - a.score);
+   191→    return results.slice(0, topK);
+   192→  }
+   193→
+   194→  async counts() {
+   195→    const acc = {};
+   196→    for (const rec of this.store.values()) acc[rec.kind] = (acc[rec.kind] || 0) + 1;
+   197→    return acc;
+   198→  }
+   199→
+   200→  async removeKind(kind) {
+   201→    let removed = 0;
+   202→    for (const [key, rec] of this.store) {
+   203→      if (rec.kind === kind) {
+   204→        this.store.delete(key);
+   205→        removed += 1;
+   206→      }
+   207→    }
+   208→    return removed;
+   209→  }
+   210→}
+   211→
+   212→/* ----------------------------- pgvector backend ---------------------------- */
+   213→
+   214→class PgVectorBackend {
+   215→  constructor() {
+   216→    this.name = 'pgvector';
+   217→  }
+   218→
+   219→  async upsert(items) {
+   220→    if (!items.length) return 0;
+   221→    for (const item of items) {
+   222→      await rows(
+   223→        `INSERT INTO vectorembeddings (refkey, kind, refid, userid, dims, embedding, metadata, contenttext)
+   224→         VALUES ($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8)
+   225→         ON CONFLICT (refkey) DO UPDATE SET
+   226→           embedding = EXCLUDED.embedding,
+   227→           dims = EXCLUDED.dims,
+   228→           metadata = EXCLUDED.metadata,
+   229→           contenttext = EXCLUDED.contenttext,
+   230→           updatedat = NOW()`,
+   231→        [
+   232→          refKey(item),
+   233→          item.kind,
+   234→          item.refid ?? 0,
+   235→          item.userid ?? null,
+   236→          EMBED_DIMS,
+   237→          `[${item.vector.join(',')}]`,
+   238→          jsonb(item.metadata || {}),
+   239→          String(item.text || '').slice(0, 4000),
+   240→        ],
+   241→      );
+   242→    }
+   243→    return items.length;
+   244→  }
+   245→
+   246→  async search({ vector, kind, topK, userId }) {
+   247→    const vectorLiteral = `[${vector.join(',')}]`;
+   248→    const params = [vectorLiteral];
+   249→    let where = 'kind = $2';
+   250→    params.push(kind);
+   251→    if (kind === 'memory' && userId != null) {
+   252→      where += ' AND userid = $3';
+   253→      params.push(userId);
+   254→    } else if (userId != null && kind === 'user') {
+   255→      where += ' AND userid = $3';
+   256→      params.push(userId);
+   257→    }
+   258→    params.push(Math.max(1, Math.min(50, topK)));
+   259→    const found = await rows(
+   260→      `SELECT refkey, kind, refid, userid, 1 - (embedding <=> $1::vector) AS score,
+   261→              metadata, contenttext
+   262→       FROM vectorembeddings
+   263→       WHERE ${where}
+   264→       ORDER BY embedding <=> $1::vector
+   265→       LIMIT $${params.length}`,
+   266→      params,
+   267→    );
+   268→    return found.map((r) => ({
+   269→      refkey: r.refkey,
+   270→      kind: r.kind,
+   271→      refid: Number(r.refid),
+   272→      userid: r.userid == null ? null : Number(r.userid),
+   273→      score: Number(r.score),
+   274→      text: r.contenttext,
+   275→      metadata: parseJsonb(r.metadata, {}),
+   276→    }));
+   277→  }
+   278→
+   279→  async counts() {
+   280→    const found = await rows(`SELECT kind, COUNT(*)::int AS count FROM vectorembeddings GROUP BY kind`);
+   281→    return found.reduce((acc, r) => {
+   282→      acc[r.kind] = r.count;
+   283→      return acc;
+   284→    }, {});
+   285→  }
+   286→
+   287→  async removeKind(kind) {
+   288→    await rows(`DELETE FROM vectorembeddings WHERE kind = $1`, [kind]);
+   289→    return true;
+   290→  }
+   291→}
+   292→
+   293→/* ------------------------- external REST adapters --------------------------- */
+   294→
+   295→/** Minimal shared REST helper with timeout. */
+   296→async function restJson(url, { method = 'POST', headers = {}, body = null, timeoutMs = 8000 } = {}) {
+   297→  const controller = new AbortController();
+   298→  const timer = setTimeout(() => controller.abort(), timeoutMs);
+   299→  if (typeof timer.unref === 'function') timer.unref();
+   300→  try {
+   301→    const res = await fetch(url, {
+   302→      method,
+   303→      headers: { 'Content-Type': 'application/json', ...headers },
+   304→      body: body ? JSON.stringify(body) : undefined,
+   305→      signal: controller.signal,
+   306→    });
+   307→    if (!res.ok) throw new Error(`${res.status}`);
+   308→    return res.status === 204 ? null : res.json();
+   309→  } finally {
+   310→    clearTimeout(timer);
+   311→  }
+   312→}
+   313→
+   314→function pointId(refkey) {
+   315→  return crypto.createHash('sha1').update(refkey).digest('hex').slice(0, 16);
+   316→}
+   317→
+   318→/** Qdrant adapter — one collection per kind, points carry the full payload. */
+   319→class QdrantBackend {
+   320→  constructor(baseUrl) {
+   321→    this.name = 'qdrant';
+   322→    this.baseUrl = String(baseUrl || 'http://localhost:6333').replace(/\/$/, '');
+   323→    this.headers = process.env.QDRANTAPIKEY ? { 'api-key': process.env.QDRANTAPIKEY } : {};
+   324→  }
+   325→
+   326→  collection(kind) {
+   327→    return `animaxia-${kind}`;
+   328→  }
+   329→
+   330→  async upsert(items) {
+   331→    for (const item of items) {
+   332→      const collection = this.collection(item.kind);
+   333→      try {
+   334→        await restJson(`${this.baseUrl}/collections/${collection}`, {
+   335→          method: 'PATCH',
+   336→          headers: this.headers,
+   337→          body: { vectors: { size: EMBED_DIMS, distance: 'Cosine' } },
+   338→        });
+   339→      } catch {
+   340→        /* collection exists — ignore create errors */
+   341→      }
+   342→      await restJson(`${this.baseUrl}/collections/${collection}/points?wait=true`, {
+   343→        headers: this.headers,
+   344→        body: {
+   345→          points: [
+   346→            {
+   347→              id: pointId(refKey(item)),
+   348→              vector: item.vector,
+   349→              payload: {
+   350→                refkey: refKey(item),
+   351→                kind: item.kind,
+   352→                refid: item.refid ?? 0,
+   353→                userid: item.userid ?? null,
+   354→                text: String(item.text || '').slice(0, 4000),
+   355→                metadata: item.metadata || {},
+   356→              },
+   357→            },
+   358→          ],
+   359→        },
+   360→      });
+   361→    }
+   362→    return items.length;
+   363→  }
+   364→
+   365→  async search({ vector, kind, topK, userId }) {
+   366→    const filter =
+   367→      kind === 'memory' && userId != null
+   368→        ? { must: [{ key: 'kind', match: { value: kind } }, { key: 'userid', match: { integer: userId } }] }
+   369→        : { must: [{ key: 'kind', match: { value: kind } }] };
+   370→    const json = await restJson(`${this.baseUrl}/collections/${this.collection(kind)}/points/search`, {
+   371→      headers: this.headers,
+   372→      body: { vector, limit: topK, with_payload: true, filter },
+   373→    });
+   374→    return (json?.result || []).map((p) => ({
+   375→      refkey: p.payload?.refkey ?? p.id,
+   376→      kind: p.payload?.kind ?? kind,
+   377→      refid: p.payload?.refid ?? 0,
+   378→      userid: p.payload?.userid ?? null,
+   379→      score: p.score,
+   380→      text: p.payload?.text ?? '',
+   381→      metadata: p.payload?.metadata ?? {},
+   382→    }));
+   383→  }
+   384→
+   385→  async counts() {
+   386→    const kinds = ['content', 'user', 'feed', 'memory'];
+   387→    const acc = {};
+   388→    for (const kind of kinds) {
+   389→      try {
+   390→        const json = await restJson(`${this.baseUrl}/collections/${this.collection(kind)}`, {
+   391→          method: 'GET',
+   392→          headers: this.headers,
+   393→        });
+   394→        acc[kind] = json?.result?.points_count ?? 0;
+   395→      } catch {
+   396→        acc[kind] = 0;
+   397→      }
+   398→    }
+   399→    return acc;
+   400→  }
+   401→
+   402→  async removeKind(kind) {
+   403→    await restJson(`${this.baseUrl}/collections/${this.collection(kind)}`, {
+   404→      method: 'DELETE',
+   405→      headers: this.headers,
+   406→    });
+   407→    return true;
+   408→  }
+   409→}
+   410→
+   411→/** Pinecone adapter — single namespace-per-kind over one index. */
+   412→class PineconeBackend {
+   413→  constructor(baseUrl) {
+   414→    this.name = 'pinecone';
+   415→    this.baseUrl = String(baseUrl || '').replace(/\/$/, '');
+   416→    this.headers = { 'Api-Key': process.env.PINECONEAPIKEY || '' };
+   417→  }
+   418→
+   419→  async upsert(items) {
+   420→    const vectors = items.map((item) => ({
+   421→      id: pointId(refKey(item)),
+   422→      values: item.vector,
+   423→      metadata: {
+   424→        refkey: refKey(item),
+   425→        kind: item.kind,
+   426→        refid: Number(item.refid ?? 0),
+   427→        userid: item.userid == null ? -1 : Number(item.userid),
+   428→        text: String(item.text || '').slice(0, 1000),
+   429→        ...Object.fromEntries(
+   430→          Object.entries(item.metadata || {}).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : v]),
+   431→        ),
+   432→      },
+   433→    }));
+   434→    await restJson(`${this.baseUrl}/vectors/upsert`, {
+   435→      headers: this.headers,
+   436→      body: { vectors, namespace: 'animaxia' },
+   437→    });
+   438→    return items.length;
+   439→  }
+   440→
+   441→  async search({ vector, kind, topK, userId }) {
+   442→    const filter = { kind: { $eq: kind } };
+   443→    if (kind === 'memory' && userId != null) filter.userid = { $eq: userId };
+   444→    const json = await restJson(`${this.baseUrl}/query`, {
+   445→      headers: this.headers,
+   446→      body: { vector, topK, includeMetadata: true, namespace: 'animaxia', filter },
+   447→    });
+   448→    return (json?.matches || []).map((m) => ({
+   449→      refkey: m.metadata?.refkey ?? m.id,
+   450→      kind: m.metadata?.kind ?? kind,
+   451→      refid: Number(m.metadata?.refid ?? 0),
+   452→      userid: m.metadata?.userid == null || m.metadata?.userid === -1 ? null : Number(m.metadata?.userid),
+   453→      score: m.score,
+   454→      text: m.metadata?.text ?? '',
+   455→      metadata: { ...m.metadata, text: undefined, refkey: undefined, kind: undefined, refid: undefined, userid: undefined },
+   456→    }));
+   457→  }
+   458→
+   459→  async counts() {
+   460→    // Pinecone has no cheap count — describe_index_stats on the namespace.
+   461→    try {
+   462→      const json = await restJson(`${this.baseUrl}/describe_index_stats`, {
+   463→        headers: this.headers,
+   464→        body: { filter: {} },
+   465→      });
+   466→      const total = json?.namespaces?.animaxia?.vectorCount ?? 0;
+   467→      return { total };
+   468→    } catch {
+   469→      return { total: 0 };
+   470→    }
+   471→  }
+   472→
+   473→  async removeKind(kind) {
+   474→    await restJson(`${this.baseUrl}/vectors/delete`, {
+   475→      headers: this.headers,
+   476→      body: { deleteAll: false, filter: { kind: { $eq: kind } }, namespace: 'animaxia' },
+   477→    });
+   478→    return true;
+   479→  }
+   480→}
+   481→
+   482→/* ----------------------------- backend resolution --------------------------- */
+   483→
+   484→const memoryBackend = new MemoryBackend();
+   485→let activeBackend = memoryBackend;
+   486→let configuredBackend = 'auto';
+   487→let lastIndexedAt = null;
+   488→let reindexTimer = null;
+   489→
+   490→/**
+   491→ * Try to initialize pgvector (extension + table + index). Returns true when
+   492→ * the pgvector backend is usable. Never throws.
+   493→ */
+   494→export async function ensureVectorSchema() {
+   495→  try {
+   496→    await rows('CREATE EXTENSION IF NOT EXISTS vector');
+   497→    const ext = await one(`SELECT extname FROM pg_extension WHERE extname = 'vector'`);
+   498→    if (!ext) return false;
+   499→    await rows(`
+   500→      CREATE TABLE IF NOT EXISTS vectorembeddings (
+   501→        id SERIAL PRIMARY KEY,
+   502→        refkey TEXT UNIQUE NOT NULL,
+   503→        kind TEXT NOT NULL,
+   504→        refid INTEGER NOT NULL DEFAULT 0,
+   505→        userid INTEGER,
+   506→        dims INTEGER NOT NULL DEFAULT ${EMBED_DIMS},
+   507→        embedding vector(${EMBED_DIMS}) NOT NULL,
+   508→        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+   509→        contenttext TEXT,
+   510→        createdat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+   511→        updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   512→      )`);
+   513→    await rows(`CREATE INDEX IF NOT EXISTS idx_vectorembeddings_kind ON vectorembeddings (kind)`);
+   514→    // Exact (seq-scan) cosine search is faster AND correct for small/medium
+   515→    // corpora: an ivfflat index with lists > row count returns empty results
+   516→    // (pgvector probes only 1 list by default), so we drop any stale one.
+   517→    await rows(`DROP INDEX IF EXISTS idx_vectorembeddings_cos`);
+   518→    return true;
+   519→  } catch (err) {
+   520→    logger.debug(`[aicloud] pgvector unavailable: ${err.message}`);
+   521→    return false;
+   522→  }
+   523→}
+   524→
+   525→/** Resolve the active backend from VECTOR_BACKEND + availability. Idempotent. */
+   526→export async function initVectorBackend() {
+   527→  configuredBackend = (process.env.VECTOR_BACKEND || 'auto').toLowerCase();
+   528→  const fallbackToMock = (reason) => {
+   529→    activeBackend = memoryBackend;
+   530→    logger.warn(`[aicloud] vector backend → mock (${reason})`);
+   531→  };
+   532→
+   533→  if (configuredBackend === 'mock') {
+   534→    activeBackend = memoryBackend;
+   535→  } else if (configuredBackend === 'qdrant') {
+   536→    const backend = new QdrantBackend(process.env.QDRANTURL);
+   537→    try {
+   538→      await restJson(`${backend.baseUrl}/collections`, { method: 'GET', headers: backend.headers, timeoutMs: 4000 });
+   539→      activeBackend = backend;
+   540→    } catch (err) {
+   541→      fallbackToMock(`qdrant unreachable: ${err.message}`);
+   542→    }
+   543→  } else if (configuredBackend === 'pinecone') {
+   544→    if (process.env.PINECONEURL && process.env.PINECONEAPIKEY) {
+   545→      activeBackend = new PineconeBackend(process.env.PINECONEURL);
+   546→    } else {
+   547→      fallbackToMock('pinecone requires PINECONEURL + PINECONEAPIKEY');
+   548→    }
+   549→  } else {
+   550→    // 'auto' | 'pgvector' — pgvector when the extension is available.
+   551→    const ok = await ensureVectorSchema();
+   552→    if (ok) activeBackend = new PgVectorBackend();
+   553→    else if (configuredBackend === 'pgvector') fallbackToMock('pgvector extension not available');
+   554→    else activeBackend = memoryBackend;
+   555→  }
+   556→
+   557→  logger.info(
+   558→    `[aicloud] vector backend: ${activeBackend.name} (configured: ${configuredBackend}, embeds: ${embedProvider})`,
+   559→  );
+   560→  return activeBackend.name;
+   561→}
+   562→
+   563→/** Run an operation on the active backend, auto-degrading to mock on failure. */
+   564→async function withBackend(fn) {
+   565→  try {
+   566→    return await fn(activeBackend);
+   567→  } catch (err) {
+   568→    logger.warn(`[aicloud] vector backend ${activeBackend.name} failed (${err.message}) — degrading to mock`);
+   569→    activeBackend = memoryBackend;
+   570→    return fn(activeBackend);
+   571→  }
+   572→}
+   573→
+   574→/* ------------------------------ doc construction --------------------------- */
+   575→
+   576→function metaOf(row) {
+   577→  const meta = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+   578→  return {
+   579→    contentid: Number(row?.id ?? 0),
+   580→    title: row?.title ?? '',
+   581→    type: row?.type ?? '',
+   582→    thumbnail: row?.thumbnail ?? null,
+   583→    genres: Array.isArray(meta.genres) ? meta.genres.map(String) : [],
+   584→    rating: typeof meta.rating === 'number' ? meta.rating : typeof meta.score === 'number' ? meta.score : null,
+   585→    year: meta.year ?? null,
+   586→    source: typeof meta.source === 'string' ? meta.source : null,
+   587→  };
+   588→}
+   589→
+   590→/** Embedding text for a content row: title + type + genres + description. */
+   591→export function contentDocText(row) {
+   592→  const meta = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+   593→  const genres = Array.isArray(meta.genres) ? meta.genres.join(', ') : '';
+   594→  const description = [meta.overview, meta.synopsis, meta.description].filter(Boolean).join(' ');
+   595→  const tags = Array.isArray(meta.tags) ? meta.tags.join(', ') : '';
+   596→  return [
+   597→    `${row?.title || ''} [${row?.type || 'title'}]`,
+   598→    genres ? `genres: ${genres}` : '',
+   599→    tags ? `tags: ${tags}` : '',
+   600→    description,
+   601→  ]
+   602→    .filter(Boolean)
+   603→    .join('. ')
+   604→    .slice(0, 1800);
+   605→}
+   606→
+   607→/* --------------------------------- indexing -------------------------------- */
+   608→
+   609→/** Index (all or selected) content rows. @returns {{ indexed, backend }} */
+   610→export async function indexContent({ ids = null } = {}) {
+   611→  let docs = [];
+   612→  if (Array.isArray(ids) && ids.length > 0) {
+   613→    const rowsOut = [];
+   614→    for (const id of ids.slice(0, 100)) {
+   615→      const row = await getContentById(id);
+   616→      if (row) rowsOut.push(row);
+   617→    }
+   618→    docs = rowsOut.map((row) => ({ row, text: contentDocText(row), meta: metaOf(row) }));
+   619→  } else {
+   620→    let page = 1;
+   621→    let total = Infinity;
+   622→    while (docs.length < Math.min(CONTENT_INDEX_CAP, total)) {
+   623→      const result = await listContent({ page, limit: 100 });
+   624→      total = result.total;
+   625→      for (const row of result.data) {
+   626→        docs.push({ row, text: contentDocText(row), meta: metaOf(row) });
+   627→      }
+   628→      if (page >= result.totalPages || result.data.length === 0) break;
+   629→      page += 1;
+   630→    }
+   631→  }
+   632→  if (docs.length === 0) return { indexed: 0, backend: activeBackend.name };
+   633→
+   634→  const vectors = await embedTexts(docs.map((d) => d.text));
+   635→  const items = docs.map((doc, i) => ({
+   636→    kind: 'content',
+   637→    refid: doc.row.id,
+   638→    userid: null,
+   639→    vector: vectors[i],
+   640→    text: doc.text,
+   641→    metadata: doc.meta,
+   642→  }));
+   643→  await withBackend((backend) => backend.upsert(items));
+   644→  lastIndexedAt = new Date().toISOString();
+   645→  logger.info(`[aicloud] indexed ${items.length} content embeddings (${activeBackend.name})`);
+   646→  return { indexed: items.length, backend: activeBackend.name };
+   647→}
+   648→
+   649→/**
+   650→ * Index one user's taste embedding: preferences + watch history + likes.
+   651→ * @returns {{ indexed: number, backend: string, text: string }}
+   652→ */
+   653→export async function indexUser(user) {
+   654→  if (!user || user.id == null) throw Object.assign(new Error('Authentication required'), { status: 401 });
+   655→  const prefs = user.preferences && typeof user.preferences === 'object' ? user.preferences : {};
+   656→  const parts = [
+   657→    `user ${user.username} on the ${user.plan || 'free'} plan`,
+   658→    Array.isArray(prefs.types) && prefs.types.length ? `favorite types: ${prefs.types.join(', ')}` : '',
+   659→    Array.isArray(prefs.genres) && prefs.genres.length ? `favorite genres: ${prefs.genres.join(', ')}` : '',
+   660→    Array.isArray(prefs.franchises) && prefs.franchises.length ? `loves franchises: ${prefs.franchises.join(', ')}` : '',
+   661→  ];
+   662→
+   663→  try {
+   664→    const history = await rows(
+   665→      `SELECT c.title, c.metadata FROM watchhistory wh JOIN content c ON c.id = wh.contentid
+   666→       WHERE wh.userid = $1 ORDER BY wh.watchedat DESC LIMIT 15`,
+   667→      [user.id],
+   668→    );
+   669→    const titles = [];
+   670→    const genres = new Set();
+   671→    for (const r of history) {
+   672→      titles.push(r.title);
+   673→      const meta = parseJsonb(r.metadata, {});
+   674→      if (Array.isArray(meta.genres)) meta.genres.forEach((g) => genres.add(String(g)));
+   675→    }
+   676→    if (titles.length) parts.push(`recently watched: ${titles.join(', ')}`);
+   677→    if (genres.size) parts.push(`watch-history genres: ${[...genres].join(', ')}`);
+   678→
+   679→    const likes = await rows(
+   680→      `SELECT c.title FROM contentlikes cl JOIN content c ON c.id = cl.contentid
+   681→       WHERE cl.userid = $1 AND cl.value = 1 ORDER BY cl.createdat DESC LIMIT 10`,
+   682→      [user.id],
+   683→    );
+   684→    if (likes.length) parts.push(`liked: ${likes.map((r) => r.title).join(', ')}`);
+   685→  } catch (err) {
+   686→    logger.debug(`[aicloud] indexUser history enrichment skipped: ${err.message}`);
+   687→  }
+   688→
+   689→  const text = parts.filter(Boolean).join('. ').slice(0, 1500);
+   690→  const [vector] = await embedTexts([text]);
+   691→  await withBackend((backend) =>
+   692→    backend.upsert([{ kind: 'user', refid: user.id, userid: user.id, vector, text, metadata: { username: user.username, plan: user.plan || 'free' } }]),
+   693→  );
+   694→  return { indexed: 1, backend: activeBackend.name, text };
+   695→}
+   696→
+   697→/**
+   698→ * Index recent feed activity (comments + new content) for feed RAG.
+   699→ * @returns {{ indexed: number, backend: string }}
+   700→ */
+   701→export async function indexFeed(limit = 40) {
+   702→  const activities = [];
+   703→  try {
+   704→    const comments = await rows(
+   705→      `SELECT cm.id, cm.body, cm.createdat, c.title AS contenttitle
+   706→       FROM comments cm LEFT JOIN content c ON c.id = cm.contentid
+   707→       ORDER BY cm.createdat DESC LIMIT $1`,
+   708→      [limit],
+   709→    );
+   710→    for (const r of comments) {
+   711→      activities.push({
+   712→        kind: 'feed',
+   713→        refid: Number(r.id),
+   714→        text: `comment on ${r.contenttitle || 'content'}: ${r.body}`.slice(0, 500),
+   715→        metadata: { feedtype: 'comment', contenttitle: r.contenttitle },
+   716→      });
+   717→    }
+   718→    const content = await listContent({ page: 1, limit });
+   719→    for (const row of content.data) {
+   720→      activities.push({
+   721→        kind: 'feed',
+   722→        refid: Number(row.id) + 1000000, // avoid ref collisions with comment ids
+   723→        text: `new ${row.type || 'title'} on Animaxia: ${row.title}`.slice(0, 500),
+   724→        metadata: { feedtype: 'content', contentid: row.id, title: row.title, thumbnail: row.thumbnail, type: row.type },
+   725→      });
+   726→    }
+   727→  } catch (err) {
+   728→    logger.debug(`[aicloud] indexFeed enrichment skipped: ${err.message}`);
+   729→  }
+   730→  if (!activities.length) return { indexed: 0, backend: activeBackend.name };
+   731→
+   732→  const vectors = await embedTexts(activities.map((a) => a.text));
+   733→  const items = activities.map((a, i) => ({
+   734→    kind: 'feed',
+   735→    refid: a.refid,
+   736→    userid: null,
+   737→    vector: vectors[i],
+   738→    text: a.text,
+   739→    metadata: a.metadata,
+   740→  }));
+   741→  await withBackend((backend) => backend.upsert(items));
+   742→  return { indexed: items.length, backend: activeBackend.name };
+   743→}
+   744→
+   745→/* ------------------------------ memory (agent) ----------------------------- */
+   746→
+   747→/** Store one long-term agent memory for a user. */
+   748→export async function storeMemory(userId, text, metadata = {}) {
+   749→  const [vector] = await embedTexts([String(text).slice(0, 1000)]);
+   750→  // refid must fit a Postgres INTEGER (2^31-1) — ms timestamp modulo keeps it
+   751→  // unique enough per (kind, userid) while staying in range.
+   752→  await withBackend((backend) =>
+   753→    backend.upsert([
+   754→      {
+   755→        kind: 'memory',
+   756→        refid: Date.now() % 2000000000,
+   757→        userid: Number(userId),
+   758→        vector,
+   759→        text: String(text).slice(0, 1000),
+   760→        metadata,
+   761→      },
+   762→    ]),
+   763→  );
+   764→  return true;
+   765→}
+   766→
+   767→/** Recall the user's most similar long-term memories. */
+   768→export async function searchMemories(userId, query, k = 3) {
+   769→  const [vector] = await embedTexts([query]);
+   770→  const results = await withBackend((backend) =>
+   771→    backend.search({ vector, kind: 'memory', topK: Math.max(1, Math.min(10, k)), userId: Number(userId) }),
+   772→  );
+   773→  return results.map((r) => ({ score: r.score, text: r.text, metadata: r.metadata }));
+   774→}
+   775→
+   776→/* --------------------------------- search ---------------------------------- */
+   777→
+   778→/**
+   779→ * Vector similarity search (backs POST /api/vector/search and the RAG retrieve
+   780→ * step). Memories are never returned here — use searchMemories().
+   781→ *
+   782→ * @param {object} opts { query, kind ('content'|'user'|'feed'), topK, userId }
+   783→ * @returns {{ backend, embedProvider, dims, took, data }}
+   784→ */
+   785→export async function vectorSearch({ query, kind = 'content', topK = 8, userId = null }) {
+   786→  const started = Date.now();
+   787→  const safeKind = ['content', 'user', 'feed'].includes(kind) ? kind : 'content';
+   788→  const [vector] = await embedTexts([String(query || '').slice(0, 600)]);
+   789→  const results = await withBackend((backend) =>
+   790→    backend.search({ vector, kind: safeKind, topK: Math.max(1, Math.min(24, topK)), userId }),
+   791→  );
+   792→  return {
+   793→    backend: activeBackend.name,
+   794→    embedProvider,
+   795→    dims: EMBED_DIMS,
+   796→    took: Date.now() - started,
+   797→    data: results.map((r) => ({
+   798→      id: r.refkey,
+   799→      kind: r.kind,
+   800→      refid: r.refid,
+   801→      score: Number(r.score.toFixed(4)),
+   802→      title: r.metadata?.title ?? r.metadata?.username ?? r.text?.slice(0, 60) ?? '',
+   803→      type: r.metadata?.type ?? safeKind,
+   804→      thumbnail: r.metadata?.thumbnail ?? null,
+   805→      genres: Array.isArray(r.metadata?.genres) ? r.metadata.genres : [],
+   806→      snippet: String(r.text || '').slice(0, 220),
+   807→      metadata: r.metadata,
+   808→    })),
+   809→  };
+   810→}
+   811→
+   812→/** Status for GET /api/vector/status. */
+   813→export async function vectorStatus() {
+   814→  let counts = {};
+   815→  try {
+   816→    counts = await withBackend((backend) => backend.counts());
+   817→  } catch {
+   818→    counts = {};
+   819→  }
+   820→  return {
+   821→    backend: activeBackend.name,
+   822→    configured: configuredBackend,
+   823→    active: true,
+   824→    embedProvider,
+   825→    dims: EMBED_DIMS,
+   826→    counts,
+   827→    lastIndexedAt,
+   828→  };
+   829→}
+   830→
+   831→/* ------------------------- auto-index lifecycle ---------------------------- */
+   832→
+   833→let bootIndexed = false;
+   834→
+   835→/**
+   836→ * Boot hook (called by the aicloud router): resolve the backend, auto-index
+   837→ * content once in the background and re-index (debounced 30 s) whenever the
+   838→ * platform emits `content:changed`.
+   839→ */
+   840→export async function aicloudVectorBoot() {
+   841→  await initVectorBackend();
+   842→  if (!bootIndexed) {
+   843→    bootIndexed = true;
+   844→    // Background pass — never block the HTTP boot.
+   845→    setTimeout(() => {
+   846→      indexContent()
+   847→        .then((r) => indexFeed(30).catch(() => ({ indexed: 0 })))
+   848→        .catch((err) => logger.warn(`[aicloud] auto-index failed: ${err.message}`));
+   849→    }, 1500).unref?.();
+   850→  }
+   851→  events.on('content:changed', () => {
+   852→    clearTimeout(reindexTimer);
+   853→    reindexTimer = setTimeout(() => {
+   854→      indexContent().catch((err) => logger.warn(`[aicloud] re-index failed: ${err.message}`));
+   855→    }, 30000);
+   856→    if (typeof reindexTimer.unref === 'function') reindexTimer.unref();
+   857→  });
+   858→}
+   859→

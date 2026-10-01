@@ -1,0 +1,702 @@
+    42→    42→import { Input } from '@/components/ui/input';
+    43→    43→import { Skeleton } from '@/components/ui/skeleton';
+    44→    44→import { cn } from '@/lib/utils';
+    45→    45→import { Container } from '../section';
+    46→    46→import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+    47→    47→
+    48→    48→function isNotFound(message?: string | null): boolean {
+    49→    49→  return Boolean(message && message.toLowerCase().includes('not found'));
+    50→    50→}
+    51→    51→
+    52→    52→/** FAZA 21 — mm:ss clock for the resume toast. */
+    53→    53→function formatClock(sec: number): string {
+    54→    54→  const m = Math.floor(sec / 60);
+    55→    55→  const s = Math.floor(sec % 60);
+    56→    56→  return `${m}:${String(s).padStart(2, '0')}`;
+    57→    57→}
+    58→    58→
+    59→    59→function PlayerModeBadge({ mode }: { mode: PlayerResponse['mode'] }) {
+    60→    60→  if (mode === 'direct') {
+    61→    61→    return (
+    62→    62→      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+    63→    63→        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+    64→    64→        Direct stream
+    65→    65→      </span>
+    66→    66→    );
+    67→    67→  }
+    68→    68→  if (mode === 'trailer') {
+    69→    69→    return (
+    70→    70→      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-300">
+    71→    71→        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden />
+    72→    72→        YouTube trailer
+    73→    73→      </span>
+    74→    74→    );
+    75→    75→  }
+    76→    76→  return (
+    77→    77→    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-zinc-400">
+    78→    78→      <span className="h-1.5 w-1.5 rounded-full bg-zinc-500" aria-hidden />
+    79→    79→      No source
+    80→    80→    </span>
+    81→    81→  );
+    82→    82→}
+    83→    83→
+    84→    84→export function PlayerView({ route }: { route: AppRoute }) {
+    85→    85→  const { user } = useAuth();
+    86→    86→  const id = Number(route.params[0]);
+    87→    87→  const validId = Number.isInteger(id) && id > 0;
+    88→    88→  const player = useApi(`player-${id}`, () => api.player(id), { enabled: validId });
+    89→    89→
+    90→    90→  /* FAZA 17 — source fallback chain. `sourceIndex` walks data.sources on any
+    91→    91→     load failure (mp4/HLS error, 12s load timeout). `failedState` marks the
+    92→    92→     friendly end-of-chain card and is scoped to the content id so it can
+    93→    93→     never leak across titles. `reloadNonce` forces a fresh <video> mount when
+    94→    94→     retrying the same source. */
+    95→    95→  const [sourceIndex, setSourceIndex] = useState(0);
+    96→    96→  const [failedState, setFailedState] = useState<{ contentId: number; reason: string } | null>(null);
+    97→    97→  const [reloadNonce, setReloadNonce] = useState(0);
+    98→    98→  const [mineUrl, setMineUrl] = useState('');
+    99→    99→  const [mining, setMining] = useState(false);
+   100→   100→
+   101→   101→  const videoRef = useRef<HTMLVideoElement>(null);
+   102→   102→  const sourcesRef = useRef<PlayerSource[]>([]);
+   103→   103→  const sourceIndexRef = useRef(0);
+   104→   104→  const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   105→   105→  const lastAdvanceRef = useRef<{ key: string; at: number } | null>(null);
+   106→   106→
+   107→   107→  /* Only trust data matching the requested id — useApi keeps the previous
+   108→   108→     record alive while the key changes (stale data across titles). */
+   109→   109→  const current = player.data && player.data.content.id === id ? player.data : null;
+   110→   110→  const sources = current?.sources ?? [];
+   111→   111→  const exhausted = failedState != null && failedState.contentId === id && sources.length > 0;
+   112→   112→  const activeSource: PlayerSource | null = exhausted
+   113→   113→    ? null
+   114→   114→    : sources[sourceIndex] ?? current?.primary ?? null;
+   115→   115→
+   116→   116→  /** Clears the 12s load watchdog — any progress event calls this. */
+   117→   117→  const clearLoadTimer = useCallback(() => {
+   118→   118→    if (loadTimerRef.current) {
+   119→   119→      clearTimeout(loadTimerRef.current);
+   120→   120→      loadTimerRef.current = null;
+   121→   121→    }
+   122→   122→  }, []);
+   123→   123→
+   124→   124→  /** Advance to the next source on failure; when none remain, switch to the
+   125→   125→      friendly end-of-chain card instead of crashing. Duplicate signals for the
+   126→   126→      same attempt (e.g. hls.js error + element error) are coalesced. */
+   127→   127→  const advanceSource = useCallback(
+   128→   128→    (reason: string) => {
+   129→   129→      clearLoadTimer();
+   130→   130→      const list = sourcesRef.current;
+   131→   131→      const i = sourceIndexRef.current;
+   132→   132→      const key = `${id}:${i}:${reason}`;
+   133→   133→      const now = Date.now();
+   134→   134→      if (lastAdvanceRef.current && lastAdvanceRef.current.key === key && now - lastAdvanceRef.current.at < 1500) {
+   135→   135→        return;
+   136→   136→      }
+   137→   137→      lastAdvanceRef.current = { key, at: now };
+   138→   138→      if (i + 1 < list.length) {
+   139→   139→        sourceIndexRef.current = i + 1;
+   140→   140→        setSourceIndex(i + 1);
+   141→   141→        toast.info(`Sursa ${i + 1} nu răspunde (${reason}) — trec la următoarea…`);
+   142→   142→      } else {
+   143→   143→        setFailedState({ contentId: id, reason });
+   144→   144→      }
+   145→   145→    },
+   146→   146→    [id, clearLoadTimer],
+   147→   147→  );
+   148→   148→
+   149→   149→  /** Manual source chip click — clears the chain failure; clicking the chip of
+   150→   150→      the current source forces a clean reload of that source. */
+   151→   151→  const selectSource = (i: number) => {
+   152→   152→    if (i < 0 || i >= sources.length) return;
+   153→   153→    setFailedState(null);
+   154→   154→    if (i === sourceIndex) {
+   155→   155→      setReloadNonce((n) => n + 1);
+   156→   156→    } else {
+   157→   157→      sourceIndexRef.current = i;
+   158→   158→      setSourceIndex(i);
+   159→   159→    }
+   160→   160→  };
+   161→   161→
+   162→   162→  /** "Reîncearcă de la prima sursă" — reset the chain and remount the video. */
+   163→   163→  const retryFromFirst = () => {
+   164→   164→    setFailedState(null);
+   165→   165→    sourceIndexRef.current = 0;
+   166→   166→    setSourceIndex(0);
+   167→   167→    setReloadNonce((n) => n + 1);
+   168→   168→  };
+   169→   169→
+   170→   170→  /* New title (route change) → reset the fallback chain before the new data
+   171→   171→     ever renders, so no stale index/failure can flash. */
+   172→   172→  useEffect(() => {
+   173→   173→    sourceIndexRef.current = 0;
+   174→   174→    setSourceIndex(0);
+   175→   175→    setFailedState(null);
+   176→   176→  }, [id]);
+   177→   177→
+   178→   178→  /* Fresh sources (first load or refetch after mining) → start at the primary
+   179→   179→     source and force a clean reload of the player surface. */
+   180→   180→  useEffect(() => {
+   181→   181→    const d = player.data;
+   182→   182→    if (!d || d.content.id !== id) return;
+   183→   183→    sourcesRef.current = d.sources;
+   184→   184→    const primary = d.primary;
+   185→   185→    const primaryIndex = primary
+   186→   186→      ? d.sources.findIndex((s) => s.url === primary.url && s.type === primary.type)
+   187→   187→      : -1;
+   188→   188→    const start = primaryIndex >= 0 ? primaryIndex : 0;
+   189→   189→    sourceIndexRef.current = start;
+   190→   190→    setSourceIndex(start);
+   191→   191→    setFailedState(null);
+   192→   192→    setReloadNonce((n) => n + 1);
+   193→   193→  }, [player.data, id]);
+   194→   194→
+   195→   195→  /* ------------------------- analytics tracking ------------------------- */
+   196→   196→
+   197→   197→  const trackedViewRef = useRef<number | null>(null);
+   198→   198→  const trackedPlayRef = useRef<number | null>(null);
+   199→   199→
+   200→   200→  /* Fire-and-forget 'view' event, once per content id per mount. */
+   201→   201→  useEffect(() => {
+   202→   202→    if (!player.data || player.data.content.id !== id) return;
+   203→   203→    if (trackedViewRef.current === id) return;
+   204→   204→    trackedViewRef.current = id;
+   205→   205→    platform.recordView(id, 'view').catch(() => {});
+   206→   206→  }, [player.data, id]);
+   207→   207→
+   208→   208→  /* 'play' event for embed renderers (youtube/iframe), once per content id. */
+   209→   209→  useEffect(() => {
+   210→   210→    if (!player.data || player.data.content.id !== id) return;
+   211→   211→    const src = activeSource;
+   212→   212→    if (!src || (src.type !== 'youtube' && src.type !== 'iframe')) return;
+   213→   213→    if (trackedPlayRef.current === id) return;
+   214→   214→    trackedPlayRef.current = id;
+   215→   215→    platform.recordView(id, 'play').catch(() => {});
+   216→   216→  }, [player.data, activeSource, id]);
+   217→   217→
+   218→   218→  const trackPlay = () => {
+   219→   219→    if (trackedPlayRef.current === id) return;
+   220→   220→    trackedPlayRef.current = id;
+   221→   221→    platform.recordView(id, 'play').catch(() => {});
+   222→   222→  };
+   223→   223→
+   224→   224→  const trackComplete = () => {
+   225→   225→    platform.recordView(id, 'complete').catch(() => {});
+   226→   226→  };
+   227→   227→
+   228→   228→  /* ------------------- FAZA 21: history / resume / subtitles ------------------- */
+   229→   229→
+   230→   230→  /** Resume position from ?t= (seconds) — validated once per route param. */
+   231→   231→  const tParam = route.query.get('t');
+   232→   232→  const resumeT = (() => {
+   233→   233→    const t = Number(tParam);
+   234→   234→    return Number.isFinite(t) && t > 0 && t < 86_400 ? Math.floor(t) : 0;
+   235→   235→  })();
+   236→   236→
+   237→   237→  /** recordHistory — POST /api/users/me/history {contentId, progress} via the
+   238→   238→   *  existing platform client. Fire-and-forget, silent failures: never breaks
+   239→   239→   *  playback. Only native renderers expose video.currentTime (YouTube/iframe
+   240→   240→   *  embeds are honestly skipped). */
+   241→   241→  const recordTick = useCallback(() => {
+   242→   242→    if (!user || !validId) return;
+   243→   243→    const el = videoRef.current;
+   244→   244→    if (!el) return;
+   245→   245→    const t = Math.floor(el.currentTime);
+   246→   246→    if (!Number.isFinite(t) || t <= 0) return;
+   247→   247→    platform.recordHistory(id, t).catch(() => {});
+   248→   248→  }, [user, id, validId]);
+   249→   249→
+   250→   250→  /* Progress sync: every 10s while playing + a final flush on pause handled
+   251→   251→     by the onPause prop; the cleanup below flushes on unmount AND on source
+   252→   252→     change (deps include the active source), recording the last position of
+   253→   253→     the outgoing element before the decoder-release effect resets it. */
+   254→   254→  useEffect(() => {
+   255→   255→    if (!user || !validId) return undefined;
+   256→   256→    recordTick(); /* mount-time flush (e.g. after a resume seek) */
+   257→   257→    const timer = setInterval(() => {
+   258→   258→      const el = videoRef.current;
+   259→   259→      if (el && !el.paused && !el.ended) recordTick();
+   260→   260→    }, 10_000);
+   261→   261→    return () => {
+   262→   262→      clearInterval(timer);
+   263→   263→      recordTick(); /* best-effort final flush */
+   264→   264→    };
+   265→   265→  }, [user, validId, id, recordTick, activeSource?.type, activeSource?.url, sourceIndex, reloadNonce]);
+   266→   266→
+   267→   267→  /** Resume seek — applied once per (content id + source + reload nonce) on
+   268→   268→   *  the first loadedmetadata of the current <video>. The applied key is
+   269→   269→   *  stamped on the DOM element itself (dataset), so a remount that somehow
+   270→   270→   *  preserves React state (e.g. dev Fast Refresh) still re-arms the seek,
+   271→   271→   *  while the same playing element never seeks twice. */
+   272→   272→  const maybeResume = useCallback(() => {
+   273→   273→    if (resumeT <= 0) return;
+   274→   274→    const el = videoRef.current;
+   275→   275→    if (!el) return;
+   276→   276→    const key = `${id}:${sourceIndex}:${activeSource?.url ?? ''}:${reloadNonce}`;
+   277→   277→    if (el.dataset.faza21Resume === key) return;
+   278→   278→    try {
+   279→   279→      el.currentTime = resumeT;
+   280→   280→      el.dataset.faza21Resume = key;
+   281→   281→      toast.info(`Reia de la ${formatClock(resumeT)}`);
+   282→   282→    } catch {
+   283→   283→      /* seek not possible yet — allow a later loadedmetadata to retry */
+   284→   284→    }
+   285→   285→  }, [resumeT, id, sourceIndex, activeSource?.url, reloadNonce]);
+   286→   286→
+   287→   287→  /** WebVTT subtitles — public listing, fetched once per content id (silent
+   288→   288→   *  fail: the player works fine without tracks). */
+   289→   289→  const subs = useApi(`player-subs-${id}`, () => api.subtitles.forContent(id), { enabled: validId });
+   290→   290→  const subtitleTracks = subs.data && subs.data.contentId === id ? subs.data.data : [];
+   291→   291→
+   292→   292→  /** CC toggle: off → first subtitle track showing → off. Tracks default to
+   293→   293→   *  disabled (no `default` attr) so nothing shows until the user opts in. */
+   294→   294→  const [subsOn, setSubsOn] = useState(false);
+   295→   295→  useEffect(() => {
+   296→   296→    setSubsOn(false); /* the element remounts per source — tracks reset too */
+   297→   297→  }, [id, sourceIndex, reloadNonce]);
+   298→   298→  const toggleSubs = useCallback(() => {
+   299→   299→    const el = videoRef.current;
+   300→   300→    if (!el) return;
+   301→   301→    const tracks = Array.from(el.textTracks ?? []);
+   302→   302→    const anyShowing = tracks.some((t) => t.mode === 'showing');
+   303→   303→    tracks.forEach((t) => {
+   304→   304→      t.mode = 'disabled';
+   305→   305→    });
+   306→   306→    if (anyShowing) {
+   307→   307→      setSubsOn(false);
+   308→   308→      return;
+   309→   309→    }
+   310→   310→    const first = tracks.find((t) => t.kind === 'subtitles');
+   311→   311→    if (first) {
+   312→   312→      first.mode = 'showing';
+   313→   313→      setSubsOn(true);
+   314→   314→    }
+   315→   315→  }, []);
+   316→   316→
+   317→   317→  useEffect(() => {
+   318→   318→    const url = activeSource?.url;
+   319→   319→    const el = videoRef.current;
+   320→   320→    if (activeSource?.type !== 'm3u8' || !url || !el) return;
+   321→   321→    let hls: { destroy: () => void } | null = null;
+   322→   322→    let cancelled = false;
+   323→   323→    (async () => {
+   324→   324→      try {
+   325→   325→        const mod = await import('hls.js');
+   326→   326→        const Hls = mod.default;
+   327→   327→        if (cancelled) return;
+   328→   328→        if (Hls.isSupported()) {
+   329→   329→          const instance = new Hls({ enableWorker: true });
+   330→   330→          /* FAZA 17 — fatal HLS errors destroy the instance and advance the
+   331→   331→             source chain; non-fatal ones get a light startLoad() retry. */
+   332→   332→          instance.on(Hls.Events.ERROR, (_event, data) => {
+   333→   333→            if (cancelled) return;
+   334→   334→            if (data?.fatal) {
+   335→   335→              try {
+   336→   336→                instance.destroy();
+   337→   337→              } catch {
+   338→   338→                /* already destroyed */
+   339→   339→              }
+   340→   340→              advanceSource('eroare HLS');
+   341→   341→            } else {
+   342→   342→              try {
+   343→   343→                instance.startLoad();
+   344→   344→              } catch {
+   345→   345→                /* retry not possible — the load watchdog will advance */
+   346→   346→              }
+   347→   347→            }
+   348→   348→          });
+   349→   349→          instance.loadSource(url);
+   350→   350→          instance.attachMedia(el);
+   351→   351→          hls = instance;
+   352→   352→        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+   353→   353→          el.src = url;
+   354→   354→        }
+   355→   355→      } catch {
+   356→   356→        /* hls.js failed to init — hand over to the fallback chain. */
+   357→   357→        if (!cancelled) advanceSource('eroare HLS');
+   358→   358→      }
+   359→   359→    })();
+   360→   360→    return () => {
+   361→   361→      cancelled = true;
+   362→   362→      hls?.destroy();
+   363→   363→    };
+   364→   364→  }, [activeSource?.type, activeSource?.url, sourceIndex, reloadNonce, advanceSource]);
+   365→   365→
+   366→   366→  /* FAZA 17 — 12s load watchdog: if a video source produces no loadeddata /
+   367→   367→     canplay within the window, advance to the next source. */
+   368→   368→  useEffect(() => {
+   369→   369→    const t = activeSource?.type;
+   370→   370→    if (!activeSource?.url || exhausted) return undefined;
+   371→   371→    if (t !== 'mp4' && t !== 'm3u8') return undefined;
+   372→   372→    clearLoadTimer();
+   373→   373→    loadTimerRef.current = setTimeout(() => {
+   374→   374→      loadTimerRef.current = null;
+   375→   375→      advanceSource('timeout sursă');
+   376→   376→    }, 12_000);
+   377→   377→    return clearLoadTimer;
+   378→   378→  }, [activeSource?.type, activeSource?.url, sourceIndex, reloadNonce, exhausted, advanceSource, clearLoadTimer]);
+   379→   379→
+   380→   380→  /* FAZA 17 — release the decoder/buffer whenever the current video element
+   381→   381→     goes away (source change, retry or unmount): pause, drop the src and run
+   382→   382→     load() so the browser frees the media pipeline. */
+   383→   383→  useEffect(() => {
+   384→   384→    const el = videoRef.current;
+   385→   385→    if (!el) return undefined;
+   386→   386→    return () => {
+   387→   387→      clearLoadTimer();
+   388→   388→      try {
+   389→   389→        el.pause();
+   390→   390→        el.removeAttribute('src');
+   391→   391→        el.load();
+   392→   392→      } catch {
+   393→   393→        /* element already detached */
+   394→   394→      }
+   395→   395→    };
+   396→   396→  }, [activeSource?.type, activeSource?.url, sourceIndex, reloadNonce, clearLoadTimer]);
+   397→   397→
+   398→   398→  async function handleMine(e: React.FormEvent) {
+   399→   399→    e.preventDefault();
+   400→   400→    if (!mineUrl.trim() || !player.data || mining) return;
+   401→   401→    setMining(true);
+   402→   402→    try {
+   403→   403→      await api.miner({
+   404→   404→        url: mineUrl.trim(),
+   405→   405→        externalId: player.data.content.externalid,
+   406→   406→        type: player.data.content.type,
+   407→   407→      });
+   408→   408→      toast.success('Stream attached');
+   409→   409→      setMineUrl('');
+   410→   410→      await player.refetch();
+   411→   411→    } catch (err) {
+   412→   412→      toast.error(err instanceof Error ? err.message : 'Mining failed');
+   413→   413→    } finally {
+   414→   414→      setMining(false);
+   415→   415→    }
+   416→   416→  }
+   417→   417→
+   418→   418→  if (!validId) {
+   419→   419→    return (
+   420→   420→      <Container className="py-20">
+   421→   421→        <EmptyState
+   422→   422→          title="Title not found"
+   423→   423→          message="The player URL is missing a valid title id."
+   424→   424→          action={
+   425→   425→            <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/home')}>
+   426→   426→              Back to home
+   427→   427→            </Button>
+   428→   428→          }
+   429→   429→        />
+   430→   430→      </Container>
+   431→   431→    );
+   432→   432→  }
+   433→   433→
+   434→   434→  if (player.loading && !current) {
+   435→   435→    return (
+   436→   436→      <Container className="py-8 sm:py-12">
+   437→   437→        <div className="mx-auto w-full max-w-5xl space-y-5">
+   438→   438→          <div className="flex items-center justify-between">
+   439→   439→            <Skeleton className="h-9 w-36" />
+   440→   440→            <Skeleton className="h-7 w-28 rounded-full" />
+   441→   441→          </div>
+   442→   442→          <Skeleton className="aspect-video w-full rounded-2xl" />
+   443→   443→          <Skeleton className="h-24 w-full rounded-xl" />
+   444→   444→        </div>
+   445→   445→      </Container>
+   446→   446→    );
+   447→   447→  }
+   448→   448→
+   449→   449→  if (player.error && !current) {
+   450→   450→    if (isNotFound(player.error)) {
+   451→   451→      return (
+   452→   452→        <Container className="py-20">
+   453→   453→          <EmptyState
+   454→   454→            title="Title not found"
+   455→   455→            message={player.error}
+   456→   456→            action={
+   457→   457→              <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/home')}>
+   458→   458→                Back to home
+   459→   459→              </Button>
+   460→   460→            }
+   461→   461→          />
+   462→   462→        </Container>
+   463→   463→      );
+   464→   464→    }
+   465→   465→    return (
+   466→   466→      <Container className="py-20">
+   467→   467→        <ErrorState message={player.error} onRetry={player.refetch} />
+   468→   468→      </Container>
+   469→   469→    );
+   470→   470→  }
+   471→   471→
+   472→   472→  const data = current;
+   473→   473→  if (!data) return null;
+   474→   474→
+   475→   475→  const content = data.content;
+   476→   476→  const md = content.metadata || {};
+   477→   477→  const overview =
+   478→   478→    [md.overview, md.synopsis, md.description].find((v) => typeof v === 'string' && v.trim() !== '') ||
+   479→   479→    'No synopsis available for this title.';
+   480→   480→  const thumb = content.thumbnail || (typeof md.backdrop === 'string' ? md.backdrop : null);
+   481→   481→  const noSource = data.mode === 'none' || !data.primary;
+   482→   482→
+   483→   483→  /* FAZA 17 — "open the stream externally" suggestion: the original page
+   484→   484→     URL from metadata when available, else the last source in the chain. */
+   485→   485→  const externalHref =
+   486→   486→    (typeof md.url === 'string' && /^https?:\/\//.test(md.url) ? md.url : null) ??
+   487→   487→    (typeof md.mined?.url === 'string' && /^https?:\/\//.test(md.mined.url) ? md.mined.url : null) ??
+   488→   488→    (sources.length > 0 ? sources[sources.length - 1].url : null);
+   489→   489→
+   490→   490→  return (
+   491→   491→    <Container className="py-6 sm:py-8">
+   492→   492→      <div className="mx-auto w-full max-w-5xl space-y-5">
+   493→   493→        {/* Top bar */}
+   494→   494→        <div className="flex flex-wrap items-center justify-between gap-3">
+   495→   495→          <Button
+   496→   496→            variant="outline"
+   497→   497→            className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   498→   498→            onClick={() => navigate(`/content/${id}`)}
+   499→   499→          >
+   500→   500→            <ArrowLeft aria-hidden /> Back to details
+   501→   501→          </Button>
+   502→   502→          <PlayerModeBadge mode={data.mode} />
+   503→   503→        </div>
+   504→   504→
+   505→   505→        {/* Player surface */}
+   506→   506→        {noSource ? (
+   507→   507→          <div className="space-y-4">
+   508→   508→            <EmptyState
+   509→   509→              title="No stream sources available"
+   510→   510→              message={
+   511→   511→                data.note ||
+   512→   512→                'This title has no playable sources yet. Mine a stream below and it will be attached instantly.'
+   513→   513→              }
+   514→   514→              icon={<MonitorPlay className="h-6 w-6" aria-hidden />}
+   515→   515→            />
+   516→   516→            <Card className="border-white/10 bg-white/[0.03]">
+   517→   517→              <CardHeader>
+   518→   518→                <CardTitle className="flex items-center gap-2 text-base">
+   519→   519→                  <Pickaxe className="h-4 w-4 text-rose-400" aria-hidden />
+   520→   520→                  Mine a stream
+   521→   521→                </CardTitle>
+   522→   522→                <CardDescription>
+   523→   523→                  Point the miner at a page or direct media URL — it extracts mp4, m3u8, iframe and YouTube sources
+   524→   524→                  and attaches them to this title.
+   525→   525→                </CardDescription>
+   526→   526→              </CardHeader>
+   527→   527→              <CardContent>
+   528→   528→                <form className="flex flex-col gap-3 sm:flex-row" onSubmit={handleMine}>
+   529→   529→                  <div className="flex-1">
+   530→   530→                    <label htmlFor="player-mine-url" className="sr-only">
+   531→   531→                      Stream or page URL
+   532→   532→                    </label>
+   533→   533→                    <Input
+   534→   534→                      id="player-mine-url"
+   535→   535→                      value={mineUrl}
+   536→   536→                      onChange={(e) => setMineUrl(e.target.value)}
+   537→   537→                      placeholder="https://example.com/page-or-stream"
+   538→   538→                      className="border-white/10 bg-black/40"
+   539→   539→                    />
+   540→   540→                  </div>
+   541→   541→                  <Button
+   542→   542→                    type="submit"
+   543→   543→                    disabled={mining || !mineUrl.trim()}
+   544→   544→                    className="bg-rose-600 font-bold hover:bg-rose-500"
+   545→   545→                  >
+   546→   546→                    {mining ? <Loader2 className="animate-spin" aria-hidden /> : <Pickaxe aria-hidden />}
+   547→   547→                    Mine &amp; attach
+   548→   548→                  </Button>
+   549→   549→                </form>
+   550→   550→              </CardContent>
+   551→   551→            </Card>
+   552→   552→          </div>
+   553→   553→        ) : exhausted ? (
+   554→   554→          /* FAZA 17 — every source in the chain failed: friendly end-of-chain
+   555→   555→              card (never a crash). Retry restarts the chain from source 1. */
+   556→   556→          <Card className="border-rose-500/30 bg-rose-500/[0.07]">
+   557→   557→            <CardContent className="flex flex-col items-center gap-4 p-8 text-center sm:p-10">
+   558→   558→              <span className="grid h-12 w-12 place-items-center rounded-2xl border border-rose-500/30 bg-rose-500/10">
+   559→   559→                <MonitorPlay className="h-6 w-6 text-rose-400" aria-hidden />
+   560→   560→              </span>
+   561→   561→              <div className="space-y-1.5">
+   562→   562→                <h3 className="text-lg font-bold text-white">Nu am putut reda nicio sursă pentru acest titlu</h3>
+   563→   563→                <p className="mx-auto max-w-md text-sm leading-relaxed text-zinc-400">
+   564→   564→                  Am încercat pe rând toate cele {sources.length} surse — ultima a eșuat ("
+   565→   565→                  {failedState?.reason}"). Poți porni lanțul de la început sau poți deschide sursa direct în browser.
+   566→   566→                </p>
+   567→   567→              </div>
+   568→   568→              <div className="flex flex-wrap items-center justify-center gap-2.5">
+   569→   569→                <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={retryFromFirst}>
+   570→   570→                  <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+   571→   571→                  Reîncearcă de la prima sursă
+   572→   572→                </Button>
+   573→   573→                {externalHref && (
+   574→   574→                  <a
+   575→   575→                    href={externalHref}
+   576→   576→                    target="_blank"
+   577→   577→                    rel="noopener noreferrer"
+   578→   578→                    className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-white/15 bg-white/5 px-4 text-sm font-semibold text-zinc-200 transition hover:border-white/30 hover:bg-white/10 hover:text-white"
+   579→   579→                  >
+   580→   580→                    <ExternalLink className="h-4 w-4" aria-hidden />
+   581→   581→                    Deschide sursa extern
+   582→   582→                  </a>
+   583→   583→                )}
+   584→   584→              </div>
+   585→   585→            </CardContent>
+   586→   586→          </Card>
+   587→   587→        ) : (
+   588→   588→          <div className="aspect-video w-full overflow-hidden rounded-2xl border border-white/10 bg-black">
+   589→   589→            {activeSource?.type === 'mp4' && (
+   590→   590→              <video
+   591→   591→                key={`mp4-${sourceIndex}-${activeSource.url}-${reloadNonce}`}
+   592→   592→                ref={videoRef}
+   593→   593→                controls
+   594→   594→                autoPlay
+   595→   595→                playsInline
+   596→   596→                className="h-full w-full"
+   597→   597→                src={activeSource.url}
+   598→   598→                onPlay={trackPlay}
+   599→   599→                onEnded={trackComplete}
+   600→   600→                onPause={recordTick}
+   601→   601→                onError={() => advanceSource('eroare mp4')}
+   602→   602→                onLoadedMetadata={maybeResume}
+   603→   603→                onLoadedData={clearLoadTimer}
+   604→   604→                onCanPlay={clearLoadTimer}
+   605→   605→                onProgress={clearLoadTimer}
+   606→   606→              >
+   607→   607→                {/* FAZA 21 — WebVTT tracks (default OFF; gateway-prefixed src). */}
+   608→   608→                {subtitleTracks.map((sub) => (
+   609→   609→                  <track
+   610→   610→                    key={sub.id}
+   611→   611→                    kind="subtitles"
+   612→   612→                    src={apiUrl(sub.src)}
+   613→   613→                    srcLang={sub.lang}
+   614→   614→                    label={sub.label}
+   615→   615→                  />
+   616→   616→                ))}
+   617→   617→              </video>
+   618→   618→            )}
+   619→   619→            {activeSource?.type === 'm3u8' && (
+   620→   620→              <video
+   621→   621→                key={`m3u8-${sourceIndex}-${activeSource.url}-${reloadNonce}`}
+   622→   622→                ref={videoRef}
+   623→   623→                controls
+   624→   624→                autoPlay
+   625→   625→                playsInline
+   626→   626→                className="h-full w-full"
+   627→   627→                onPlay={trackPlay}
+   628→   628→                onEnded={trackComplete}
+   629→   629→                onPause={recordTick}
+   630→   630→                onError={() => advanceSource('eroare HLS')}
+   631→   631→                onLoadedMetadata={maybeResume}
+   632→   632→                onLoadedData={clearLoadTimer}
+   633→   633→                onCanPlay={clearLoadTimer}
+   634→   634→                onProgress={clearLoadTimer}
+   635→   635→              >
+   636→   636→                {/* FAZA 21 — WebVTT tracks (default OFF; gateway-prefixed src). */}
+   637→   637→                {subtitleTracks.map((sub) => (
+   638→   638→                  <track
+   639→   639→                    key={sub.id}
+   640→   640→                    kind="subtitles"
+   641→   641→                    src={apiUrl(sub.src)}
+   642→   642→                    srcLang={sub.lang}
+   643→   643→                    label={sub.label}
+   644→   644→                  />
+   645→   645→                ))}
+   646→   646→              </video>
+   647→   647→            )}
+   648→   648→            {activeSource?.type === 'youtube' && (
+   649→   649→              <iframe
+   650→   650→                key={activeSource.url}
+   651→   651→                src={`${activeSource.url}${activeSource.url.includes('?') ? '&' : '?'}autoplay=1&rel=0`}
+   652→   652→                title={content.title}
+   653→   653→                className="h-full w-full"
+   654→   654→                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+   655→   655→                allowFullScreen
+   656→   656→              />
+   657→   657→            )}
+   658→   658→            {activeSource?.type === 'iframe' && (
+   659→   659→              <iframe
+   660→   660→                key={activeSource.url}
+   661→   661→                src={activeSource.url}
+   662→   662→                title="Embedded player"
+   663→   663→                className="h-full w-full"
+   664→   664→                sandbox="allow-scripts; allow-same-origin; allow-presentation; allow-popups; allow-forms"
+   665→   665→                allowFullScreen
+   666→   666→                referrerPolicy="no-referrer"
+   667→   667→              />
+   668→   668→            )}
+   669→   669→          </div>
+   670→   670→        )}
+   671→   671→
+   672→   672→        {/* Source switcher */}
+   673→   673→        {data.sources.length > 1 && (
+   674→   674→          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Stream sources">
+   675→   675→            {data.sources.map((s, i) => {
+   676→   676→              const isActive = activeSource?.url === s.url && activeSource?.type === s.type;
+   677→   677→              return (
+   678→   678→                <button
+   679→   679→                  key={`${s.type}-${i}-${s.url}`}
+   680→   680→                  type="button"
+   681→   681→                  onClick={() => selectSource(i)}
+   682→   682→                  aria-pressed={isActive}
+   683→   683→                  className={cn(
+   684→   684→                    'rounded-full border px-3 py-1.5 text-xs font-semibold transition',
+   685→   685→                    isActive
+   686→   686→                      ? 'border-rose-500/60 bg-rose-600 text-white shadow-lg shadow-rose-900/30'
+   687→   687→                      : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+   688→   688→                  )}
+   689→   689→                >
+   690→   690→                  {s.label || `${s.type} ${i + 1}`}
+   691→   691→                </button>
+   692→   692→              );
+   693→   693→            })}
+   694→   694→          </div>
+   695→   695→        )}
+   696→   696→
+   697→   697→        {/* FAZA 21 — CC subtitle toggle (native mp4/HLS renderers only).
+   698→   698→            Disabled with a tooltip when no WebVTT tracks are loaded. */}
+   699→   699→        {(activeSource?.type === 'mp4' || activeSource?.type === 'm3u8') && !exhausted && (
+   700→   700→          <div className="flex flex-wrap items-center gap-2">
+   701→   701→            <button
+   702→   702→              type="button"
+   703→   703→              onClick={toggleSubs}
+   704→   704→              disabled={subtitleTracks.length === 0}
+   705→   705→              title={
+   706→   706→                subtitleTracks.length === 0
+   707→   707→                  ? 'Fără subtitrări încărcate'
+   708→   708→                  : subsOn
+   709→   709→                    ? `Subtitrări: ${subtitleTracks[0]?.label ?? ''} — apasă pentru a opri`
+   710→   710→                    : `Activează subtitrările (${subtitleTracks.map((s) => s.label).join(', ')})`
+   711→   711→              }
+   712→   712→              aria-pressed={subsOn}
+   713→   713→              className={cn(
+   714→   714→                'inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition',
+   715→   715→                subtitleTracks.length === 0
+   716→   716→                  ? 'cursor-not-allowed border-white/5 bg-white/[0.02] text-zinc-600'
+   717→   717→                  : subsOn
+   718→   718→                    ? 'border-teal-500/60 bg-teal-500/20 text-teal-200'
+   719→   719→                    : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+   720→   720→              )}
+   721→   721→            >
+   722→   722→              <Captions className="h-3.5 w-3.5" aria-hidden />
+   723→   723→              CC{subtitleTracks.length > 0 ? ` · ${subtitleTracks.length}` : ''}
+   724→   724→            </button>
+   725→   725→            {subsOn && (
+   726→   726→              <span className="text-[11px] text-zinc-500">
+   727→   727→                {subtitleTracks[0]?.label ?? ''} — apasă din nou pentru a opri
+   728→   728→              </span>
+   729→   729→            )}
+   730→   730→          </div>
+   731→   731→        )}
+   732→   732→
+   733→   733→        {/* Policy line */}
+   734→   734→        <p className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+   735→   735→          <span>Allowed by policy:</span>
+   736→   736→          {data.allowedTypes.map((t) => (
+   737→   737→            <span
+   738→   738→              key={t}
+   739→   739→              className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-zinc-400"
+   740→   740→            >
+   741→   741→              {t}
+
+[showing lines 42-741 of 907; use offset=742 with limit to continue reading]

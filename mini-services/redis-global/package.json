@@ -1,0 +1,10 @@
+{
+  "name": "animaxia-redis-global",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FAZA 22 — Redis-protocol (RESP2) validation instance on :4030 for the global distributed layers. Production uses Upstash / Redis Cloud over the same protocol.",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  }
+}

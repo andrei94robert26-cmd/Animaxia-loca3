@@ -24,7 +24,7 @@
  */
 
 import express from 'express';
-import { rows, one, parseJsonb, isoOrNull, num, assertPostgres } from '../platform/sql.js';
+import { rows, one, parseJsonb, isoOrNull, num } from '../platform/sql.js';
 import { auditLog, clientIpOf } from '../security/security.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -102,10 +102,9 @@ const router = express.Router();
 
 /** GET / — the user's playlists with item counts + first-item preview. */
 router.get('/', wrap(async (req, res) => {
-  assertPostgres();
   const data = await rows(
     `SELECT p.id, p.title, p.description, p.createdat, p.updatedat,
-            (SELECT COUNT(*)::int FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemcount,
+            (SELECT COUNT(*) FROM playlistitems pi WHERE pi.playlistid = p.id) AS itemcount,
             f.firstthumbnail, f.firsttitle
      FROM playlists p
      LEFT JOIN LATERAL (
@@ -125,7 +124,6 @@ router.get('/', wrap(async (req, res) => {
 
 /** POST / — create a playlist. */
 router.post('/', wrap(async (req, res) => {
-  assertPostgres();
   const title = normalizeTitle(req.body?.title);
   if (!title) {
     return res.status(400).json({ error: `title is required (${TITLE_MIN}-${TITLE_MAX} characters, trimmed)` });
@@ -149,7 +147,6 @@ router.post('/', wrap(async (req, res) => {
 /** GET /:id — playlist detail + ordered items (owner only; 404 for anyone
  *  else so a foreign playlist's existence is never leaked). */
 router.get('/:id', wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid playlist id' });
 
@@ -169,7 +166,6 @@ router.get('/:id', wrap(async (req, res) => {
 
 /** PATCH /:id — rename and/or re-describe (bumps updatedat). */
 router.patch('/:id', wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid playlist id' });
 
@@ -202,7 +198,7 @@ router.patch('/:id', wrap(async (req, res) => {
 
   params.push(id, req.user.id);
   const updated = await one(
-    `UPDATE playlists SET ${sets.join(', ')}, updatedat = NOW()
+    `UPDATE playlists SET ${sets.join(', ')}, updatedat = CURRENT_TIMESTAMP
      WHERE id = $${params.length - 1} AND userid = $${params.length}
      RETURNING *`,
     params,
@@ -218,7 +214,6 @@ router.patch('/:id', wrap(async (req, res) => {
 
 /** DELETE /:id — remove the playlist (items cascade via FK). */
 router.delete('/:id', wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid playlist id' });
 
@@ -240,7 +235,6 @@ router.delete('/:id', wrap(async (req, res) => {
 /** POST /:id/items — append a content row at the end of the playlist.
  *  Idempotent: an already-present contentId returns 200 { added: false }. */
 router.post('/:id/items', wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid playlist id' });
 
@@ -266,7 +260,7 @@ router.post('/:id/items', wrap(async (req, res) => {
   if (!inserted) {
     return res.json({ ok: true, added: false });
   }
-  await rows(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [id]);
+  await rows(`UPDATE playlists SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
   await auditLog({
     userid: req.user.id,
     action: 'playlist.item.add',
@@ -283,7 +277,6 @@ router.post('/:id/items', wrap(async (req, res) => {
 /** DELETE /:id/items/:contentId — remove an item and renumber the positions
  *  that followed it (positions stay a dense 1..N sequence). */
 router.delete('/:id/items/:contentId', wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid playlist id' });
   const contentId = parseId(req.params.contentId);
@@ -303,7 +296,7 @@ router.delete('/:id/items/:contentId', wrap(async (req, res) => {
     `UPDATE playlistitems SET position = position - 1 WHERE playlistid = $1 AND position > $2`,
     [id, num(removed.position)],
   );
-  await rows(`UPDATE playlists SET updatedat = NOW() WHERE id = $1`, [id]);
+  await rows(`UPDATE playlists SET updatedat = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
   await auditLog({
     userid: req.user.id,
     action: 'playlist.item.remove',
@@ -316,7 +309,6 @@ router.delete('/:id/items/:contentId', wrap(async (req, res) => {
 /** GET /:id/play — sequential playback order: the full item list plus the
  *  position to start from (?pos=, default 0, clamped to the list). */
 router.get('/:id/play', wrap(async (req, res) => {
-  assertPostgres();
   const id = parseId(req.params.id);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid playlist id' });
 

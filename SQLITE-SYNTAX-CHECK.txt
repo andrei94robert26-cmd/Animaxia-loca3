@@ -1,0 +1,8 @@
+/data/data/com.termux/files/home/Animaxia-local/mini-services/animaxia-backend/modules/platform/sql.js:22
+    .replace(/\b/g, '')
+    ^
+
+SyntaxError: Unexpected token '.'
+    at checkSyntax (node:internal/main/check_syntax:72:5)
+
+Node.js v24.18.0

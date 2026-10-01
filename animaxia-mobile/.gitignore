@@ -1,0 +1,17 @@
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Local env
+.env
+.env.local
+
+# Native folders (prebuild output — reproducible from app.json)
+android/
+ios/
+
+# Logs & OS
+*.log
+.DS_Store

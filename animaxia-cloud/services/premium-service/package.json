@@ -1,0 +1,17 @@
+{
+  "name": "@animaxia/premium-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud premium-service — plan catalog + entitlements (premium/plans.js) and Stripe checkout/confirm/cancel (premium/stripe.js) mounted as one /api/premium surface, with an hourly worker expiring lapsed paid plans back to free.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

@@ -1,0 +1,828 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * platform.ts — Animaxia Phase-2 platform client: typed wrappers for every
+     5→ * platform endpoint (auth, users, premium, social, ai, analytics, search,
+     6→ * cache, workers, security, mobile) + the Phase-4 AI Cloud (RAG engine,
+     7→ * assistant, personal AI, tools, admin AI, vector) + Bearer-token management
+     8→ * with a single automatic access-token refresh on 401.
+     9→ *
+    10→ * All requests go through the Caddy gateway using relative URLs with the
+    11→ * XTransformPort query param (backend on :4000) — same pattern as api.ts.
+    12→ */
+    13→
+    14→import { BACKEND_PORT } from './api';
+    15→import type { DbContent } from './types';
+    16→
+    17→/* --------------------------------- helpers --------------------------------- */
+    18→
+    19→function platformUrl(path: string, params?: Record<string, string | number | boolean | undefined | null>): string {
+    20→  const search = new URLSearchParams();
+    21→  search.set('XTransformPort', String(BACKEND_PORT));
+    22→  if (params) {
+    23→    for (const [key, value] of Object.entries(params)) {
+    24→      if (value !== undefined && value !== null && value !== '') search.set(key, String(value));
+    25→    }
+    26→  }
+    27→  return `${path}?${search.toString()}`;
+    28→}
+    29→
+    30→export class PlatformError extends Error {
+    31→  status: number;
+    32→  upgrade?: boolean;
+    33→  code?: string;
+    34→  constructor(message: string, status: number, upgrade?: boolean, code?: string) {
+    35→    super(message);
+    36→    this.name = 'PlatformError';
+    37→    this.status = status;
+    38→    this.upgrade = upgrade;
+    39→    this.code = code;
+    40→  }
+    41→}
+    42→
+    43→/* ------------------------------ token storage ------------------------------ */
+    44→
+    45→const ACCESS_KEY = 'animaxia.accessToken';
+    46→const REFRESH_KEY = 'animaxia.refreshToken';
+    47→
+    48→export const tokenStore = {
+    49→  get access(): string | null {
+    50→    try {
+    51→      return window.localStorage.getItem(ACCESS_KEY);
+    52→    } catch {
+    53→      return null;
+    54→    }
+    55→  },
+    56→  get refresh(): string | null {
+    57→    try {
+    58→      return window.localStorage.getItem(REFRESH_KEY);
+    59→    } catch {
+    60→      return null;
+    61→    }
+    62→  },
+    63→  set(access: string, refresh: string) {
+    64→    try {
+    65→      window.localStorage.setItem(ACCESS_KEY, access);
+    66→      window.localStorage.setItem(REFRESH_KEY, refresh);
+    67→    } catch {
+    68→      /* private mode — session will not persist */
+    69→    }
+    70→  },
+    71→  clear() {
+    72→    try {
+    73→      window.localStorage.removeItem(ACCESS_KEY);
+    74→      window.localStorage.removeItem(REFRESH_KEY);
+    75→    } catch {
+    76→      /* noop */
+    77→    }
+    78→  },
+    79→};
+    80→
+    81→/* ------------------------------ fetch plumbing ----------------------------- */
+    82→
+    83→async function rawRequest<T>(path: string, init?: RequestInit): Promise<T> {
+    84→  let res: Response;
+    85→  try {
+    86→    res = await fetch(path, {
+    87→      ...init,
+    88→      headers: {
+    89→        'Content-Type': 'application/json',
+    90→        ...(init?.headers as Record<string, string> | undefined),
+    91→      },
+    92→    });
+    93→  } catch {
+    94→    throw new PlatformError('Cannot reach the Animaxia backend — it may be restarting', 0);
+    95→  }
+    96→  let body: unknown = null;
+    97→  try {
+    98→    body = await res.json();
+    99→  } catch {
+   100→    body = null;
+   101→  }
+   102→  if (!res.ok) {
+   103→    const b = (body as { error?: string; upgrade?: boolean; code?: string } | null) ?? {};
+   104→    throw new PlatformError(b.error || `Request failed with status ${res.status}`, res.status, b.upgrade, b.code);
+   105→  }
+   106→  return body as T;
+   107→}
+   108→
+   109→/** Authenticated request with one automatic token-refresh retry on 401. */
+   110→export async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
+   111→  const access = tokenStore.access;
+   112→  const doFetch = () =>
+   113→    rawRequest<T>(path, {
+   114→      ...init,
+   115→      headers: { ...(init?.headers as Record<string, string> | undefined), ...(access ? { Authorization: `Bearer ${access}` } : {}) },
+   116→    });
+   117→  try {
+   118→    return await doFetch();
+   119→  } catch (err) {
+   120→    if (err instanceof PlatformError && err.status === 401 && tokenStore.refresh) {
+   121→      const refreshed = await tryRefresh();
+   122→      if (refreshed) {
+   123→        return authRequest<T>(path, init); // retry with the new token
+   124→      }
+   125→    }
+   126→    throw err;
+   127→  }
+   128→}
+   129→
+   130→/** Attempt a refresh-token rotation. Returns true on success. */
+   131→export async function tryRefresh(): Promise<boolean> {
+   132→  const refresh = tokenStore.refresh;
+   133→  if (!refresh) return false;
+   134→  try {
+   135→    const res = await rawRequest<{ ok: true; accessToken: string; refreshToken: string }>('/api/auth/refresh?XTransformPort=4000', {
+   136→      method: 'POST',
+   137→      body: JSON.stringify({ refreshToken: refresh }),
+   138→    });
+   139→    tokenStore.set(res.accessToken, res.refreshToken);
+   140→    return true;
+   141→  } catch {
+   142→    tokenStore.clear();
+   143→    return false;
+   144→  }
+   145→}
+   146→
+   147→/** Anonymous request (no Bearer header). */
+   148→export async function anonRequest<T>(path: string, init?: RequestInit): Promise<T> {
+   149→  return rawRequest<T>(path, init);
+   150→}
+   151→
+   152→/* ---------------------------------- types ----------------------------------- */
+   153→
+   154→export interface Preferences {
+   155→  types?: string[];
+   156→  genres?: string[];
+   157→  franchises?: string[];
+   158→}
+   159→
+   160→export interface PlatformUser {
+   161→  id: number;
+   162→  email: string;
+   163→  username: string;
+   164→  avatar: string | null;
+   165→  role: 'user' | 'admin';
+   166→  plan: 'free' | 'plus' | 'pro';
+   167→  planexpiresat: string | null;
+   168→  preferences: Preferences;
+   169→  createdat: string;
+   170→  lastloginat: string | null;
+   171→}
+   172→
+   173→export interface AuthResponse {
+   174→  ok: true;
+   175→  user: PlatformUser;
+   176→  accessToken: string;
+   177→  refreshToken: string;
+   178→  expiresIn: number;
+   179→}
+   180→
+   181→export interface ProfileStats {
+   182→  watchlist: number;
+   183→  history: number;
+   184→  comments: number;
+   185→}
+   186→
+   187→export interface WatchlistEntry {
+   188→  content: DbContent;
+   189→  addedat: string;
+   190→}
+   191→
+   192→export interface HistoryEntry {
+   193→  content: DbContent;
+   194→  watchedat: string;
+   195→  progress: number;
+   196→}
+   197→
+   198→export interface PlanLimits {
+   199→  watchlist: number;
+   200→  history: number;
+   201→  aiPerDay: number;
+   202→  quality: string;
+   203→}
+   204→
+   205→export interface Plan {
+   206→  key: 'free' | 'plus' | 'pro';
+   207→  name: string;
+   208→  price: number;
+   209→  period: string;
+   210→  currency: string;
+   211→  limits: PlanLimits;
+   212→  features: string[];
+   213→  color: string;
+   214→  highlight?: boolean;
+   215→}
+   216→
+   217→export interface Subscription {
+   218→  id: number;
+   219→  plan: string;
+   220→  status: string;
+   221→  provider: string;
+   222→  sessionid: string | null;
+   223→  currentperiodend: string | null;
+   224→  createdat: string;
+   225→}
+   226→
+   227→export interface PremiumMe {
+   228→  plan: string;
+   229→  limits: PlanLimits;
+   230→  subscription: Subscription | null;
+   231→  usage: { watchlist: number; history: number };
+   232→}
+   233→
+   234→export interface CommentUser {
+   235→  id: number;
+   236→  username: string;
+   237→  avatar: string | null;
+   238→}
+   239→
+   240→export interface Comment {
+   241→  id: number;
+   242→  body: string;
+   243→  createdat: string;
+   244→  user: CommentUser;
+   245→  likes: number;
+   246→  dislikes: number;
+   247→  myVote: number | null;
+   248→  replies: Comment[];
+   249→}
+   250→
+   251→export interface FeedActivity {
+   252→  id: number;
+   253→  type: 'comment' | 'like' | 'content' | 'user';
+   254→  createdat: string;
+   255→  user?: CommentUser;
+   256→  content?: { id: number; title: string; type: string; thumbnail: string | null };
+   257→  preview?: string;
+   258→  value?: number;
+   259→}
+   260→
+   261→export interface FeedResponse {
+   262→  data: FeedActivity[];
+   263→  nextCursor: string | null;
+   264→  basedOn?: { types: string[]; genres: string[]; trackedContent: number };
+   265→}
+   266→
+   267→export interface AiRecommendation {
+   268→  content: DbContent;
+   269→  reason: string;
+   270→}
+   271→
+   272→export interface TrendingEntry {
+   273→  content: DbContent;
+   274→  views: number;
+   275→  plays: number;
+   276→  score: number;
+   277→}
+   278→
+   279→export interface AnalyticsOverview {
+   280→  totals: { users: number; content: number; comments: number; views: number; plays: number };
+   281→  viewsByDay: { date: string; count: number }[];
+   282→  topContent: { id: number; title: string; type: string; thumbnail: string | null; views: number }[];
+   283→  planDistribution: Record<string, number>;
+   284→  activeUsers7d: number;
+   285→  recentSignups: { username: string; createdat: string }[];
+   286→}
+   287→
+   288→export interface UserAnalytics {
+   289→  totals: { views: number; plays: number; completed: number };
+   290→  viewsByDay: { date: string; count: number }[];
+   291→  topTypes: { type: string; count: number }[];
+   292→}
+   293→
+   294→export interface SearchAdvancedResponse {
+   295→  took: number;
+   296→  total: number;
+   297→  max_score: number;
+   298→  data: (DbContent & { _score: number })[];
+   299→}
+   300→
+   301→export interface WorkerJob {
+   302→  id: string;
+   303→  type: string;
+   304→  status: 'queued' | 'running' | 'done' | 'failed';
+   305→  result?: unknown;
+   306→  error?: string | null;
+   307→  queuedat?: string;
+   308→  startedat?: string | null;
+   309→  finishedat?: string | null;
+   310→}
+   311→
+   312→export interface MobileItem {
+   313→  id: number;
+   314→  title: string;
+   315→  type: string;
+   316→  thumbnail: string | null;
+   317→  rating: number | null;
+   318→  year: string | number | null;
+   319→  overview?: string | null;
+   320→  backdrop?: string | null;
+   321→}
+   322→
+   323→export interface MobileHome {
+   324→  hero: MobileItem | null;
+   325→  rows: { key: string; title: string; items: MobileItem[] }[];
+   326→  config: { minVersion: string; latestVersion: string };
+   327→}
+   328→
+   329→export interface AuditEntry {
+   330→  id: number;
+   331→  action: string;
+   332→  ip: string | null;
+   333→  meta: Record<string, unknown>;
+   334→  createdat: string;
+   335→  user: { username: string; email: string } | null;
+   336→}
+   337→
+   338→/* --------------------------- AI Cloud (Phase 4) types --------------------------- */
+   339→
+   340→export interface AiCloudQuota {
+   341→  plan: string;
+   342→  used: number;
+   343→  limit: number;
+   344→  perMinute: number;
+   345→}
+   346→
+   347→export interface AiCloudStatus {
+   348→  ok: boolean;
+   349→  llm: { provider: string; model: string; available: boolean };
+   350→  vector: { backend: string; dims: number; counts: Record<string, number>; lastIndexedAt: string | null };
+   351→  assistant: { tools: number };
+   352→  quota: AiCloudQuota;
+   353→  plans: Record<string, number>;
+   354→}
+   355→
+   356→/** A vector-ranked AI pick (shared shape across RAG recommend + personal home). */
+   357→export interface AiRagPick {
+   358→  id: number;
+   359→  title: string;
+   360→  type: string;
+   361→  thumbnail: string | null;
+   362→  rating: number | null;
+   363→  year: string | number | null;
+   364→  genres: string[];
+   365→  reason: string;
+   366→  score: number;
+   367→}
+   368→
+   369→export interface AiRagRecommendResponse {
+   370→  ok: boolean;
+   371→  provider: string;
+   372→  degraded: boolean;
+   373→  personalized: boolean;
+   374→  data: AiRagPick[];
+   375→  intro: string | null;
+   376→  quota?: { plan: string; used: number; limit: number };
+   377→}
+   378→
+   379→export interface AiRagSummarizeResponse {
+   380→  ok: boolean;
+   381→  provider: string;
+   382→  degraded: boolean;
+   383→  title: string;
+   384→  summary: string;
+   385→}
+   386→
+   387→export interface AiRagExplainResponse {
+   388→  ok: boolean;
+   389→  provider: string;
+   390→  degraded: boolean;
+   391→  title: string;
+   392→  matchScore: number | null;
+   393→  explanation: string;
+   394→  similar: { id: number; title: string; type: string; thumbnail: string | null; genres?: string[]; score: number }[];
+   395→}
+   396→
+   397→export interface AiRagChatResponse {
+   398→  ok: boolean;
+   399→  provider: string;
+   400→  degraded: boolean;
+   401→  reply: string;
+   402→  sources: { id: number; title: string; score: number }[];
+   403→}
+   404→
+   405→/** A chat turn in the {role, content} wire format the RAG endpoints accept. */
+   406→export interface AiChatTurn {
+   407→  role: 'user' | 'assistant';
+   408→  content: string;
+   409→}
+   410→
+   411→export interface AiToolTrace {
+   412→  name: string;
+   413→  args: Record<string, unknown>;
+   414→  ms: number;
+   415→  ok: boolean;
+   416→}
+   417→
+   418→export interface AiAssistantResponse {
+   419→  ok: boolean;
+   420→  reply: string;
+   421→  provider: string;
+   422→  degraded: boolean;
+   423→  toolsUsed: AiToolTrace[];
+   424→  memoriesUsed: number;
+   425→  refused?: boolean;
+   426→}
+   427→
+   428→export interface AiAssistantHistoryEntry {
+   429→  role: string;
+   430→  message: string;
+   431→  toolsused: unknown[];
+   432→  createdat: string;
+   433→}
+   434→
+   435→export interface AiBecauseYouWatched {
+   436→  id: number;
+   437→  title: string;
+   438→  type: string;
+   439→  thumbnail: string | null;
+   440→  score: number;
+   441→  because: string;
+   442→}
+   443→
+   444→export interface AiPersonalHomeResponse {
+   445→  ok: boolean;
+   446→  greeting: string;
+   447→  mood: string;
+   448→  dailyPicks: AiRagPick[];
+   449→  becauseYouWatched: AiBecauseYouWatched[];
+   450→  aiProfile: { tags: string[]; summary: string | null };
+   451→  quota: AiCloudQuota;
+   452→  recapPreview: string;
+   453→  provider: string;
+   454→  degraded: boolean;
+   455→}
+   456→
+   457→export interface AiPersonalFeedItem {
+   458→  type: 'comment' | 'content';
+   459→  user?: string;
+   460→  content: string | null;
+   461→  contentid?: number;
+   462→  contenttype: string | null;
+   463→  thumbnail: string | null;
+   464→  preview: string;
+   465→  createdat: string;
+   466→  aiWhy: string;
+   467→}
+   468→
+   469→export interface AiPersonalFeedResponse {
+   470→  ok: boolean;
+   471→  data: AiPersonalFeedItem[];
+   472→  recap: { week: string; recap: string; stats: { watched: number; topGenres: string[]; topTitles: string[] } } | null;
+   473→}
+   474→
+   475→export interface AiPersonalPlayerResponse {
+   476→  ok: boolean;
+   477→  title: string;
+   478→  beforeYouWatch: string;
+   479→  predictedRating: number | null;
+   480→  matchScore: number | null;
+   481→  moreLikeThis: { id: number; title: string; type: string; thumbnail: string | null; genres: string[]; score: number }[];
+   482→  nextUp: { id: number; title: string; thumbnail: string | null } | null;
+   483→  provider: string;
+   484→  degraded: boolean;
+   485→}
+   486→
+   487→export interface AiPersonalRecapResponse {
+   488→  ok: boolean;
+   489→  week: string;
+   490→  recap: string;
+   491→  stats: { watched: number; topGenres: string[]; topTitles: string[]; historyTotal: number };
+   492→}
+   493→
+   494→export interface AiTool {
+   495→  name: string;
+   496→  description: string;
+   497→  parameters: Record<string, string>;
+   498→  required: string[];
+   499→  example: Record<string, unknown>;
+   500→}
+   501→
+   502→export interface AiToolRunResponse {
+   503→  ok: boolean;
+   504→  tool: string;
+   505→  result: unknown;
+   506→  ms: number;
+   507→}
+   508→
+   509→export interface AiAdminStatsResponse {
+   510→  ok: boolean;
+   511→  provider: { provider: string; model: string; available: boolean };
+   512→  usage: {
+   513→    totalCalls: number;
+   514→    callsToday: number;
+   515→    errors: number;
+   516→    errorRate: number;
+   517→    degradedCalls: number;
+   518→    tokens: { prompt: number; completion: number };
+   519→    costUsd: number;
+   520→    byProvider: Record<string, number>;
+   521→    byFeature: Record<string, number>;
+   522→    byMode: Record<string, number>;
+   523→    latency: { p50: number; p95: number; avg: number };
+   524→    persistedLogs: number | null;
+   525→    ringSize: number;
+   526→  };
+   527→  vector: { backend: string; dims: number; counts: Record<string, number> };
+   528→  assistant: { tools: number; toolNames: string[] };
+   529→}
+   530→
+   531→export interface AiAdminPromptsResponse {
+   532→  ok: boolean;
+   533→  topPrompts: { feature: string; mode: string | null; snippet: string; count: number; tokens: number }[];
+   534→  recent: {
+   535→    traceid: string;
+   536→    userid: number | null;
+   537→    feature: string;
+   538→    mode: string | null;
+   539→    provider: string;
+   540→    tokens: number;
+   541→    latencyms: number;
+   542→    status: string;
+   543→    degraded: boolean;
+   544→    snippet: string;
+   545→    createdat: string;
+   546→  }[];
+   547→}
+   548→
+   549→export interface AiAdminErrorsResponse {
+   550→  ok: boolean;
+   551→  total: number;
+   552→  errorRate: number;
+   553→  recent: { traceid: string; provider: string; feature: string; message: string | null; snippet: string; createdat: string }[];
+   554→}
+   555→
+   556→export interface VectorStatusResponse {
+   557→  backend: string;
+   558→  configured: string;
+   559→  active: boolean;
+   560→  embedProvider: string;
+   561→  dims: number;
+   562→  counts: Record<string, number>;
+   563→  lastIndexedAt: string | null;
+   564→}
+   565→
+   566→/* ----------------------------------- API ----------------------------------- */
+   567→
+   568→export const platform = {
+   569→  /* auth */
+   570→  register: (body: { email: string; username: string; password: string }) =>
+   571→    anonRequest<AuthResponse>(platformUrl('/api/auth/register'), { method: 'POST', body: JSON.stringify(body) }),
+   572→  login: (body: { email: string; password: string }) =>
+   573→    anonRequest<AuthResponse>(platformUrl('/api/auth/login'), { method: 'POST', body: JSON.stringify(body) }),
+   574→  logout: (refreshToken: string) =>
+   575→    anonRequest<{ ok: true; revoked: boolean }>(platformUrl('/api/auth/logout'), {
+   576→      method: 'POST',
+   577→      body: JSON.stringify({ refreshToken }),
+   578→    }),
+   579→  me: () => authRequest<{ user: PlatformUser; stats: ProfileStats }>(platformUrl('/api/auth/me')),
+   580→
+   581→  /* users */
+   582→  profile: () => authRequest<{ user: PlatformUser; stats: ProfileStats }>(platformUrl('/api/users/me')),
+   583→  patchProfile: (body: { username?: string; avatar?: string; preferences?: Preferences }) =>
+   584→    authRequest<{ user: PlatformUser }>(platformUrl('/api/users/me'), { method: 'PATCH', body: JSON.stringify(body) }),
+   585→  uploadAvatar: (image: string) =>
+   586→    authRequest<{ user: PlatformUser }>(platformUrl('/api/users/me/avatar'), { method: 'POST', body: JSON.stringify({ image }) }),
+   587→  watchlist: () => authRequest<{ data: WatchlistEntry[] }>(platformUrl('/api/users/me/watchlist')),
+   588→  addWatchlist: (contentId: number) =>
+   589→    authRequest<{ ok: true; added: boolean }>(platformUrl('/api/users/me/watchlist'), {
+   590→      method: 'POST',
+   591→      body: JSON.stringify({ contentId }),
+   592→    }),
+   593→  removeWatchlist: (contentId: number) =>
+   594→    authRequest<{ ok: true; removed: boolean }>(platformUrl(`/api/users/me/watchlist/${contentId}`), { method: 'DELETE' }),
+   595→  history: (limit = 50) => authRequest<{ data: HistoryEntry[] }>(platformUrl('/api/users/me/history', { limit })),
+   596→  recordHistory: (contentId: number, progress: number) =>
+   597→    authRequest<{ ok: true }>(platformUrl('/api/users/me/history'), {
+   598→      method: 'POST',
+   599→      body: JSON.stringify({ contentId, progress }),
+   600→    }),
+   601→  preferences: () => authRequest<{ preferences: Preferences }>(platformUrl('/api/users/me/preferences')),
+   602→  putPreferences: (body: Preferences) =>
+   603→    authRequest<{ preferences: Preferences }>(platformUrl('/api/users/me/preferences'), {
+   604→      method: 'PUT',
+   605→      body: JSON.stringify(body),
+   606→    }),
+   607→
+   608→  /* premium */
+   609→  plans: () => anonRequest<{ data: Plan[] }>(platformUrl('/api/premium/plans')),
+   610→  premiumMe: () => authRequest<PremiumMe>(platformUrl('/api/premium/me')),
+   611→  premiumVerify: () => authRequest<{ plan: string; active: boolean; limits: PlanLimits }>(platformUrl('/api/premium/verify')),
+   612→  checkout: (plan: 'plus' | 'pro') =>
+   613→    authRequest<{ ok: true; sessionId: string; url: string; mode: string }>(platformUrl('/api/premium/checkout'), {
+   614→      method: 'POST',
+   615→      body: JSON.stringify({ plan }),
+   616→    }),
+   617→  confirmCheckout: (sessionId: string) =>
+   618→    authRequest<{ ok: true; user: PlatformUser; subscription: Subscription }>(platformUrl('/api/premium/confirm'), {
+   619→      method: 'POST',
+   620→      body: JSON.stringify({ sessionId }),
+   621→    }),
+   622→  cancelSubscription: () =>
+   623→    authRequest<{ ok: true; subscription: Subscription }>(platformUrl('/api/premium/cancel'), { method: 'POST', body: '{}' }),
+   624→
+   625→  /* social */
+   626→  comments: (contentId: number | string) =>
+   627→    anonRequest<{ data: Comment[] }>(platformUrl(`/api/social/content/${contentId}/comments`)),
+   628→  addComment: (contentId: number | string, body: string, parentid?: number) =>
+   629→    authRequest<{ ok: true; comment: Comment }>(platformUrl(`/api/social/content/${contentId}/comments`), {
+   630→      method: 'POST',
+   631→      body: JSON.stringify({ body, ...(parentid ? { parentid } : {}) }),
+   632→    }),
+   633→  deleteComment: (id: number) =>
+   634→    authRequest<{ ok: true }>(platformUrl(`/api/social/comments/${id}`), { method: 'DELETE' }),
+   635→  voteComment: (id: number, value: 1 | -1 | 0) =>
+   636→    authRequest<{ ok: true; likes: number; dislikes: number; myVote: number }>(platformUrl(`/api/social/comments/${id}/vote`), {
+   637→      method: 'POST',
+   638→      body: JSON.stringify({ value }),
+   639→    }),
+   640→  likeContent: (contentId: number | string, value: 1 | -1 | 0) =>
+   641→    authRequest<{ ok: true; likes: number; dislikes: number; myVote: number }>(
+   642→      platformUrl(`/api/social/content/${contentId}/like`),
+   643→      { method: 'POST', body: JSON.stringify({ value }) },
+   644→    ),
+   645→  contentLikes: (contentId: number | string) =>
+   646→    anonRequest<{ likes: number; dislikes: number; myVote: number | null }>(platformUrl(`/api/social/content/${contentId}/likes`)),
+   647→  globalFeed: (cursor?: string | null, limit = 20) =>
+   648→    anonRequest<FeedResponse>(platformUrl('/api/social/feed/global', { cursor, limit })),
+   649→  personalFeed: (cursor?: string | null, limit = 20) =>
+   650→    authRequest<FeedResponse>(platformUrl('/api/social/feed/personal', { cursor, limit })),
+   651→
+   652→  /* ai */
+   653→  aiStatus: () =>
+   654→    anonRequest<{ provider: string; available: boolean; model: string; requestsToday: number; quota: Record<string, number> }>(
+   655→      platformUrl('/api/ai/status'),
+   656→    ),
+   657→  /* AI endpoints are public but send Bearer when present so signed-in users
+   658→     get their own (higher) daily quota and personalized results. */
+   659→  aiRecommendations: (limit = 10) =>
+   660→    authRequest<{ data: AiRecommendation[]; provider: string }>(platformUrl('/api/ai/recommendations', { limit })),
+   661→  aiSummarize: (contentId: number | string) =>
+   662→    authRequest<{ summary: string; provider: string }>(platformUrl('/api/ai/summarize'), {
+   663→      method: 'POST',
+   664→      body: JSON.stringify({ contentId }),
+   665→    }),
+   666→  aiDescribe: (body: { title: string; type: string; genres?: string[] }) =>
+   667→    authRequest<{ description: string; provider: string }>(platformUrl('/api/ai/describe'), {
+   668→      method: 'POST',
+   669→      body: JSON.stringify(body),
+   670→    }),
+   671→  aiChat: (contentId: number | string, message: string) =>
+   672→    authRequest<{ reply: string; provider: string }>(platformUrl('/api/ai/chat'), {
+   673→      method: 'POST',
+   674→      body: JSON.stringify({ contentId, message }),
+   675→    }),
+   676→
+   677→  /* ai cloud (Phase 4 — Animaxia AI Cloud). Public routes go through
+   678→     authRequest so signed-in callers attach a Bearer token (their own plan
+   679→     quota + personalized vector rankings); strictly authed routes 401 when
+   680→     the session is missing. */
+   681→  aiCloudStatus: () => authRequest<AiCloudStatus>(platformUrl('/api/ai/cloud/status')),
+   682→  aiRagRecommend: (body: { query?: string; limit?: number }) =>
+   683→    authRequest<AiRagRecommendResponse>(platformUrl('/api/ai/rag/recommend'), {
+   684→      method: 'POST',
+   685→      body: JSON.stringify(body),
+   686→    }),
+   687→  aiRagSummarize: (contentId: number | string) =>
+   688→    authRequest<AiRagSummarizeResponse>(platformUrl('/api/ai/rag/summarize'), {
+   689→      method: 'POST',
+   690→      body: JSON.stringify({ contentId }),
+   691→    }),
+   692→  aiRagExplain: (contentId: number | string, question?: string) =>
+   693→    authRequest<AiRagExplainResponse>(platformUrl('/api/ai/rag/explain'), {
+   694→      method: 'POST',
+   695→      body: JSON.stringify({ contentId, ...(question ? { question } : {}) }),
+   696→    }),
+   697→  aiRagChat: (contentId: number | string, message: string, history: AiChatTurn[]) =>
+   698→    authRequest<AiRagChatResponse>(platformUrl('/api/ai/rag/chat'), {
+   699→      method: 'POST',
+   700→      body: JSON.stringify({ contentId, message, history }),
+   701→    }),
+   702→  aiAssistant: (message: string, history?: AiChatTurn[]) =>
+   703→    authRequest<AiAssistantResponse>(platformUrl('/api/ai/assistant'), {
+   704→      method: 'POST',
+   705→      body: JSON.stringify({ message, ...(history ? { history } : {}) }),
+   706→    }),
+   707→  aiAssistantHistory: (limit = 20) =>
+   708→    authRequest<{ ok: boolean; data: AiAssistantHistoryEntry[] }>(platformUrl('/api/ai/assistant/history', { limit })),
+   709→  aiPersonalHome: () => authRequest<AiPersonalHomeResponse>(platformUrl('/api/ai/personal/home')),
+   710→  aiPersonalFeed: (limit = 20) =>
+   711→    authRequest<AiPersonalFeedResponse>(platformUrl('/api/ai/personal/feed', { limit })),
+   712→  aiPersonalPlayer: (contentId: number | string) =>
+   713→    authRequest<AiPersonalPlayerResponse>(platformUrl('/api/ai/personal/player', { contentId })),
+   714→  aiPersonalRecap: () => authRequest<AiPersonalRecapResponse>(platformUrl('/api/ai/personal/recap')),
+   715→  aiTools: () => authRequest<{ ok: boolean; data: AiTool[] }>(platformUrl('/api/ai/tools')),
+   716→  aiToolRun: (name: string, args: Record<string, unknown>) =>
+   717→    authRequest<AiToolRunResponse>(platformUrl('/api/ai/tools/run'), {
+   718→      method: 'POST',
+   719→      body: JSON.stringify({ name, args }),
+   720→    }),
+   721→  aiAdminStats: () => authRequest<AiAdminStatsResponse>(platformUrl('/api/ai/admin/stats')),
+   722→  aiAdminPrompts: (limit = 10) => authRequest<AiAdminPromptsResponse>(platformUrl('/api/ai/admin/prompts', { limit })),
+   723→  aiAdminErrors: (limit = 10) => authRequest<AiAdminErrorsResponse>(platformUrl('/api/ai/admin/errors', { limit })),
+   724→  vectorStatus: () => anonRequest<VectorStatusResponse>(platformUrl('/api/vector/status')),
+   725→
+   726→  /* analytics */
+   727→  recordView: (contentId: number | string, event: 'view' | 'play' | 'complete') =>
+   728→    anonRequest<{ ok: true }>(platformUrl('/api/analytics/views'), {
+   729→      method: 'POST',
+   730→      body: JSON.stringify({ contentId, event }),
+   731→    }),
+   732→  trending: (window: '24h' | '7d' | '30d' = '7d', limit = 10) =>
+   733→    anonRequest<{ data: TrendingEntry[]; fallback?: boolean }>(platformUrl('/api/analytics/trending', { window, limit })),
+   734→  userAnalytics: (userId: number, days = 14) =>
+   735→    authRequest<UserAnalytics>(platformUrl(`/api/analytics/user/${userId}`, { days })),
+   736→  analyticsOverview: () => authRequest<AnalyticsOverview>(platformUrl('/api/analytics/overview')),
+   737→
+   738→  /* search */
+   739→  searchAdvanced: (p: {
+   740→    q: string;
+   741→    type?: string;
+   742→    genre?: string;
+   743→    year?: string | number;
+   744→    minRating?: number;
+   745→    sort?: 'score' | 'year' | 'rating' | 'title';
+   746→    fuzzy?: boolean;
+   747→    limit?: number;
+   748→  }) => anonRequest<SearchAdvancedResponse>(platformUrl('/api/search/advanced', p as Record<string, string | number | boolean | undefined>)),
+   749→  autocomplete: (q: string) =>
+   750→    anonRequest<{ suggestions: { id: number; title: string; type: string; thumbnail: string | null }[] }>(
+   751→      platformUrl('/api/search/autocomplete', { q }),
+   752→    ),
+   753→  searchStatus: () =>
+   754→    anonRequest<{ docs: number; terms: number; lastSync: string | null; dirty: boolean; engine: string }>(
+   755→      platformUrl('/api/search/status'),
+   756→    ),
+   757→  reindex: () => authRequest<{ ok: true; indexed: number }>(platformUrl('/api/search/index'), { method: 'POST', body: '{}' }),
+   758→
+   759→  /* cache */
+   760→  cacheStats: () =>
+   761→    anonRequest<{
+   762→      lru: Record<string, number>;
+   763→      global: Record<string, number>;
+   764→    }>(platformUrl('/api/cache/stats')),
+   765→  cacheInvalidate: (body: { tags?: string[]; prefix?: string }) =>
+   766→    authRequest<{ ok: true; cleared: number }>(platformUrl('/api/cache/invalidate'), {
+   767→      method: 'POST',
+   768→      body: JSON.stringify(body),
+   769→    }),
+   770→
+   771→  /* workers */
+   772→  workerMine: (body: { url: string; type?: string; externalId?: string }) =>
+   773→    authRequest<{ ok: true; jobId: string }>(platformUrl('/api/workers/mine'), { method: 'POST', body: JSON.stringify(body) }),
+   774→  workerPrefetch: (contentId: number) =>
+   775→    authRequest<{ ok: true; jobId: string }>(platformUrl('/api/workers/prefetch'), {
+   776→      method: 'POST',
+   777→      body: JSON.stringify({ contentId }),
+   778→    }),
+   779→  workerThumbnails: (body: { contentId?: number; missing?: boolean }) =>
+   780→    authRequest<{ ok: true; jobId: string }>(platformUrl('/api/workers/thumbnails'), { method: 'POST', body: JSON.stringify(body) }),
+   781→  workerRefresh: (source: 'tmdb' | 'jikan') =>
+   782→    authRequest<{ ok: true; jobId: string }>(platformUrl('/api/workers/refresh'), {
+   783→      method: 'POST',
+   784→      body: JSON.stringify({ source }),
+   785→    }),
+   786→  workerJobs: () => authRequest<{ data: WorkerJob[] }>(platformUrl('/api/workers/jobs')),
+   787→  workerJob: (id: string) => authRequest<WorkerJob>(platformUrl(`/api/workers/jobs/${id}`)),
+   788→  workerStatus: () =>
+   789→    authRequest<{
+   790→      pool: { size: number; busy: number; queued: number };
+   791→      jobs: { total: number; done: number; failed: number; running: number };
+   792→      schedules: { name: string; intervalMs: number; lastRunAt: string | null; nextRunAt: string | null; enabled: boolean }[];
+   793→    }>(platformUrl('/api/workers/status')),
+   794→
+   795→  /* security (admin) */
+   796→  securityStatus: () =>
+   797→    authRequest<{
+   798→      bruteForce: Record<string, number>;
+   799→      buckets: { key: string; max: number; windowMs: number; trackedClients: number; totalLimited: number }[];
+   800→      auditTotal: number;
+   801→    }>(platformUrl('/api/security/status')),
+   802→  auditLog: (limit = 50, offset = 0) =>
+   803→    authRequest<{ data: AuditEntry[]; total: number }>(platformUrl('/api/security/audit', { limit, offset })),
+   804→
+   805→  /* mobile */
+   806→  mobileHome: () => anonRequest<MobileHome>(platformUrl('/api/mobile/home')),
+   807→  mobilePlayer: (id: number | string) =>
+   808→    anonRequest<{
+   809→      content: MobileItem;
+   810→      mode: string;
+   811→      allowedTypes: string[];
+   812→      sources: { type: string; url: string; label?: string }[];
+   813→      primary: { type: string; url: string; label?: string } | null;
+   814→      nextUp: MobileItem | null;
+   815→    }>(platformUrl(`/api/mobile/player/${id}`)),
+   816→  mobileConfig: () =>
+   817→    anonRequest<{
+   818→      versions: { min: string; latest: string };
+   819→      features: Record<string, boolean>;
+   820→      endpoints: Record<string, string>;
+   821→    }>(platformUrl('/api/mobile/config')),
+   822→};
+   823→
+   824→/** Worker-generated SVG thumbnail URL (served by the backend on :4000). */
+   825→export function workerThumbnailUrl(file: string): string {
+   826→  return platformUrl(`/api/workers/thumbnails/${file}`);
+   827→}
+   828→

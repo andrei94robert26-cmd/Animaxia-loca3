@@ -1,0 +1,16 @@
+{
+  "name": "@animaxia/common",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud shared infrastructure library: config, logging, data layer, cache, rate limiting, metrics, tracing, JWT, queue, service factory.",
+  "exports": {
+    "./*": "./*"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

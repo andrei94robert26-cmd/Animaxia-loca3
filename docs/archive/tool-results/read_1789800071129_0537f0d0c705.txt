@@ -1,0 +1,662 @@
+     1→/**
+     2→ * player/src/index.ts — ANIMAXIA EDGE PLAYER worker.
+     3→ *
+     4→ * Streams HLS through the edge + serves R2 media. The gateway routes these
+     5→ * inbound paths here with the URL preserved:
+     6→ *
+     7→ *   GET /player/manifest/:id — resolve the cloud mobile player payload
+     8→ *       (GET /api/mobile/player/:id → { content, mode, allowedTypes, sources,
+     9→ *       primary, nextUp }; each source is { type, url, label } with type ∈
+    10→ *       mp4 | m3u8 | youtube | iframe — modules/player/player.js), pick the
+    11→ *       first HLS source, fetch its m3u8 (after the allowlist check) and
+    12→ *       return the REWRITTEN manifest (variant playlists → the variant
+    13→ *       endpoint, segments/keys → /hls). Responses are cached via
+    14→ *       shared/cache.ts cachedJsonFetch (key player:manifest:<id>, TTL
+    15→ *       cfg.player.manifestTtlSec, SWR 60s, stale-if-error 300s) as a JSON
+    16→ *       bundle so every HIT keeps the exact same response headers.
+    17→ *       No HLS source → the cloud payload is returned as-is with
+    18→ *       'x-edge-player: no-hls' (clients fall back to mp4/youtube).
+    19→ *   GET /player/manifest/variant?src=<enc> — same rewrite for nested
+    20→ *       playlists; allowlist enforced (403 otherwise).
+    21→ *   GET /hls?u=<enc> — segment proxy: allowlist enforced, client Range
+    22→ *       forwarded, L1 tier via the Workers Cache API ONLY (binary bodies
+    23→ *       never enter the KV tier), optional R2 write-through
+    24→ *       (hls/<sha256(url)>.<ext>, bodies ≤ 4MB, .ts/.m4s/.mp4) and R2
+    25→ *       stale-if-error when the origin throws or 5xxes.
+    26→ *   GET /player/sources/:id — the cloud mobile player payload as plain JSON
+    27→ *       (cached, key player:sources:<id>).
+    28→ *   GET|HEAD /player/media/* — MEDIA_BUCKET objects (thumbnails/,
+    29→ *       offline-test.mp4) with Range + HEAD support.
+    30→ *   GET /player/health — worker + binding stats.
+    31→ *
+    32→ * Requests carrying an Authorization header skip the shared cache entirely
+    33→ * (shared/cache.ts contract) — the underlying cloud payloads are public, but
+    34→ * cache keys are not user-scoped.
+    35→ */
+    36→
+    37→import type { EdgeCtx, EdgeEnv, EdgeWorker, R2ObjectLike } from '../../shared/types';
+    38→import type { EdgeConfig } from '../../shared/config';
+    39→import { loadEdgeConfig } from '../../shared/config';
+    40→import { jsonError, jsonOk, withCors, withSecurityHeaders } from '../../shared/http';
+    41→import { buildForwardedHeaders, hostAllowed, upstreamFetch } from '../../shared/upstream';
+    42→import { cachedJsonFetch, edgeCacheApi } from '../../shared/cache';
+    43→import { sha256Hex } from '../../shared/jwt';
+    44→import { withMetrics } from '../../shared/metrics'; // FAZA 9 ops
+    45→import { TENANT_HEADER, resolveTenantOf, tenantKeyPrefix, tenantPlayerAllowlist } from '../../shared/tenant'; // FAZA 11 multi-tenant
+    46→import { SHARD_HEADER, resolveShardOf, shardKeySegment } from '../../shared/shard'; // FAZA 13 shard-aware edge
+    47→import { M3U8_CONTENT_TYPE, contentTypeForPath, rewriteManifest, writeThroughExt } from './hls';
+    48→
+    49→/* ------------------------------------------------------------- constants --- */
+    50→
+    51→const MEDIA_PREFIX = '/player/media/';
+    52→const SEGMENT_L1_ORIGIN = 'https://edge-cache.animaxia.internal'; // synthetic Cache API origin
+    53→const SEGMENT_MAX_R2_BYTES = 4 * 1024 * 1024; // write-through cap (spec: 4MB)
+    54→const UPSTREAM_TIMEOUT_MS = 15_000;
+    55→const MANIFEST_TIMEOUT_MS = 10_000;
+    56→
+    57→/**
+    58→ * Internal cache bundle for /player/manifest/:id — what cachedJsonFetch
+    59→ * stores. flavor 'rewritten' carries the edge manifest; 'no-hls' carries the
+    60→ * untouched cloud JSON so clients can fall back to the other sources.
+    61→ */
+    62→interface ManifestBundle {
+    63→  v: 1;
+    64→  flavor: 'rewritten' | 'no-hls';
+    65→  sourceHost: string | null;
+    66→  body: string;
+    67→}
+    68→
+    69→/** Cloud mobile player source item (modules/player/player.js normalizeSources). */
+    70→interface CloudSource {
+    71→  type: string;
+    72→  url: string;
+    73→  label: string;
+    74→}
+    75→
+    76→/* ------------------------------------------------------------- helpers ----- */
+    77→
+    78→function methodNotAllowed(method: string, allow: string): Response {
+    79→  return jsonError(405, 'method_not_allowed', `Method ${method} is not allowed here.`, { allow }, { allow });
+    80→}
+    81→
+    82→/** Parse an absolute http(s) URL, or null. */
+    83→function parseHttpUrl(raw: string): URL | null {
+    84→  try {
+    85→    const url = new URL(raw);
+    86→    return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+    87→  } catch {
+    88→    return null;
+    89→  }
+    90→}
+    91→
+    92→/** Extract + normalize the `sources` array from a cloud player payload. */
+    93→function extractSources(payload: unknown): CloudSource[] {
+    94→  const raw = payload && typeof payload === 'object' ? (payload as { sources?: unknown }).sources : null;
+    95→  if (!Array.isArray(raw)) return [];
+    96→  const out: CloudSource[] = [];
+    97→  for (const entry of raw) {
+    98→    if (!entry || typeof entry !== 'object') continue;
+    99→    const record = entry as Record<string, unknown>;
+   100→    const url = typeof record.url === 'string'
+   101→      ? record.url
+   102→      : typeof record.src === 'string'
+   103→        ? record.src
+   104→        : null;
+   105→    if (!url) continue;
+   106→    out.push({
+   107→      type: typeof record.type === 'string' ? record.type : '',
+   108→      url,
+   109→      label: typeof record.label === 'string' ? record.label : '',
+   110→    });
+   111→  }
+   112→  return out;
+   113→}
+   114→
+   115→/**
+   116→ * HLS detection from the REAL cloud shape: resolvePlayer types are
+   117→ * 'mp4' | 'm3u8' | 'youtube' | 'iframe' (inferred from the URL), so the
+   118→ * canonical marker is type === 'm3u8'; label/url checks catch miner-fed
+   119→ * entries that typed themselves loosely.
+   120→ */
+   121→function isHlsSource(source: CloudSource): boolean {
+   122→  const type = source.type.toLowerCase();
+   123→  const label = source.label.toLowerCase();
+   124→  const url = source.url.toLowerCase();
+   125→  return type === 'm3u8' || type === 'hls' || label.includes('hls') || url.includes('.m3u8');
+   126→}
+   127→
+   128→/** Minimal headers for an external HLS fetch (origin UAs often reject empty). */
+   129→function hlsFetchHeaders(request: Request): Record<string, string> {
+   130→  const headers: Record<string, string> = { accept: '*/*' };
+   131→  const ua = request.headers.get('user-agent');
+   132→  if (ua) headers['user-agent'] = ua;
+   133→  return headers;
+   134→}
+   135→
+   136→/** Fetch a playlist/manifest text; null on network error or non-2xx. */
+   137→async function fetchManifestText(request: Request, target: URL): Promise<string | null> {
+   138→  try {
+   139→    const res = await fetch(target.href, {
+   140→      headers: hlsFetchHeaders(request),
+   141→      redirect: 'follow',
+   142→      signal: AbortSignal.timeout(MANIFEST_TIMEOUT_MS),
+   143→    });
+   144→    if (!res.ok) return null;
+   145→    return await res.text();
+   146→  } catch {
+   147→    return null;
+   148→  }
+   149→}
+   150→
+   151→/* --------------------------------------------- GET /player/manifest/:id ---- */
+   152→
+   153→/**
+   154→ * fetchUpstream for cachedJsonFetch: resolve the cloud player payload, pick
+   155→ * the first HLS source, fetch + rewrite its manifest, and return the whole
+   156→ * result as a JSON ManifestBundle (or pass cloud errors through untouched).
+   157→ */
+   158→async function buildManifestBundle(
+   159→  request: Request,
+   160→  env: EdgeEnv,
+   161→  id: number,
+   162→  cfg: EdgeConfig,
+   163→  tenant: string, // FAZA 11 — per-tenant HLS host allowlist
+   164→  shard: number, // FAZA 13 — shard header upstream
+   165→): Promise<Response> {
+   166→  const upstream = await upstreamFetch({
+   167→    env,
+   168→    kind: 'mobile',
+   169→    path: `/mobile/player/${id}`,
+   170→    method: 'GET',
+   171→    headers: buildForwardedHeaders(request, { [TENANT_HEADER]: tenant, [SHARD_HEADER]: String(shard) }),
+   172→  });
+   173→  if (!upstream.ok) return upstream; // 400 bad id / 404 unknown id / 5xx → passthrough
+   174→
+   175→  const cloudText = await upstream.text();
+   176→  let payload: unknown;
+   177→  try {
+   178→    payload = JSON.parse(cloudText);
+   179→  } catch {
+   180→    return jsonError(502, 'bad_upstream', `Cloud mobile player payload for id ${id} is not valid JSON.`);
+   181→  }
+   182→
+   183→  const hls = extractSources(payload).find(isHlsSource);
+   184→  const manifestUrl = hls ? parseHttpUrl(hls.url) : null;
+   185→
+   186→  if (!manifestUrl) {
+   187→    // No HLS source (or unparseable URL) → cloud payload as-is; clients use
+   188→    // the mp4/youtube entries from `sources`.
+   189→    const bundle: ManifestBundle = { v: 1, flavor: 'no-hls', sourceHost: null, body: cloudText };
+   190→    return jsonOk(bundle);
+   191→  }
+   192→  // FAZA 11: the tenant's KV allowlist (t:<slug>:player:allowlist) overrides
+   193→  // the global config list; 'global' keeps the config list unchanged.
+   194→  if (!hostAllowed(manifestUrl, await tenantPlayerAllowlist(env, tenant, cfg.player.allowHosts))) {
+   195→    return jsonError(403, 'host_not_allowed', `HLS host "${manifestUrl.host}" is not on the player allowlist for tenant '${tenant}'.`, { host: manifestUrl.host, tenant });
+   196→  }
+   197→
+   198→  const manifestText = await fetchManifestText(request, manifestUrl);
+   199→  if (manifestText === null) {
+   200→    // Origin down → still hand clients the full source list instead of a 5xx.
+   201→    const bundle: ManifestBundle = { v: 1, flavor: 'no-hls', sourceHost: manifestUrl.host, body: cloudText };
+   202→    return jsonOk(bundle);
+   203→  }
+   204→
+   205→  const bundle: ManifestBundle = {
+   206→    v: 1,
+   207→    flavor: 'rewritten',
+   208→    sourceHost: manifestUrl.host,
+   209→    body: rewriteManifest(manifestText, manifestUrl.href),
+   210→  };
+   211→  return jsonOk(bundle);
+   212→}
+   213→
+   214→/** Convert a cachedJsonFetch response (JSON bundle) into the final response. */
+   215→async function toManifestResponse(cached: Response, cfg: EdgeConfig): Promise<Response> {
+   216→  if (cached.status !== 200) return cached; // errors pass through untouched
+   217→
+   218→  const text = await cached.text();
+   219→  let bundle: ManifestBundle | null = null;
+   220→  try {
+   221→    const parsed = JSON.parse(text) as Partial<ManifestBundle>;
+   222→    if (
+   223→      parsed && typeof parsed === 'object' && parsed.v === 1
+   224→      && (parsed.flavor === 'rewritten' || parsed.flavor === 'no-hls')
+   225→      && typeof parsed.body === 'string'
+   226→    ) {
+   227→      bundle = parsed as ManifestBundle;
+   228→    }
+   229→  } catch {
+   230→    bundle = null;
+   231→  }
+   232→  if (!bundle) {
+   233→    // Not one of our bundles (defensive) → rebuild the passthrough verbatim.
+   234→    return new Response(text, { status: cached.status, statusText: cached.statusText, headers: cached.headers });
+   235→  }
+   236→
+   237→  if (bundle.flavor === 'rewritten') {
+   238→    const headers: Record<string, string> = {
+   239→      'content-type': M3U8_CONTENT_TYPE,
+   240→      'cache-control': `public, max-age=${cfg.player.manifestTtlSec}`,
+   241→      'x-edge-player': 'rewritten',
+   242→    };
+   243→    if (bundle.sourceHost) headers['x-edge-source'] = bundle.sourceHost;
+   244→    return new Response(bundle.body, { headers });
+   245→  }
+   246→  return new Response(bundle.body, {
+   247→    headers: {
+   248→      'content-type': 'application/json; charset=utf-8',
+   249→      'cache-control': `public, max-age=${cfg.player.manifestTtlSec}`,
+   250→      'x-edge-player': 'no-hls',
+   251→    },
+   252→  });
+   253→}
+   254→
+   255→async function handleManifest(
+   256→  request: Request,
+   257→  env: EdgeEnv,
+   258→  ctx: EdgeCtx,
+   259→  id: number,
+   260→  cfg: EdgeConfig,
+   261→  tenant: string, // FAZA 11
+   262→  shard: number, // FAZA 13
+   263→): Promise<Response> {
+   264→  const cacheable = !request.headers.has('authorization');
+   265→  const cached = await cachedJsonFetch({
+   266→    env,
+   267→    ctx,
+   268→    // FAZA 11: tenant-scoped; FAZA 13: + shard segment after the tenant prefix.
+   269→    key: `${tenantKeyPrefix(tenant)}${shardKeySegment(shard)}player:manifest:${id}`,
+   270→    fetchUpstream: () => buildManifestBundle(request, env, id, cfg, tenant, shard),
+   271→    opts: {
+   272→      ttlSec: cacheable ? cfg.player.manifestTtlSec : 0,
+   273→      swrSec: 60,
+   274→      staleIfErrorSec: 300,
+   275→    },
+   276→    cacheApi: edgeCacheApi(),
+   277→  });
+   278→  return toManifestResponse(cached, cfg);
+   279→}
+   280→
+   281→/* ------------------------------------- GET /player/manifest/variant?src= --- */
+   282→
+   283→async function handleVariant(request: Request, env: EdgeEnv, url: URL, cfg: EdgeConfig, tenant: string): Promise<Response> {
+   284→  const src = url.searchParams.get('src');
+   285→  if (!src) {
+   286→    return jsonError(400, 'bad_src', 'Missing required query parameter: src (the encoded upstream playlist URL).');
+   287→  }
+   288→  const target = parseHttpUrl(src);
+   289→  if (!target) {
+   290→    return jsonError(400, 'bad_src', 'Parameter src must be an absolute http(s) playlist URL.');
+   291→  }
+   292→  // FAZA 11: per-tenant allowlist (KV override, global fallback).
+   293→  if (!hostAllowed(target, await tenantPlayerAllowlist(env, tenant, cfg.player.allowHosts))) {
+   294→    return jsonError(403, 'host_not_allowed', `Playlist host "${target.host}" is not on the player allowlist for tenant '${tenant}'.`, { host: target.host, tenant });
+   295→  }
+   296→
+   297→  const text = await fetchManifestText(request, target);
+   298→  if (text === null) {
+   299→    return jsonError(502, 'upstream_unavailable', `Cannot fetch the HLS playlist from ${target.host}.`);
+   300→  }
+   301→  return new Response(rewriteManifest(text, target.href), {
+   302→    headers: {
+   303→      'content-type': M3U8_CONTENT_TYPE,
+   304→      'cache-control': `public, max-age=${cfg.player.manifestTtlSec}`,
+   305→      'x-edge-player': 'rewritten',
+   306→      'x-edge-source': target.host,
+   307→    },
+   308→  });
+   309→}
+   310→
+   311→/* ------------------------------------------------------- GET /hls?u= ------ */
+   312→
+   313→function segmentL1Request(cacheKey: string): Request {
+   314→  return new Request(`${SEGMENT_L1_ORIGIN}/hls/${encodeURIComponent(cacheKey)}`);
+   315→}
+   316→
+   317→/** R2 stale-if-error copy for a segment (only mirrored extensions are held). */
+   318→async function segmentFromR2(env: EdgeEnv, target: URL, cfg: EdgeConfig): Promise<Response | null> {
+   319→  if (!env.HLS_CACHE) return null;
+   320→  const ext = writeThroughExt(target.pathname);
+   321→  if (!ext) return null;
+   322→  const key = `hls/${await sha256Hex(target.href)}.${ext}`;
+   323→  let obj: R2ObjectLike | null = null;
+   324→  try {
+   325→    obj = await env.HLS_CACHE.get(key);
+   326→  } catch {
+   327→    return null;
+   328→  }
+   329→  if (!obj || !obj.body) return null;
+   330→
+   331→  const headers = new Headers();
+   332→  obj.writeHttpMetadata(headers);
+   333→  if (!headers.has('content-type')) headers.set('content-type', contentTypeForPath(target.pathname));
+   334→  headers.set('etag', obj.httpEtag);
+   335→  headers.set('accept-ranges', 'bytes');
+   336→  headers.set('cache-control', `public, max-age=${cfg.player.segmentTtlSec}`);
+   337→  headers.set('x-edge-player', 'stale-if-error');
+   338→  return new Response(obj.body, { status: 200, headers });
+   339→}
+   340→
+   341→async function handleSegment(
+   342→  request: Request,
+   343→  env: EdgeEnv,
+   344→  ctx: EdgeCtx,
+   345→  url: URL,
+   346→  cfg: EdgeConfig,
+   347→  tenant: string, // FAZA 11
+   348→): Promise<Response> {
+   349→  const raw = url.searchParams.get('u');
+   350→  if (!raw) {
+   351→    return jsonError(400, 'bad_url', 'Missing required query parameter: u (the encoded segment URL).');
+   352→  }
+   353→  const target = parseHttpUrl(raw);
+   354→  if (!target) {
+   355→    return jsonError(400, 'bad_url', 'Parameter u must be an absolute http(s) segment URL.');
+   356→  }
+   357→  // FAZA 11: per-tenant allowlist (KV override, global fallback).
+   358→  if (!hostAllowed(target, await tenantPlayerAllowlist(env, tenant, cfg.player.allowHosts))) {
+   359→    return jsonError(403, 'host_not_allowed', `Segment host "${target.host}" is not on the player allowlist for tenant '${tenant}'.`, { host: target.host, tenant });
+   360→  }
+   361→
+   362→  const rangeHeader = request.headers.get('range');
+   363→  const cacheApi = edgeCacheApi();
+   364→  const cacheKey = `hls:${await sha256Hex(target.href)}`;
+   365→
+   366→  // L1 — Cache API only (binary bodies never enter the KV tier). Full-body
+   367→  // hits; Range requests skip the tier and go upstream instead.
+   368→  if (!rangeHeader && cacheApi) {
+   369→    const hit = await cacheApi.match(segmentL1Request(cacheKey)).catch(() => null);
+   370→    if (hit && hit.status === 200) {
+   371→      const headers = new Headers(hit.headers);
+   372→      headers.set('cache-control', `public, max-age=${cfg.player.segmentTtlSec}`);
+   373→      headers.set('x-edge-cache', 'HIT');
+   374→      return new Response(hit.body, { status: 200, headers });
+   375→    }
+   376→  }
+   377→
+   378→  const headersUpstream = hlsFetchHeaders(request);
+   379→  if (rangeHeader) headersUpstream.range = rangeHeader; // client Range forwarded
+   380→
+   381→  let upstream: Response | null = null;
+   382→  try {
+   383→    upstream = await fetch(target.href, {
+   384→      headers: headersUpstream,
+   385→      redirect: 'follow',
+   386→      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+   387→    });
+   388→  } catch {
+   389→    upstream = null;
+   390→  }
+   391→
+   392→  if (!upstream || upstream.status >= 500) {
+   393→    const stale = await segmentFromR2(env, target, cfg);
+   394→    if (stale) return stale;
+   395→    if (upstream) return upstream; // 5xx passthrough
+   396→    return jsonError(502, 'upstream_unavailable', `Cannot fetch the media segment from ${target.host}.`);
+   397→  }
+   398→
+   399→  // Full 200 body → buffer once, then L1 put + optional R2 write-through.
+   400→  if (upstream.status === 200 && !rangeHeader) {
+   401→    const body = await upstream.arrayBuffer();
+   402→    const contentType = upstream.headers.get('content-type') || contentTypeForPath(target.pathname);
+   403→    const etag = upstream.headers.get('etag');
+   404→
+   405→    const headers = new Headers();
+   406→    headers.set('content-type', contentType);
+   407→    headers.set('cache-control', `public, max-age=${cfg.player.segmentTtlSec}`);
+   408→    headers.set('accept-ranges', 'bytes');
+   409→    if (etag) headers.set('etag', etag);
+   410→    headers.set('x-edge-cache', 'MISS');
+   411→
+   412→    if (cacheApi) {
+   413→      const l1Headers = new Headers();
+   414→      l1Headers.set('content-type', contentType);
+   415→      l1Headers.set('cache-control', `public, max-age=${cfg.player.segmentTtlSec}`);
+   416→      if (etag) l1Headers.set('etag', etag);
+   417→      ctx.waitUntil(
+   418→        cacheApi.put(segmentL1Request(cacheKey), new Response(body, { status: 200, headers: l1Headers }))
+   419→          .catch(() => undefined),
+   420→      );
+   421→    }
+   422→
+   423→    const ext = writeThroughExt(target.pathname);
+   424→    if (cfg.player.r2WriteThrough && env.HLS_CACHE && ext && body.byteLength > 0 && body.byteLength <= SEGMENT_MAX_R2_BYTES) {
+   425→      const r2Key = `hls/${await sha256Hex(target.href)}.${ext}`;
+   426→      ctx.waitUntil(
+   427→        env.HLS_CACHE.put(r2Key, body, { httpMetadata: { contentType } }).catch(() => null),
+   428→      );
+   429→    }
+   430→
+   431→    return new Response(body, { status: 200, headers });
+   432→  }
+   433→
+   434→  // Range (206) / non-200 upstream responses → stream through untouched.
+   435→  const passthrough = new Headers(upstream.headers);
+   436→  passthrough.set('cache-control', `public, max-age=${cfg.player.segmentTtlSec}`);
+   437→  return new Response(upstream.body, {
+   438→    status: upstream.status,
+   439→    statusText: upstream.statusText,
+   440→    headers: passthrough,
+   441→  });
+   442→}
+   443→
+   444→/* -------------------------------------------- GET /player/sources/:id ----- */
+   445→
+   446→async function handleSources(
+   447→  request: Request,
+   448→  env: EdgeEnv,
+   449→  ctx: EdgeCtx,
+   450→  id: number,
+   451→  cfg: EdgeConfig,
+   452→  tenant: string, // FAZA 11
+   453→  shard: number, // FAZA 13
+   454→): Promise<Response> {
+   455→  const cacheable = !request.headers.has('authorization');
+   456→  return cachedJsonFetch({
+   457→    env,
+   458→    ctx,
+   459→    // FAZA 11: tenant-scoped; FAZA 13: + shard segment after the tenant prefix.
+   460→    key: `${tenantKeyPrefix(tenant)}${shardKeySegment(shard)}player:sources:${id}`,
+   461→    fetchUpstream: () => upstreamFetch({
+   462→      env,
+   463→      kind: 'mobile',
+   464→      path: `/mobile/player/${id}`,
+   465→      method: 'GET',
+   466→      headers: buildForwardedHeaders(request, { [TENANT_HEADER]: tenant, [SHARD_HEADER]: String(shard) }),
+   467→    }),
+   468→    opts: {
+   469→      ttlSec: cacheable ? cfg.player.manifestTtlSec : 0,
+   470→      swrSec: 60,
+   471→      staleIfErrorSec: 300,
+   472→    },
+   473→    cacheApi: edgeCacheApi(),
+   474→  });
+   475→}
+   476→
+   477→/* --------------------------------------------- GET /player/media/* -------- */
+   478→
+   479→/** Common response headers for an R2 media object. */
+   480→function mediaHeaders(obj: R2ObjectLike, key: string): Headers {
+   481→  const headers = new Headers();
+   482→  obj.writeHttpMetadata(headers);
+   483→  if (!headers.has('content-type')) headers.set('content-type', contentTypeForPath(key));
+   484→  headers.set('etag', obj.httpEtag);
+   485→  headers.set('accept-ranges', 'bytes');
+   486→  headers.set('cache-control', 'public, max-age=86400');
+   487→  return headers;
+   488→}
+   489→
+   490→type RangeSpec = { offset: number; length: number } | 'unsatisfiable' | null;
+   491→
+   492→/**
+   493→ * Parse a Range header against a known object size.
+   494→ *   null             → malformed → ignore, serve the full 200 (RFC 9110)
+   495→ *   'unsatisfiable'  → outside the object → 416
+   496→ */
+   497→function parseRangeHeader(header: string, size: number): RangeSpec {
+   498→  const match = /^bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/.exec(header.trim());
+   499→  if (!match) return null;
+   500→  const [, startRaw, endRaw] = match;
+   501→  if (startRaw === '' && endRaw === '') return null;
+   502→  if (startRaw === '') {
+   503→    // suffix range: last N bytes
+   504→    const n = Number(endRaw);
+   505→    if (!Number.isFinite(n) || n <= 0) return 'unsatisfiable';
+   506→    const length = Math.min(n, size);
+   507→    return { offset: size - length, length };
+   508→  }
+   509→  const start = Number(startRaw);
+   510→  if (!Number.isFinite(start) || start < 0) return null;
+   511→  if (start >= size) return 'unsatisfiable';
+   512→  if (endRaw === '') return { offset: start, length: size - start };
+   513→  const end = Number(endRaw);
+   514→  if (!Number.isFinite(end) || end < start) return null;
+   515→  return { offset: start, length: Math.min(end, size - 1) - start + 1 };
+   516→}
+   517→
+   518→async function handleMedia(request: Request, env: EdgeEnv, url: URL): Promise<Response> {
+   519→  const method = request.method.toUpperCase();
+   520→  if (method !== 'GET' && method !== 'HEAD') {
+   521→    return methodNotAllowed(method, 'GET, HEAD');
+   522→  }
+   523→
+   524→  let key = url.pathname.slice(MEDIA_PREFIX.length);
+   525→  try {
+   526→    key = decodeURIComponent(key);
+   527→  } catch {
+   528→    /* keep the raw form — R2 keys are opaque strings */
+   529→  }
+   530→  key = key.replace(/^\/+/, ''); // tolerate a doubled slash after the prefix
+   531→  if (!key || key.includes('..')) {
+   532→    return jsonError(400, 'bad_key', 'Media key must be a non-empty R2 object path without ".." segments.');
+   533→  }
+   534→  if (!env.MEDIA_BUCKET) {
+   535→    return jsonError(501, 'media_unavailable', 'The MEDIA_BUCKET R2 binding is not configured on this worker.');
+   536→  }
+   537→  const bucket = env.MEDIA_BUCKET;
+   538→
+   539→  if (method === 'HEAD') {
+   540→    const obj = await bucket.head(key).catch(() => null);
+   541→    if (!obj) return jsonError(404, 'media_not_found', `No MEDIA_BUCKET object at key "${key}".`);
+   542→    const headers = mediaHeaders(obj, key);
+   543→    headers.set('content-length', String(obj.size));
+   544→    return new Response(null, { status: 200, headers });
+   545→  }
+   546→
+   547→  const rangeHeader = request.headers.get('range');
+   548→  if (rangeHeader) {
+   549→    const head = await bucket.head(key).catch(() => null);
+   550→    if (!head) return jsonError(404, 'media_not_found', `No MEDIA_BUCKET object at key "${key}".`);
+   551→    const range = parseRangeHeader(rangeHeader, head.size);
+   552→    if (range === 'unsatisfiable') {
+   553→      return jsonError(416, 'range_not_satisfiable', `Range "${rangeHeader}" lies outside the object (size ${head.size}).`, {}, { 'content-range': `bytes */${head.size}` });
+   554→    }
+   555→    if (range) {
+   556→      const obj = await bucket.get(key, { range: { offset: range.offset, length: range.length } }).catch(() => null);
+   557→      if (!obj) return jsonError(404, 'media_not_found', `No MEDIA_BUCKET object at key "${key}".`);
+   558→      const headers = mediaHeaders(obj, key);
+   559→      headers.set('content-length', String(range.length));
+   560→      headers.set('content-range', `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`);
+   561→      return new Response(obj.body, { status: 206, headers });
+   562→    }
+   563→    // malformed Range → fall through to the full 200 below
+   564→  }
+   565→
+   566→  const obj = await bucket.get(key).catch(() => null);
+   567→  if (!obj) return jsonError(404, 'media_not_found', `No MEDIA_BUCKET object at key "${key}".`);
+   568→  const headers = mediaHeaders(obj, key);
+   569→  headers.set('content-length', String(obj.size));
+   570→  return new Response(obj.body, { status: 200, headers });
+   571→}
+   572→
+   573→/* ---------------------------------------------------- GET /player/health -- */
+   574→
+   575→function handleHealth(env: EdgeEnv, cfg: EdgeConfig): Response {
+   576→  return jsonOk({
+   577→    ok: true,
+   578→    worker: 'animaxia-edge-player',
+   579→    r2: !!env.MEDIA_BUCKET,
+   580→    r2WriteThrough: cfg.player.r2WriteThrough,
+   581→    allowHosts: cfg.player.allowHosts.length,
+   582→  });
+   583→}
+   584→
+   585→/* ------------------------------------------------------------- routing ---- */
+   586→
+   587→async function route(request: Request, env: EdgeEnv, ctx: EdgeCtx): Promise<Response> {
+   588→  const url = new URL(request.url);
+   589→  const path = url.pathname.replace(/\/+$/, '') || '/';
+   590→  const method = request.method.toUpperCase();
+   591→  const readable = method === 'GET' || method === 'HEAD';
+   592→
+   593→  // FAZA 11: resolve the tenant once per request (header → JWT claim →
+   594→  // 'global'); scopes the allowlist resolution + manifest/sources caches.
+   595→  const tenant = await resolveTenantOf(request, env);
+   596→  // FAZA 13: resolve the shard the same way (valid client header override >
+   597→  // tenant > content path > 0) — scopes the manifest/sources cache keys and
+   598→  // rides upstream to the monolith.
+   599→  const shard = resolveShardOf(request, tenant, env);
+   600→
+   601→  if (path === '/player/manifest/variant') {
+   602→    if (!readable) return methodNotAllowed(method, 'GET');
+   603→    return handleVariant(request, env, url, await loadEdgeConfig(env), tenant);
+   604→  }
+   605→
+   606→  if (path === '/hls' || path === '/player/hls') {
+   607→    if (!readable) return methodNotAllowed(method, 'GET');
+   608→    return handleSegment(request, env, ctx, url, await loadEdgeConfig(env), tenant);
+   609→  }
+   610→
+   611→  const manifestMatch = /^\/player\/manifest\/([^/]+)$/.exec(path);
+   612→  if (manifestMatch) {
+   613→    if (!readable) return methodNotAllowed(method, 'GET');
+   614→    const id = Number(manifestMatch[1]);
+   615→    if (!Number.isInteger(id) || id <= 0) {
+   616→      return jsonError(400, 'bad_id', `Invalid content id "${manifestMatch[1]}" — expected a positive integer.`);
+   617→    }
+   618→    return handleManifest(request, env, ctx, id, await loadEdgeConfig(env), tenant, shard);
+   619→  }
+   620→
+   621→  const sourcesMatch = /^\/player\/sources\/([^/]+)$/.exec(path);
+   622→  if (sourcesMatch) {
+   623→    if (!readable) return methodNotAllowed(method, 'GET');
+   624→    const id = Number(sourcesMatch[1]);
+   625→    if (!Number.isInteger(id) || id <= 0) {
+   626→      return jsonError(400, 'bad_id', `Invalid content id "${sourcesMatch[1]}" — expected a positive integer.`);
+   627→    }
+   628→    return handleSources(request, env, ctx, id, await loadEdgeConfig(env), tenant, shard);
+   629→  }
+   630→
+   631→  if (path === '/player/media' || path.startsWith('/player/media/')) {
+   632→    return handleMedia(request, env, url);
+   633→  }
+   634→
+   635→  if (path === '/player/health' || path === '/health') {
+   636→    if (!readable) return methodNotAllowed(method, 'GET');
+   637→    return handleHealth(env, await loadEdgeConfig(env));
+   638→  }
+   639→
+   640→  return jsonError(404, 'not_found', `No player-worker route for ${method} ${path}`);
+   641→}
+   642→
+   643→/* ------------------------------------------------------------- entry ----- */
+   644→
+   645→const worker: EdgeWorker = {
+   646→  fetch: withMetrics('player', async (request: Request, env: EdgeEnv, ctx: EdgeCtx): Promise<Response> => {
+   647→    let inner: Response;
+   648→    if (request.method === 'OPTIONS') {
+   649→      inner = new Response(null, { status: 204 }); // withCors answers preflights
+   650→    } else {
+   651→      try {
+   652→        inner = await route(request, env, ctx);
+   653→      } catch (err) {
+   654→        inner = jsonError(500, 'internal_error', `Unhandled player-worker error: ${String((err as Error)?.message ?? err)}`);
+   655→      }
+   656→    }
+   657→    return withCors(withSecurityHeaders(inner), request);
+   658→  }), // FAZA 9 ops: /metrics + request counters
+   659→};
+   660→
+   661→export default worker;
+   662→

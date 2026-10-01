@@ -1,0 +1,207 @@
+/* PersonalFeed.module.css — scoped styles for the AI-ranked personal feed. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* --------------------------- not-personalized notice ------------------------- */
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--amber-tint);
+  border: 1px solid var(--amber-line);
+  color: var(--amber);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+/* ------------------------------- weekly recap -------------------------------- */
+
+.recapCard {
+  background: var(--emerald-tint);
+  border: 1px solid var(--emerald-line);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.recapHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recapWeek {
+  color: var(--emerald);
+  font-size: 11.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.recapText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.recapStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+/* ------------------------------- feed items ---------------------------------- */
+
+.item {
+  background: var(--card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.topRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.topText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.headLine {
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.username {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.verb {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.contentInline {
+  color: var(--rose-soft);
+  font-weight: 700;
+}
+
+.time {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.typeIcon {
+  color: var(--rose-soft);
+  flex-shrink: 0;
+}
+
+/* content row: thumbnail + preview */
+.contentRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.contentThumbButton {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  display: block;
+}
+
+.contentThumb {
+  width: 92px;
+  height: 56px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  display: block;
+  background: var(--skeleton);
+  border: 1px solid var(--border-soft);
+  transition: border-color 0.15s ease;
+}
+
+.contentThumbButton:hover .contentThumb {
+  border-color: var(--rose-line);
+}
+
+.contentThumbFallback {
+  width: 92px;
+  height: 56px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  background: var(--rose-tint);
+  border: 1px solid var(--rose-line);
+  color: var(--rose-soft);
+}
+
+.preview {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* the rose "why the AI surfaced this" block */
+.aiWhy {
+  background: var(--rose-tint);
+  border: 1px solid var(--rose-line);
+  border-radius: var(--radius-md);
+  padding: 10px 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.aiWhyLabel {
+  display: block;
+  color: var(--rose-soft);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 2px;
+}
+
+.aiWhyText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}

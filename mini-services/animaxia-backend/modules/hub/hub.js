@@ -1,7 +1,7 @@
 /**
  * modules/hub/hub.js — FAZA 20 → AR10M: public hub API (mounted at /api/hub).
  *
- * 9 routes, 100% real Neon data (zero mock/placeholder — every number is a
+ * 9 routes, 100% real SQLite local data (zero mock/placeholder — every number is a
  * live SQL measurement; AR10M: fostul spațiu logic 30B simulat a fost
  * eliminat — capacitatea se declară separat în /scale, onest):
  *
@@ -14,7 +14,7 @@
  *                          (CASE WHEN), sources (contentsources registry +
  *                          content providers), viewevents (total/24h/top5),
  *                          users, uptime.
- *   GET /scale           → honest scale report: real Neon numbers (items,
+ *   GET /scale           → honest scale report: real SQLite local numbers (items,
  *                          sources, users, DB size) + AR10M capacity framing
  *                          (designed 10M / tested / benchmarked — proiectată,
  *                          testată, demonstrată, declarate separat).
@@ -27,17 +27,17 @@
  *                          viewevents fallback) / ai (top-rated per genre —
  *                          honest 'ai-fallback', the protected AI Home engine
  *                          is not importable) + 1:1:1 interleaved combined.
- *   GET /recommendations → real Neon picks only (trending 7d views +
+ *   GET /recommendations → real SQLite local picks only (trending 7d views +
  *                          top-rated fallback, criteria per item). AR10M:
  *                          fostul „logical" 30B sample simulat — eliminat.
  *
- * All queries are parameterized ($1..$n) through modules/platform/sql.js
+ * All queries are parameterized through modules/platform/sql.js
  * (same house style as the other platform modules).
  */
 
 import express from 'express';
 import { readFileSync } from 'node:fs';
-import { rows, one, num, isoOrNull, parseJsonb, assertPostgres } from '../platform/sql.js';
+import { rows, one, num, isoOrNull, parseJsonb } from '../platform/sql.js';
 import { shardingModelSnapshot } from '../sharding/model.js'; // pure module (FAZA 13 legacy model)
 import { logger } from '../../utils/logger.js';
 
@@ -77,11 +77,11 @@ const RECOMMENDATIONS_TRENDING_LIMIT = 6;
 /* Safe JSONB array extraction ('[]' when the key is missing or not an array)
  * and safe numeric casts (regex-guarded — a malformed value degrades to NULL
  * instead of failing the whole query). Same approach as search.js filters. */
-const GENRES_ARRAY = `CASE WHEN jsonb_typeof(metadata->'genres') = 'array' THEN metadata->'genres' ELSE '[]'::jsonb END`;
-const ACTORS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'actors') = 'array' THEN metadata->'actors' ELSE '[]'::jsonb END`;
-const STUDIOS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'studios') = 'array' THEN metadata->'studios' ELSE '[]'::jsonb END`;
-const RATING_NUM = `CASE WHEN (metadata->>'rating') ~ '^[0-9]+\\.?[0-9]*$' THEN (metadata->>'rating')::numeric ELSE NULL END`;
-const YEAR_INT = `CASE WHEN (metadata->>'year') ~ '^[0-9]+$' THEN (metadata->>'year')::int ELSE NULL END`;
+const GENRES_ARRAY = `CASE WHEN json_type(metadata, '$.genres') = 'array' THEN json_extract(metadata, '$.genres') ELSE '[]' END`;
+const ACTORS_ARRAY = `CASE WHEN json_type(metadata, '$.actors') = 'array' THEN json_extract(metadata, '$.actors') ELSE '[]' END`;
+const STUDIOS_ARRAY = `CASE WHEN json_type(metadata, '$.studios') = 'array' THEN json_extract(metadata, '$.studios') ELSE '[]' END`;
+const RATING_NUM = `CAST(json_extract(metadata, '$.rating') AS REAL)`;
+const YEAR_INT = `CAST(json_extract(metadata, '$.year') AS INTEGER)`;
 
 const router = express.Router();
 
@@ -119,11 +119,11 @@ function buildBrowseWhere(filters, exclude = new Set()) {
     return `$${params.length}`;
   };
   if (!exclude.has('type') && filters.types.length) {
-    clauses.push(`type = ANY(${add(filters.types)}::text[])`);
+    clauses.push(`type IN (SELECT value FROM json_each(${add(JSON.stringify(filters.types))}))`);
   }
   if (!exclude.has('genre') && filters.genre) {
-    // Exact case-insensitive match inside metadata.genres[] (ILIKE without wildcards).
-    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${GENRES_ARRAY}) g WHERE g ILIKE ${add(filters.genre)})`);
+    // Exact case-insensitive match inside metadata.genres[] (LIKE without wildcards).
+    clauses.push(`EXISTS (SELECT 1 FROM json_each(${GENRES_ARRAY}) g WHERE lower(g.value) = lower(${add(filters.genre)}))`);
   }
   if (!exclude.has('year') && (filters.year != null || filters.yearFrom != null || filters.yearTo != null)) {
     clauses.push(`${YEAR_INT} IS NOT NULL`);
@@ -132,13 +132,13 @@ function buildBrowseWhere(filters, exclude = new Set()) {
     if (filters.yearTo != null) clauses.push(`${YEAR_INT} <= ${add(filters.yearTo)}`);
   }
   if (!exclude.has('q') && filters.q) {
-    clauses.push(`title ILIKE '%' || ${add(filters.q)} || '%'`);
+    clauses.push(`lower(title) LIKE '%' || lower(${add(filters.q)}) || '%'`);
   }
   if (!exclude.has('actor') && filters.actor) {
-    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${ACTORS_ARRAY}) a WHERE a ILIKE '%' || ${add(filters.actor)} || '%')`);
+    clauses.push(`EXISTS (SELECT 1 FROM json_each(${ACTORS_ARRAY}) a WHERE lower(a.value) LIKE '%' || lower(${add(filters.actor)}) || '%')`);
   }
   if (!exclude.has('studio') && filters.studio) {
-    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${STUDIOS_ARRAY}) st WHERE st ILIKE '%' || ${add(filters.studio)} || '%')`);
+    clauses.push(`EXISTS (SELECT 1 FROM json_each(${STUDIOS_ARRAY}) st WHERE lower(st.value) LIKE '%' || lower(${add(filters.studio)}) || '%')`);
   }
   if (!exclude.has('minRating') && filters.minRating != null) {
     clauses.push(`${RATING_NUM} >= ${add(filters.minRating)}`);
@@ -164,7 +164,7 @@ function buildBrowseOrder(sort, filters, startIdx) {
     // Prefix hits outrank infix hits; ties break on recency (deterministic).
     const q1 = add(filters.q);
     const q2 = add(filters.q);
-    sql = `ORDER BY (CASE WHEN title ILIKE ${q1} || '%' THEN 2 WHEN title ILIKE '%' || ${q2} || '%' THEN 1 ELSE 0 END) DESC, createdat DESC, id ASC`;
+    sql = `ORDER BY (CASE WHEN lower(title) LIKE lower(${q1}) || '%' THEN 2 WHEN lower(title) LIKE '%' || lower(${q2}) || '%' THEN 1 ELSE 0 END) DESC, createdat DESC, id ASC`;
   } else {
     sql = `ORDER BY createdat DESC, id DESC`; // 'recent' (default)
   }
@@ -172,7 +172,6 @@ function buildBrowseOrder(sort, filters, startIdx) {
 }
 
 router.get('/browse', wrap(async (req, res) => {
-  assertPostgres();
   const startedAt = Date.now();
 
   // ---- filter parsing (echoed in the response) ----
@@ -215,17 +214,17 @@ router.get('/browse', wrap(async (req, res) => {
   const whereNoGenre = buildBrowseWhere(filters, new Set(['genre']));
   const whereNoYear = buildBrowseWhere(filters, new Set(['year']));
   const queries = [
-    one(`SELECT COUNT(*)::int AS total FROM content ${where.sql}`, where.params),
+    one(`SELECT COUNT(*) AS total FROM content ${where.sql}`, where.params),
     rows(`SELECT * FROM content ${where.sql} ${order.sql} LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`, dataParams),
   ];
   if (wantFacets) {
     queries.push(
-      rows(`SELECT type AS value, COUNT(*)::int AS count FROM content ${whereNoType.sql} GROUP BY type ORDER BY count DESC, value ASC`, whereNoType.params),
-      rows(`SELECT g AS value, COUNT(DISTINCT content.id)::int AS count
-            FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+      rows(`SELECT type AS value, COUNT(*) AS count FROM content ${whereNoType.sql} GROUP BY type ORDER BY count DESC, value ASC`, whereNoType.params),
+      rows(`SELECT g.value AS value, COUNT(DISTINCT content.id) AS count
+            FROM content, json_each(${GENRES_ARRAY}) AS g
             ${whereNoGenre.sql}
-            GROUP BY g ORDER BY count DESC, value ASC LIMIT ${FACET_GENRES_CAP}`, whereNoGenre.params),
-      rows(`SELECT ${YEAR_INT} AS value, COUNT(*)::int AS count
+            GROUP BY g.value ORDER BY count DESC, value ASC LIMIT ${FACET_GENRES_CAP}`, whereNoGenre.params),
+      rows(`SELECT ${YEAR_INT} AS value, COUNT(*) AS count
             FROM content ${whereNoYear.sql ? `${whereNoYear.sql} AND` : 'WHERE'} ${YEAR_INT} IS NOT NULL
             GROUP BY 1 ORDER BY 1 DESC LIMIT ${FACET_YEARS_CAP}`, whereNoYear.params),
     );
@@ -247,7 +246,7 @@ router.get('/browse', wrap(async (req, res) => {
 
   res.json({
     ok: true,
-    source: 'neon',
+    source: 'sqlite-local',
     data: dataRows.map(contentRow),
     total,
     page,
@@ -266,34 +265,34 @@ router.get('/browse', wrap(async (req, res) => {
 /** Live platform stats — shared verbatim by /stats and /scale (no HTTP reuse). */
 async function collectHubStats() {
   const [totalRow, byType, completeRow, registryRow, registryByKind, providers, viewsRow, topViewed, usersRow] = await Promise.all([
-    one('SELECT COUNT(*)::int AS n FROM content'),
-    rows('SELECT type AS value, COUNT(*)::int AS count FROM content GROUP BY type ORDER BY count DESC, value ASC'),
+    one('SELECT COUNT(*) AS n FROM content'),
+    rows('SELECT type AS value, COUNT(*) AS count FROM content GROUP BY type ORDER BY count DESC, value ASC'),
     // Metadata completeness — CASE/FILTER WHEN per field + all three combined (0-100).
     one(`SELECT
-           COUNT(*)::int AS rows,
-           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(thumbnail, '') <> '') / COUNT(*))::int AS pct_thumbnail,
-           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(metadata->>'overview', '') <> '') / COUNT(*))::int AS pct_overview,
-           ROUND(100.0 * COUNT(*) FILTER (WHERE jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_genres,
+           COUNT(*) AS rows,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(thumbnail, '') <> '') / COUNT(*)) AS pct_thumbnail,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(json_extract(metadata, '$.overview'), '') <> '') / COUNT(*)) AS pct_overview,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE json_array_length(${GENRES_ARRAY}) > 0) / COUNT(*)) AS pct_genres,
            ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(thumbnail, '') <> ''
-             AND COALESCE(metadata->>'overview', '') <> ''
-             AND jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_complete
+             AND COALESCE(json_extract(metadata, '$.overview'), '') <> ''
+             AND json_array_length(${GENRES_ARRAY}) > 0) / COUNT(*)) AS pct_complete
          FROM content`),
     // contentsources registry (structure per modules/ingest/dedup.js — urlhash/url/kind/addedby).
-    one('SELECT COUNT(*)::int AS total, COUNT(DISTINCT url)::int AS distinct_urls FROM contentsources'),
-    rows('SELECT kind AS value, COUNT(*)::int AS count FROM contentsources GROUP BY kind ORDER BY count DESC'),
+    one('SELECT COUNT(*) AS total, COUNT(DISTINCT url) AS distinct_urls FROM contentsources'),
+    rows('SELECT kind AS value, COUNT(*) AS count FROM contentsources GROUP BY kind ORDER BY count DESC'),
     // Ingest provider labels embedded in content metadata (honest supplement —
     // the registry itself is authoritative and may legitimately be empty).
-    rows(`SELECT metadata->>'source' AS value, COUNT(*)::int AS count
-          FROM content WHERE COALESCE(metadata->>'source', '') <> ''
-          GROUP BY metadata->>'source' ORDER BY count DESC, value ASC`),
-    one(`SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE createdat > NOW() - INTERVAL '24 hours')::int AS last24h
+    rows(`SELECT json_extract(metadata, '$.source') AS value, COUNT(*) AS count
+          FROM content WHERE COALESCE(json_extract(metadata, '$.source'), '') <> ''
+          GROUP BY json_extract(metadata, '$.source') ORDER BY count DESC, value ASC`),
+    one(`SELECT COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE createdat > datetime('now','-24 hours')) AS last24h
          FROM viewevents`),
-    rows(`SELECT c.id, c.title, c.type, c.thumbnail, COUNT(*)::int AS views
+    rows(`SELECT c.id, c.title, c.type, c.thumbnail, COUNT(*) AS views
           FROM viewevents v JOIN content c ON c.id = v.contentid
           GROUP BY c.id, c.title, c.type, c.thumbnail
           ORDER BY views DESC, c.id ASC LIMIT 5`),
-    one('SELECT COUNT(*)::int AS n FROM users'),
+    one('SELECT COUNT(*) AS n FROM users'),
   ]);
 
   const countsByType = {};
@@ -329,11 +328,10 @@ async function collectHubStats() {
 
 /* 2. GET /stats — public platform stats (live SQL counters). */
 router.get('/stats', wrap(async (req, res) => {
-  assertPostgres();
   const stats = await collectHubStats();
   res.json({
     ok: true,
-    source: 'neon',
+    source: 'sqlite-local',
     totalItems: stats.totalItems,
     countsByType: stats.countsByType,
     metadataCompleteness: stats.completeness.completePct, // 0-100 (thumbnail+overview+genres)
@@ -346,21 +344,26 @@ router.get('/stats', wrap(async (req, res) => {
   });
 }));
 
-/* 3. GET /scale — honest AR10M scale report: real Neon numbers + capacity
+/* 3. GET /scale — honest AR10M scale report: real SQLite local numbers + capacity
  *    framing (proiectată / testată / demonstrată — declared separately,
  *    never mixed). */
 router.get('/scale', wrap(async (req, res) => {
-  assertPostgres();
   const stats = await collectHubStats();
   const model = shardingModelSnapshot(); // { shardcount, shards, mode } — legacy FAZA 13 model
-  const sizeRow = await one('SELECT pg_database_size(current_database())::bigint AS size');
+  const pageCount = await one('PRAGMA page_count');
+  const pageSize = await one('PRAGMA page_size');
+  const sizeRow = {
+    size:
+      Number(pageCount?.page_count ?? 0) *
+      Number(pageSize?.page_size ?? 0),
+  };
   const tested = ar10mBenchRows(); // null until a real AR10M benchmark completes
 
   res.json({
     ok: true,
-    source: 'neon (real measurements) + ar10m capacity framing',
+    source: 'sqlite-local (real measurements) + ar10m capacity framing',
     real: {
-      label: 'measured live from Neon (real rows)',
+      label: 'measured live from SQLite local (real rows)',
       totalItems: stats.totalItems,
       countsByType: stats.countsByType,
       sources: stats.sources, // contentsources registry + content providers — real
@@ -379,28 +382,34 @@ router.get('/scale', wrap(async (req, res) => {
       mode: model.mode,
       map: model.shards, // [{ shardid, branch, urlConfigured }]
     },
-    honesty: 'AR10M: toate cifrele „real” sunt măsurători SQL live din Neon (rânduri reale). Capacitatea proiectată este 10.000.000 de titluri pe arhitectura reală 15-shard (modules/ar10m); testată/demonstrată — doar ce arată benchmark-urile reale (/api/ar10m/stats). Fostul spațiu logic 30B simulat a fost eliminat.',
+    honesty: 'AR10M: toate cifrele „real” sunt măsurători SQL live din SQLite local (rânduri reale). Capacitatea proiectată este 10.000.000 de titluri pe arhitectura reală 15-shard (modules/ar10m); testată/demonstrată — doar ce arată benchmark-urile reale (/api/ar10m/stats). Fostul spațiu logic 30B simulat a fost eliminat.',
     generatedAt: new Date().toISOString(),
   });
 }));
 
 /* 4. GET /years — distinct years + count + best-rated sample per year. */
 router.get('/years', wrap(async (req, res) => {
-  assertPostgres();
   const data = await rows(
     `WITH years AS (
-       SELECT ${YEAR_INT} AS year, COUNT(*)::int AS count
+       SELECT ${YEAR_INT} AS year, COUNT(*) AS count
        FROM content
        GROUP BY 1
        HAVING ${YEAR_INT} IS NOT NULL
      ),
-     samples AS (
-       SELECT DISTINCT ON (${YEAR_INT})
-         ${YEAR_INT} AS year, id, title, thumbnail, type
-       FROM content
-       WHERE ${YEAR_INT} IS NOT NULL
-       ORDER BY ${YEAR_INT}, ${RATING_NUM} DESC NULLS LAST, id ASC
-     )
+      samples_ranked AS (
+        SELECT ${YEAR_INT} AS year, id, title, thumbnail, type,
+               ROW_NUMBER() OVER (
+                 PARTITION BY ${YEAR_INT}
+                 ORDER BY ${RATING_NUM} DESC NULLS LAST, id ASC
+               ) AS rn
+        FROM content
+        WHERE ${YEAR_INT} IS NOT NULL
+      ),
+      samples AS (
+        SELECT year, id, title, thumbnail, type
+        FROM samples_ranked
+        WHERE rn = 1
+      )
      SELECT years.year, years.count, samples.id AS sid, samples.title AS stitle,
             samples.thumbnail AS sthumbnail, samples.type AS stype
      FROM years LEFT JOIN samples ON samples.year = years.year
@@ -410,7 +419,7 @@ router.get('/years', wrap(async (req, res) => {
   );
   res.json({
     ok: true,
-    source: 'neon',
+    source: 'sqlite-local',
     data: data.map((r) => ({
       year: num(r.year),
       count: num(r.count),
@@ -430,25 +439,32 @@ router.get('/years', wrap(async (req, res) => {
 async function listDimension({ arrayExpr, extraValues, cap }) {
   const extra = extraValues
     ? `UNION ALL
-       SELECT content.id, content.metadata->>'network' AS value
-       FROM content WHERE COALESCE(content.metadata->>'network', '') <> ''`
+       SELECT content.id, json_extract(content.metadata, '$.network') AS value
+       FROM content WHERE COALESCE(json_extract(content.metadata, '$.network'), '') <> ''`
     : '';
   const data = await rows(
     `WITH exploded AS (
-       SELECT content.id, e AS value
-       FROM content, jsonb_array_elements_text(${arrayExpr}) AS e
+       SELECT content.id, e.value AS value
+       FROM content, json_each(${arrayExpr}) AS e
        ${extra}
      ),
      counts AS (
-       SELECT value, COUNT(DISTINCT id)::int AS count FROM exploded GROUP BY value
+       SELECT value, COUNT(DISTINCT id) AS count FROM exploded GROUP BY value
      ),
-     samples AS (
-       SELECT DISTINCT ON (e.value)
-         e.value AS value, content.id AS sid, content.title AS stitle,
-         content.thumbnail AS sthumbnail, content.type AS stype
-       FROM exploded e JOIN content ON content.id = e.id
-       ORDER BY e.value, ${RATING_NUM} DESC NULLS LAST, content.id ASC
-     )
+      samples_ranked AS (
+        SELECT e.value AS value, content.id AS sid, content.title AS stitle,
+               content.thumbnail AS sthumbnail, content.type AS stype,
+               ROW_NUMBER() OVER (
+                 PARTITION BY e.value
+                 ORDER BY ${RATING_NUM} DESC NULLS LAST, content.id ASC
+               ) AS rn
+        FROM exploded e JOIN content ON content.id = e.id
+      ),
+      samples AS (
+        SELECT value, sid, stitle, sthumbnail, stype
+        FROM samples_ranked
+        WHERE rn = 1
+      )
      SELECT counts.value, counts.count, samples.sid, samples.stitle,
             samples.sthumbnail, samples.stype
      FROM counts LEFT JOIN samples ON samples.value = counts.value
@@ -467,18 +483,16 @@ async function listDimension({ arrayExpr, extraValues, cap }) {
 
 /* 5. GET /genres — distinct genres (count DESC) + best-rated sample per genre. */
 router.get('/genres', wrap(async (req, res) => {
-  assertPostgres();
   const data = await listDimension({ arrayExpr: GENRES_ARRAY, extraValues: false, cap: GENRES_LIST_CAP });
-  res.json({ ok: true, source: 'neon', data, total: data.length, generatedAt: new Date().toISOString() });
+  res.json({ ok: true, source: 'sqlite-local', data, total: data.length, generatedAt: new Date().toISOString() });
 }));
 
 /* 6. GET /actors — distinct actors + count + best-rated sample (top 100). */
 router.get('/actors', wrap(async (req, res) => {
-  assertPostgres();
   const data = await listDimension({ arrayExpr: ACTORS_ARRAY, extraValues: false, cap: DIMENSION_SAMPLE_CAP });
   res.json({
     ok: true,
-    source: 'neon',
+    source: 'sqlite-local',
     data,
     total: data.length,
     note: data.length === 0
@@ -491,11 +505,10 @@ router.get('/actors', wrap(async (req, res) => {
 /* 7. GET /studios — distinct studios (+ network) + count + sample (top 100).
  *  /stududios is registered as an alias (the FAZA 20 spec spells it both ways). */
 async function handleStudios(_req, res) {
-  assertPostgres();
   const data = await listDimension({ arrayExpr: STUDIOS_ARRAY, extraValues: true, cap: DIMENSION_SAMPLE_CAP });
   res.json({
     ok: true,
-    source: 'neon',
+    source: 'sqlite-local',
     data,
     total: data.length,
     note: data.length === 0
@@ -509,7 +522,6 @@ router.get('/stududios', wrap(handleStudios));
 
 /* 8. GET /feed — 3-source feed: personal / global / ai + 1:1:1 combined. */
 router.get('/feed', wrap(async (req, res) => {
-  assertPostgres();
 
   // Source A — personal: latest watchlist + history items (requires login).
   let personal;
@@ -527,12 +539,12 @@ router.get('/feed', wrap(async (req, res) => {
     );
     personal = {
       items: items.map((r) => ({ content: contentRow(r), origin: r.origin, at: isoOrNull(r.at) })),
-      source: 'neon:watchlist+history',
+      source: 'sqlite-local:watchlist+history',
     };
   } else {
     personal = {
       items: [],
-      source: 'neon:watchlist+history',
+      source: 'sqlite-local:watchlist+history',
       note: 'personal feed requires a bearer token (attachUser found no user) — honest empty list',
     };
   }
@@ -561,18 +573,18 @@ router.get('/feed', wrap(async (req, res) => {
           : null,
         preview: (r.metadata && (r.metadata.preview || r.metadata.body))?.slice?.(0, 140) || null,
       })),
-      source: 'neon:activity',
+      source: 'sqlite-local:activity',
     };
   } else {
     const recent = await rows(
-      `SELECT c.*, MAX(v.createdat) AS at, COUNT(*)::int AS views
+      `SELECT c.*, MAX(v.createdat) AS at, COUNT(*) AS views
        FROM viewevents v JOIN content c ON c.id = v.contentid
        GROUP BY c.id ORDER BY at DESC LIMIT $1`,
       [FEED_LIMIT],
     );
     global = {
       items: recent.map((r) => ({ content: contentRow(r), at: isoOrNull(r.at), views: num(r.views) })),
-      source: 'neon:viewevents-fallback',
+      source: 'sqlite-local:viewevents-fallback',
       note: 'activityevents is empty — honest fallback to the most recently viewed titles',
     };
   }
@@ -581,25 +593,34 @@ router.get('/feed', wrap(async (req, res) => {
   // export its feed builder, so the honest in-process fallback is a simple
   // top-rated-title-per-top-genre query, clearly labeled 'ai-fallback'.
   const picks = await rows(
-    `WITH top_genres AS (
-       SELECT g AS genre, COUNT(DISTINCT content.id)::int AS count
-       FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
-       GROUP BY g ORDER BY count DESC, g ASC LIMIT $1
-     ),
-     best_per_genre AS (
-       SELECT DISTINCT ON (g) g AS genre, content.*
-       FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
-       ORDER BY g, ${RATING_NUM} DESC NULLS LAST, content.id ASC
-     )
-     SELECT best_per_genre.*, top_genres.count AS genre_count
-     FROM best_per_genre JOIN top_genres ON top_genres.genre = best_per_genre.genre
-     ORDER BY top_genres.count DESC, best_per_genre.genre ASC
-     LIMIT $1`,
+      `WITH top_genres AS (
+         SELECT g.value AS genre, COUNT(DISTINCT content.id) AS count
+         FROM content, json_each(${GENRES_ARRAY}) AS g
+         GROUP BY g.value
+         ORDER BY count DESC, g.value ASC
+         LIMIT $1
+       ),
+       ranked AS (
+         SELECT g.value AS genre, content.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY g.value
+                  ORDER BY ${RATING_NUM} DESC NULLS LAST, content.id ASC
+                ) AS rn
+         FROM content, json_each(${GENRES_ARRAY}) AS g
+       ),
+       best_per_genre AS (
+         SELECT * FROM ranked WHERE rn = 1
+       )
+       SELECT best_per_genre.*, top_genres.count AS genre_count
+       FROM best_per_genre
+       JOIN top_genres ON top_genres.genre = best_per_genre.genre
+       ORDER BY top_genres.count DESC, best_per_genre.genre ASC
+       LIMIT $1`,
     [FEED_LIMIT],
   );
   const ai = {
     items: picks.map((r) => ({ ...contentRow(r), genre: r.genre, criteria: 'top-rated-per-genre' })),
-    source: 'neon:ai-fallback',
+    source: 'sqlite-local:ai-fallback',
     note: 'AI Home engine (modules/ai/home.js) is protected/not exportable — honest fallback: best-rated title per top genre',
   };
 
@@ -633,17 +654,16 @@ router.get('/feed', wrap(async (req, res) => {
   });
 }));
 
-/* 9. GET /recommendations — real Neon picks only (AR10M: fostul „logical”
+/* 9. GET /recommendations — real SQLite local picks only (AR10M: fostul „logical”
  *    30B sample simulat, adus printr-un apel localhost intern — eliminat). */
 
 router.get('/recommendations', wrap(async (req, res) => {
-  assertPostgres();
 
   // Real — trending: most-viewed titles in the last 7 days.
   const trending = await rows(
-    `SELECT c.*, COUNT(*)::int AS views
+    `SELECT c.*, COUNT(*) AS views
      FROM viewevents v JOIN content c ON c.id = v.contentid
-     WHERE v.createdat > NOW() - INTERVAL '7 days'
+     WHERE v.createdat > datetime('now','-7 days')
      GROUP BY c.id
      ORDER BY views DESC, c.id ASC LIMIT $1`,
     [RECOMMENDATIONS_TRENDING_LIMIT],
@@ -656,14 +676,14 @@ router.get('/recommendations', wrap(async (req, res) => {
   const fill = fillCount > 0
     ? await rows(
         `SELECT * FROM content
-         WHERE id <> ANY($1::int[])
+         WHERE id NOT IN (SELECT value FROM json_each($1))
          ORDER BY (CASE WHEN COALESCE(thumbnail, '') <> ''
-                        AND COALESCE(metadata->>'overview', '') <> ''
-                        AND jsonb_array_length(${GENRES_ARRAY}) > 0
+                        AND COALESCE(json_extract(metadata, '$.overview'), '') <> ''
+                        AND json_array_length(${GENRES_ARRAY}) > 0
                    THEN 1 ELSE 0 END) DESC,
                   ${RATING_NUM} DESC NULLS LAST, id ASC
          LIMIT $2`,
-        [trendingIds.length ? trendingIds : [0], fillCount],
+        [JSON.stringify(trendingIds.length ? trendingIds : [0]), fillCount],
       )
     : [];
   const realItems = [
@@ -678,7 +698,7 @@ router.get('/recommendations', wrap(async (req, res) => {
   res.json({
     ok: true,
     split: 'onest',
-    real: { items: realItems, count: realItems.length, source: 'neon' },
+    real: { items: realItems, count: realItems.length, source: 'sqlite-local' },
     generatedAt: new Date().toISOString(),
   });
 }));

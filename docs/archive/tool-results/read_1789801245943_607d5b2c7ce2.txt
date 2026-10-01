@@ -1,0 +1,748 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * player-view.tsx — Stream player for library titles. Renders mp4 <video>,
+     5→ * HLS (m3u8) via dynamic hls.js import, YouTube embeds and sandboxed iframes,
+     6→ * with a source switcher, playback-policy line and an inline stream miner
+     7→ * for titles without sources — plus the Phase-4 personal "AI companion" card
+     8→ * for signed-in users (before-you-watch, predicted rating, more like this,
+     9→ * next up).
+    10→ *
+    11→ * FAZA 17 — hardening: a real fallback chain over `sources`. mp4/HLS errors
+    12→ * and a 12s load watchdog advance `sourceIndex` to the next source (with a
+    13→ * toast per hop); when every source has failed, a friendly end-of-chain card
+    14→ * replaces the player instead of crashing. hls.js instances are destroyed,
+    15→ * the <video> decoder/buffer is released on every source change/unmount and
+    16→ * all timers are cleared.
+    17→ */
+    18→
+    19→import { useCallback, useEffect, useRef, useState } from 'react';
+    20→import {
+    21→  ArrowLeft,
+    22→  ExternalLink,
+    23→  Film,
+    24→  Loader2,
+    25→  MonitorPlay,
+    26→  Pickaxe,
+    27→  Play,
+    28→  RefreshCw,
+    29→  Sparkles,
+    30→  Star,
+    31→} from 'lucide-react';
+    32→import { toast } from 'sonner';
+    33→import { api } from '@/lib/animaxia/api';
+    34→import { platform, type AiPersonalPlayerResponse } from '@/lib/animaxia/platform';
+    35→import { useApi } from '@/lib/animaxia/hooks';
+    36→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    37→import type { PlayerResponse, PlayerSource } from '@/lib/animaxia/types';
+    38→import { useAuth } from '@/components/animaxia/auth-provider';
+    39→import { Button } from '@/components/ui/button';
+    40→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+    41→import { Input } from '@/components/ui/input';
+    42→import { Skeleton } from '@/components/ui/skeleton';
+    43→import { cn } from '@/lib/utils';
+    44→import { Container } from '../section';
+    45→import { BrandPlaceholder, EmptyState, ErrorState, TypeBadge } from '../states';
+    46→
+    47→function isNotFound(message?: string | null): boolean {
+    48→  return Boolean(message && message.toLowerCase().includes('not found'));
+    49→}
+    50→
+    51→function PlayerModeBadge({ mode }: { mode: PlayerResponse['mode'] }) {
+    52→  if (mode === 'direct') {
+    53→    return (
+    54→      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+    55→        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+    56→        Direct stream
+    57→      </span>
+    58→    );
+    59→  }
+    60→  if (mode === 'trailer') {
+    61→    return (
+    62→      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-300">
+    63→        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden />
+    64→        YouTube trailer
+    65→      </span>
+    66→    );
+    67→  }
+    68→  return (
+    69→    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-zinc-400">
+    70→      <span className="h-1.5 w-1.5 rounded-full bg-zinc-500" aria-hidden />
+    71→      No source
+    72→    </span>
+    73→  );
+    74→}
+    75→
+    76→export function PlayerView({ route }: { route: AppRoute }) {
+    77→  const { user } = useAuth();
+    78→  const id = Number(route.params[0]);
+    79→  const validId = Number.isInteger(id) && id > 0;
+    80→  const player = useApi(`player-${id}`, () => api.player(id), { enabled: validId });
+    81→
+    82→  /* FAZA 17 — source fallback chain. `sourceIndex` walks data.sources on any
+    83→     load failure (mp4/HLS error, 12s load timeout). `failedState` marks the
+    84→     friendly end-of-chain card and is scoped to the content id so it can
+    85→     never leak across titles. `reloadNonce` forces a fresh <video> mount when
+    86→     retrying the same source. */
+    87→  const [sourceIndex, setSourceIndex] = useState(0);
+    88→  const [failedState, setFailedState] = useState<{ contentId: number; reason: string } | null>(null);
+    89→  const [reloadNonce, setReloadNonce] = useState(0);
+    90→  const [mineUrl, setMineUrl] = useState('');
+    91→  const [mining, setMining] = useState(false);
+    92→
+    93→  const videoRef = useRef<HTMLVideoElement>(null);
+    94→  const sourcesRef = useRef<PlayerSource[]>([]);
+    95→  const sourceIndexRef = useRef(0);
+    96→  const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    97→  const lastAdvanceRef = useRef<{ key: string; at: number } | null>(null);
+    98→
+    99→  /* Only trust data matching the requested id — useApi keeps the previous
+   100→     record alive while the key changes (stale data across titles). */
+   101→  const current = player.data && player.data.content.id === id ? player.data : null;
+   102→  const sources = current?.sources ?? [];
+   103→  const exhausted = failedState != null && failedState.contentId === id && sources.length > 0;
+   104→  const activeSource: PlayerSource | null = exhausted
+   105→    ? null
+   106→    : sources[sourceIndex] ?? current?.primary ?? null;
+   107→
+   108→  /** Clears the 12s load watchdog — any progress event calls this. */
+   109→  const clearLoadTimer = useCallback(() => {
+   110→    if (loadTimerRef.current) {
+   111→      clearTimeout(loadTimerRef.current);
+   112→      loadTimerRef.current = null;
+   113→    }
+   114→  }, []);
+   115→
+   116→  /** Advance to the next source on failure; when none remain, switch to the
+   117→      friendly end-of-chain card instead of crashing. Duplicate signals for the
+   118→      same attempt (e.g. hls.js error + element error) are coalesced. */
+   119→  const advanceSource = useCallback(
+   120→    (reason: string) => {
+   121→      clearLoadTimer();
+   122→      const list = sourcesRef.current;
+   123→      const i = sourceIndexRef.current;
+   124→      const key = `${id}:${i}:${reason}`;
+   125→      const now = Date.now();
+   126→      if (lastAdvanceRef.current && lastAdvanceRef.current.key === key && now - lastAdvanceRef.current.at < 1500) {
+   127→        return;
+   128→      }
+   129→      lastAdvanceRef.current = { key, at: now };
+   130→      if (i + 1 < list.length) {
+   131→        sourceIndexRef.current = i + 1;
+   132→        setSourceIndex(i + 1);
+   133→        toast.info(`Sursa ${i + 1} nu răspunde (${reason}) — trec la următoarea…`);
+   134→      } else {
+   135→        setFailedState({ contentId: id, reason });
+   136→      }
+   137→    },
+   138→    [id, clearLoadTimer],
+   139→  );
+   140→
+   141→  /** Manual source chip click — clears the chain failure; clicking the chip of
+   142→      the current source forces a clean reload of that source. */
+   143→  const selectSource = (i: number) => {
+   144→    if (i < 0 || i >= sources.length) return;
+   145→    setFailedState(null);
+   146→    if (i === sourceIndex) {
+   147→      setReloadNonce((n) => n + 1);
+   148→    } else {
+   149→      sourceIndexRef.current = i;
+   150→      setSourceIndex(i);
+   151→    }
+   152→  };
+   153→
+   154→  /** "Reîncearcă de la prima sursă" — reset the chain and remount the video. */
+   155→  const retryFromFirst = () => {
+   156→    setFailedState(null);
+   157→    sourceIndexRef.current = 0;
+   158→    setSourceIndex(0);
+   159→    setReloadNonce((n) => n + 1);
+   160→  };
+   161→
+   162→  /* New title (route change) → reset the fallback chain before the new data
+   163→     ever renders, so no stale index/failure can flash. */
+   164→  useEffect(() => {
+   165→    sourceIndexRef.current = 0;
+   166→    setSourceIndex(0);
+   167→    setFailedState(null);
+   168→  }, [id]);
+   169→
+   170→  /* Fresh sources (first load or refetch after mining) → start at the primary
+   171→     source and force a clean reload of the player surface. */
+   172→  useEffect(() => {
+   173→    const d = player.data;
+   174→    if (!d || d.content.id !== id) return;
+   175→    sourcesRef.current = d.sources;
+   176→    const primary = d.primary;
+   177→    const primaryIndex = primary
+   178→      ? d.sources.findIndex((s) => s.url === primary.url && s.type === primary.type)
+   179→      : -1;
+   180→    const start = primaryIndex >= 0 ? primaryIndex : 0;
+   181→    sourceIndexRef.current = start;
+   182→    setSourceIndex(start);
+   183→    setFailedState(null);
+   184→    setReloadNonce((n) => n + 1);
+   185→  }, [player.data, id]);
+   186→
+   187→  /* ------------------------- analytics tracking ------------------------- */
+   188→
+   189→  const trackedViewRef = useRef<number | null>(null);
+   190→  const trackedPlayRef = useRef<number | null>(null);
+   191→
+   192→  /* Fire-and-forget 'view' event, once per content id per mount. */
+   193→  useEffect(() => {
+   194→    if (!player.data || player.data.content.id !== id) return;
+   195→    if (trackedViewRef.current === id) return;
+   196→    trackedViewRef.current = id;
+   197→    platform.recordView(id, 'view').catch(() => {});
+   198→  }, [player.data, id]);
+   199→
+   200→  /* 'play' event for embed renderers (youtube/iframe), once per content id. */
+   201→  useEffect(() => {
+   202→    if (!player.data || player.data.content.id !== id) return;
+   203→    const src = activeSource;
+   204→    if (!src || (src.type !== 'youtube' && src.type !== 'iframe')) return;
+   205→    if (trackedPlayRef.current === id) return;
+   206→    trackedPlayRef.current = id;
+   207→    platform.recordView(id, 'play').catch(() => {});
+   208→  }, [player.data, activeSource, id]);
+   209→
+   210→  const trackPlay = () => {
+   211→    if (trackedPlayRef.current === id) return;
+   212→    trackedPlayRef.current = id;
+   213→    platform.recordView(id, 'play').catch(() => {});
+   214→  };
+   215→
+   216→  const trackComplete = () => {
+   217→    platform.recordView(id, 'complete').catch(() => {});
+   218→  };
+   219→
+   220→  useEffect(() => {
+   221→    const url = activeSource?.url;
+   222→    const el = videoRef.current;
+   223→    if (activeSource?.type !== 'm3u8' || !url || !el) return;
+   224→    let hls: { destroy: () => void } | null = null;
+   225→    let cancelled = false;
+   226→    (async () => {
+   227→      try {
+   228→        const mod = await import('hls.js');
+   229→        const Hls = mod.default;
+   230→        if (cancelled) return;
+   231→        if (Hls.isSupported()) {
+   232→          const instance = new Hls({ enableWorker: true });
+   233→          /* FAZA 17 — fatal HLS errors destroy the instance and advance the
+   234→             source chain; non-fatal ones get a light startLoad() retry. */
+   235→          instance.on(Hls.Events.ERROR, (_event, data) => {
+   236→            if (cancelled) return;
+   237→            if (data?.fatal) {
+   238→              try {
+   239→                instance.destroy();
+   240→              } catch {
+   241→                /* already destroyed */
+   242→              }
+   243→              advanceSource('eroare HLS');
+   244→            } else {
+   245→              try {
+   246→                instance.startLoad();
+   247→              } catch {
+   248→                /* retry not possible — the load watchdog will advance */
+   249→              }
+   250→            }
+   251→          });
+   252→          instance.loadSource(url);
+   253→          instance.attachMedia(el);
+   254→          hls = instance;
+   255→        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+   256→          el.src = url;
+   257→        }
+   258→      } catch {
+   259→        /* hls.js failed to init — hand over to the fallback chain. */
+   260→        if (!cancelled) advanceSource('eroare HLS');
+   261→      }
+   262→    })();
+   263→    return () => {
+   264→      cancelled = true;
+   265→      hls?.destroy();
+   266→    };
+   267→  }, [activeSource?.type, activeSource?.url, sourceIndex, reloadNonce, advanceSource]);
+   268→
+   269→  /* FAZA 17 — 12s load watchdog: if a video source produces no loadeddata /
+   270→     canplay within the window, advance to the next source. */
+   271→  useEffect(() => {
+   272→    const t = activeSource?.type;
+   273→    if (!activeSource?.url || exhausted) return undefined;
+   274→    if (t !== 'mp4' && t !== 'm3u8') return undefined;
+   275→    clearLoadTimer();
+   276→    loadTimerRef.current = setTimeout(() => {
+   277→      loadTimerRef.current = null;
+   278→      advanceSource('timeout sursă');
+   279→    }, 12_000);
+   280→    return clearLoadTimer;
+   281→  }, [activeSource?.type, activeSource?.url, sourceIndex, reloadNonce, exhausted, advanceSource, clearLoadTimer]);
+   282→
+   283→  /* FAZA 17 — release the decoder/buffer whenever the current video element
+   284→     goes away (source change, retry or unmount): pause, drop the src and run
+   285→     load() so the browser frees the media pipeline. */
+   286→  useEffect(() => {
+   287→    const el = videoRef.current;
+   288→    if (!el) return undefined;
+   289→    return () => {
+   290→      clearLoadTimer();
+   291→      try {
+   292→        el.pause();
+   293→        el.removeAttribute('src');
+   294→        el.load();
+   295→      } catch {
+   296→        /* element already detached */
+   297→      }
+   298→    };
+   299→  }, [activeSource?.type, activeSource?.url, sourceIndex, reloadNonce, clearLoadTimer]);
+   300→
+   301→  async function handleMine(e: React.FormEvent) {
+   302→    e.preventDefault();
+   303→    if (!mineUrl.trim() || !player.data || mining) return;
+   304→    setMining(true);
+   305→    try {
+   306→      await api.miner({
+   307→        url: mineUrl.trim(),
+   308→        externalId: player.data.content.externalid,
+   309→        type: player.data.content.type,
+   310→      });
+   311→      toast.success('Stream attached');
+   312→      setMineUrl('');
+   313→      await player.refetch();
+   314→    } catch (err) {
+   315→      toast.error(err instanceof Error ? err.message : 'Mining failed');
+   316→    } finally {
+   317→      setMining(false);
+   318→    }
+   319→  }
+   320→
+   321→  if (!validId) {
+   322→    return (
+   323→      <Container className="py-20">
+   324→        <EmptyState
+   325→          title="Title not found"
+   326→          message="The player URL is missing a valid title id."
+   327→          action={
+   328→            <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/home')}>
+   329→              Back to home
+   330→            </Button>
+   331→          }
+   332→        />
+   333→      </Container>
+   334→    );
+   335→  }
+   336→
+   337→  if (player.loading && !current) {
+   338→    return (
+   339→      <Container className="py-8 sm:py-12">
+   340→        <div className="mx-auto w-full max-w-5xl space-y-5">
+   341→          <div className="flex items-center justify-between">
+   342→            <Skeleton className="h-9 w-36" />
+   343→            <Skeleton className="h-7 w-28 rounded-full" />
+   344→          </div>
+   345→          <Skeleton className="aspect-video w-full rounded-2xl" />
+   346→          <Skeleton className="h-24 w-full rounded-xl" />
+   347→        </div>
+   348→      </Container>
+   349→    );
+   350→  }
+   351→
+   352→  if (player.error && !current) {
+   353→    if (isNotFound(player.error)) {
+   354→      return (
+   355→        <Container className="py-20">
+   356→          <EmptyState
+   357→            title="Title not found"
+   358→            message={player.error}
+   359→            action={
+   360→              <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/home')}>
+   361→                Back to home
+   362→              </Button>
+   363→            }
+   364→          />
+   365→        </Container>
+   366→      );
+   367→    }
+   368→    return (
+   369→      <Container className="py-20">
+   370→        <ErrorState message={player.error} onRetry={player.refetch} />
+   371→      </Container>
+   372→    );
+   373→  }
+   374→
+   375→  const data = current;
+   376→  if (!data) return null;
+   377→
+   378→  const content = data.content;
+   379→  const md = content.metadata || {};
+   380→  const overview =
+   381→    [md.overview, md.synopsis, md.description].find((v) => typeof v === 'string' && v.trim() !== '') ||
+   382→    'No synopsis available for this title.';
+   383→  const thumb = content.thumbnail || (typeof md.backdrop === 'string' ? md.backdrop : null);
+   384→  const noSource = data.mode === 'none' || !data.primary;
+   385→
+   386→  /* FAZA 17 — "open the stream externally" suggestion: the original page
+   387→     URL from metadata when available, else the last source in the chain. */
+   388→  const externalHref =
+   389→    (typeof md.url === 'string' && /^https?:\/\//.test(md.url) ? md.url : null) ??
+   390→    (typeof md.mined?.url === 'string' && /^https?:\/\//.test(md.mined.url) ? md.mined.url : null) ??
+   391→    (sources.length > 0 ? sources[sources.length - 1].url : null);
+   392→
+   393→  return (
+   394→    <Container className="py-6 sm:py-8">
+   395→      <div className="mx-auto w-full max-w-5xl space-y-5">
+   396→        {/* Top bar */}
+   397→        <div className="flex flex-wrap items-center justify-between gap-3">
+   398→          <Button
+   399→            variant="outline"
+   400→            className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   401→            onClick={() => navigate(`/content/${id}`)}
+   402→          >
+   403→            <ArrowLeft aria-hidden /> Back to details
+   404→          </Button>
+   405→          <PlayerModeBadge mode={data.mode} />
+   406→        </div>
+   407→
+   408→        {/* Player surface */}
+   409→        {noSource ? (
+   410→          <div className="space-y-4">
+   411→            <EmptyState
+   412→              title="No stream sources available"
+   413→              message={
+   414→                data.note ||
+   415→                'This title has no playable sources yet. Mine a stream below and it will be attached instantly.'
+   416→              }
+   417→              icon={<MonitorPlay className="h-6 w-6" aria-hidden />}
+   418→            />
+   419→            <Card className="border-white/10 bg-white/[0.03]">
+   420→              <CardHeader>
+   421→                <CardTitle className="flex items-center gap-2 text-base">
+   422→                  <Pickaxe className="h-4 w-4 text-rose-400" aria-hidden />
+   423→                  Mine a stream
+   424→                </CardTitle>
+   425→                <CardDescription>
+   426→                  Point the miner at a page or direct media URL — it extracts mp4, m3u8, iframe and YouTube sources
+   427→                  and attaches them to this title.
+   428→                </CardDescription>
+   429→              </CardHeader>
+   430→              <CardContent>
+   431→                <form className="flex flex-col gap-3 sm:flex-row" onSubmit={handleMine}>
+   432→                  <div className="flex-1">
+   433→                    <label htmlFor="player-mine-url" className="sr-only">
+   434→                      Stream or page URL
+   435→                    </label>
+   436→                    <Input
+   437→                      id="player-mine-url"
+   438→                      value={mineUrl}
+   439→                      onChange={(e) => setMineUrl(e.target.value)}
+   440→                      placeholder="https://example.com/page-or-stream"
+   441→                      className="border-white/10 bg-black/40"
+   442→                    />
+   443→                  </div>
+   444→                  <Button
+   445→                    type="submit"
+   446→                    disabled={mining || !mineUrl.trim()}
+   447→                    className="bg-rose-600 font-bold hover:bg-rose-500"
+   448→                  >
+   449→                    {mining ? <Loader2 className="animate-spin" aria-hidden /> : <Pickaxe aria-hidden />}
+   450→                    Mine &amp; attach
+   451→                  </Button>
+   452→                </form>
+   453→              </CardContent>
+   454→            </Card>
+   455→          </div>
+   456→        ) : exhausted ? (
+   457→          /* FAZA 17 — every source in the chain failed: friendly end-of-chain
+   458→              card (never a crash). Retry restarts the chain from source 1. */
+   459→          <Card className="border-rose-500/30 bg-rose-500/[0.07]">
+   460→            <CardContent className="flex flex-col items-center gap-4 p-8 text-center sm:p-10">
+   461→              <span className="grid h-12 w-12 place-items-center rounded-2xl border border-rose-500/30 bg-rose-500/10">
+   462→                <MonitorPlay className="h-6 w-6 text-rose-400" aria-hidden />
+   463→              </span>
+   464→              <div className="space-y-1.5">
+   465→                <h3 className="text-lg font-bold text-white">Nu am putut reda nicio sursă pentru acest titlu</h3>
+   466→                <p className="mx-auto max-w-md text-sm leading-relaxed text-zinc-400">
+   467→                  Am încercat pe rând toate cele {sources.length} surse — ultima a eșuat ("
+   468→                  {failedState?.reason}"). Poți porni lanțul de la început sau poți deschide sursa direct în browser.
+   469→                </p>
+   470→              </div>
+   471→              <div className="flex flex-wrap items-center justify-center gap-2.5">
+   472→                <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={retryFromFirst}>
+   473→                  <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+   474→                  Reîncearcă de la prima sursă
+   475→                </Button>
+   476→                {externalHref && (
+   477→                  <a
+   478→                    href={externalHref}
+   479→                    target="_blank"
+   480→                    rel="noopener noreferrer"
+   481→                    className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-white/15 bg-white/5 px-4 text-sm font-semibold text-zinc-200 transition hover:border-white/30 hover:bg-white/10 hover:text-white"
+   482→                  >
+   483→                    <ExternalLink className="h-4 w-4" aria-hidden />
+   484→                    Deschide sursa extern
+   485→                  </a>
+   486→                )}
+   487→              </div>
+   488→            </CardContent>
+   489→          </Card>
+   490→        ) : (
+   491→          <div className="aspect-video w-full overflow-hidden rounded-2xl border border-white/10 bg-black">
+   492→            {activeSource?.type === 'mp4' && (
+   493→              <video
+   494→                key={`mp4-${sourceIndex}-${activeSource.url}-${reloadNonce}`}
+   495→                ref={videoRef}
+   496→                controls
+   497→                autoPlay
+   498→                playsInline
+   499→                className="h-full w-full"
+   500→                src={activeSource.url}
+   501→                onPlay={trackPlay}
+   502→                onEnded={trackComplete}
+   503→                onError={() => advanceSource('eroare mp4')}
+   504→                onLoadedData={clearLoadTimer}
+   505→                onCanPlay={clearLoadTimer}
+   506→                onProgress={clearLoadTimer}
+   507→              />
+   508→            )}
+   509→            {activeSource?.type === 'm3u8' && (
+   510→              <video
+   511→                key={`m3u8-${sourceIndex}-${activeSource.url}-${reloadNonce}`}
+   512→                ref={videoRef}
+   513→                controls
+   514→                autoPlay
+   515→                playsInline
+   516→                className="h-full w-full"
+   517→                onPlay={trackPlay}
+   518→                onEnded={trackComplete}
+   519→                onError={() => advanceSource('eroare HLS')}
+   520→                onLoadedData={clearLoadTimer}
+   521→                onCanPlay={clearLoadTimer}
+   522→                onProgress={clearLoadTimer}
+   523→              />
+   524→            )}
+   525→            {activeSource?.type === 'youtube' && (
+   526→              <iframe
+   527→                key={activeSource.url}
+   528→                src={`${activeSource.url}${activeSource.url.includes('?') ? '&' : '?'}autoplay=1&rel=0`}
+   529→                title={content.title}
+   530→                className="h-full w-full"
+   531→                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+   532→                allowFullScreen
+   533→              />
+   534→            )}
+   535→            {activeSource?.type === 'iframe' && (
+   536→              <iframe
+   537→                key={activeSource.url}
+   538→                src={activeSource.url}
+   539→                title="Embedded player"
+   540→                className="h-full w-full"
+   541→                sandbox="allow-scripts; allow-same-origin; allow-presentation; allow-popups; allow-forms"
+   542→                allowFullScreen
+   543→                referrerPolicy="no-referrer"
+   544→              />
+   545→            )}
+   546→          </div>
+   547→        )}
+   548→
+   549→        {/* Source switcher */}
+   550→        {data.sources.length > 1 && (
+   551→          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Stream sources">
+   552→            {data.sources.map((s, i) => {
+   553→              const isActive = activeSource?.url === s.url && activeSource?.type === s.type;
+   554→              return (
+   555→                <button
+   556→                  key={`${s.type}-${i}-${s.url}`}
+   557→                  type="button"
+   558→                  onClick={() => selectSource(i)}
+   559→                  aria-pressed={isActive}
+   560→                  className={cn(
+   561→                    'rounded-full border px-3 py-1.5 text-xs font-semibold transition',
+   562→                    isActive
+   563→                      ? 'border-rose-500/60 bg-rose-600 text-white shadow-lg shadow-rose-900/30'
+   564→                      : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+   565→                  )}
+   566→                >
+   567→                  {s.label || `${s.type} ${i + 1}`}
+   568→                </button>
+   569→              );
+   570→            })}
+   571→          </div>
+   572→        )}
+   573→
+   574→        {/* Policy line */}
+   575→        <p className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+   576→          <span>Allowed by policy:</span>
+   577→          {data.allowedTypes.map((t) => (
+   578→            <span
+   579→              key={t}
+   580→              className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-zinc-400"
+   581→            >
+   582→              {t}
+   583→            </span>
+   584→          ))}
+   585→        </p>
+   586→
+   587→        {/* Info card */}
+   588→        <Card className="border-white/10 bg-white/[0.03] p-4 sm:p-5">
+   589→          <div className="flex flex-wrap items-start gap-4">
+   590→            {thumb ? (
+   591→              <img
+   592→                src={thumb}
+   593→                alt={`${content.title} thumbnail`}
+   594→                className="h-20 w-14 shrink-0 rounded object-cover"
+   595→              />
+   596→            ) : (
+   597→              <div className="grid h-20 w-14 shrink-0 place-items-center rounded bg-gradient-to-br from-white/10 to-white/[0.03]">
+   598→                <Film className="h-5 w-5 text-zinc-500" aria-hidden />
+   599→              </div>
+   600→            )}
+   601→            <div className="min-w-0 flex-1">
+   602→              <div className="flex flex-wrap items-center gap-2">
+   603→                <h2 className="text-lg font-bold text-white">{content.title}</h2>
+   604→                <TypeBadge type={content.type} />
+   605→              </div>
+   606→              <p className="mt-1.5 line-clamp-3 text-sm text-zinc-400">{overview}</p>
+   607→            </div>
+   608→            <Button
+   609→              variant="outline"
+   610→              className="shrink-0 border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   611→              onClick={() => navigate(`/content/${id}`)}
+   612→            >
+   613→              View details
+   614→            </Button>
+   615→          </div>
+   616→        </Card>
+   617→
+   618→        {/* Phase-4 AI companion (signed-in users, numeric db ids only) */}
+   619→        {user && <PlayerAiCompanion contentId={id} enabled={validId} />}
+   620→      </div>
+   621→    </Container>
+   622→  );
+   623→}
+   624→
+   625→/* ---------------------------- AI companion card ---------------------------- */
+   626→
+   627→/** Renders the personal "before you watch" companion below the player. Hidden
+   628→ *  entirely on error so it never breaks the player page; silent for signed-out
+   629→ *  visitors and external (non-db) items. */
+   630→function PlayerAiCompanion({ contentId, enabled }: { contentId: number; enabled: boolean }) {
+   631→  const ai = useApi(`player-ai-${contentId}`, () => platform.aiPersonalPlayer(contentId), { enabled });
+   632→
+   633→  if (!enabled) return null;
+   634→  if (ai.loading) {
+   635→    return (
+   636→      <Card className="border-white/10 bg-white/[0.03]" aria-busy="true" aria-label="Loading AI companion">
+   637→        <CardContent className="space-y-3 p-5">
+   638→          <Skeleton className="h-5 w-40" />
+   639→          <Skeleton className="h-4 w-full" />
+   640→          <Skeleton className="h-4 w-11/12" />
+   641→          <div className="flex gap-2">
+   642→            <Skeleton className="h-16 w-11" />
+   643→            <Skeleton className="h-16 w-11" />
+   644→            <Skeleton className="h-16 w-11" />
+   645→          </div>
+   646→        </CardContent>
+   647→      </Card>
+   648→    );
+   649→  }
+   650→  /* Errors are silently swallowed — the companion is strictly optional. */
+   651→  if (ai.error || !ai.data) return null;
+   652→
+   653→  const data: AiPersonalPlayerResponse = ai.data;
+   654→  const nextUp = data.nextUp;
+   655→
+   656→  return (
+   657→    <Card className="border-fuchsia-500/20 bg-gradient-to-br from-fuchsia-500/[0.06] via-white/[0.03] to-white/[0.02]">
+   658→      <CardHeader className="pb-2">
+   659→        <CardTitle className="flex flex-wrap items-center gap-2.5 text-sm font-bold uppercase tracking-widest text-zinc-400">
+   660→          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-rose-500/30 to-fuchsia-500/30">
+   661→            <Sparkles className="h-4 w-4 text-fuchsia-300" aria-hidden />
+   662→          </span>
+   663→          AI companion
+   664→          {data.predictedRating != null && (
+   665→            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-bold normal-case tracking-normal text-amber-300">
+   666→              <Star className="h-3 w-3 fill-amber-300" aria-hidden /> predicted {data.predictedRating}/10
+   667→            </span>
+   668→          )}
+   669→          {data.matchScore != null && (
+   670→            <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-bold normal-case tracking-normal text-rose-300">
+   671→              {Math.round(data.matchScore * 100)}% match
+   672→            </span>
+   673→          )}
+   674→          {data.degraded && (
+   675→            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-amber-300">
+   676→              offline mode
+   677→            </span>
+   678→          )}
+   679→        </CardTitle>
+   680→      </CardHeader>
+   681→      <CardContent className="space-y-4">
+   682→        <div>
+   683→          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Before you watch</p>
+   684→          <div className="space-y-1.5">
+   685→            {data.beforeYouWatch
+   686→              .split('\n')
+   687→              .map((l) => l.trim())
+   688→              .filter(Boolean)
+   689→              .map((line, i) => (
+   690→                <p key={i} className="text-sm leading-relaxed text-zinc-300">
+   691→                  {line}
+   692→                </p>
+   693→              ))}
+   694→          </div>
+   695→        </div>
+   696→
+   697→        {data.moreLikeThis.length > 0 && (
+   698→          <div className="space-y-2">
+   699→            <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">More like this</p>
+   700→            <div className="custom-scrollbar flex gap-2.5 overflow-x-auto pb-1">
+   701→              {data.moreLikeThis.map((item) => (
+   702→                <button
+   703→                  key={item.id}
+   704→                  type="button"
+   705→                  onClick={() => navigate(`/content/${item.id}`)}
+   706→                  aria-label={`Open ${item.title}`}
+   707→                  className="group flex w-[132px] shrink-0 items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] p-2 text-left transition hover:border-fuchsia-500/40 hover:bg-white/[0.06] focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   708→                >
+   709→                  <span className="h-14 w-10 shrink-0 overflow-hidden rounded-md border border-white/10 bg-white/[0.03]">
+   710→                    {item.thumbnail ? (
+   711→                      <img src={item.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+   712→                    ) : (
+   713→                      <BrandPlaceholder title={item.title} />
+   714→                    )}
+   715→                  </span>
+   716→                  <span className="min-w-0">
+   717→                    <span className="block line-clamp-2 text-xs font-semibold leading-tight text-zinc-100">
+   718→                      {item.title}
+   719→                    </span>
+   720→                    <TypeBadge type={item.type} className="mt-1" />
+   721→                  </span>
+   722→                </button>
+   723→              ))}
+   724→            </div>
+   725→          </div>
+   726→        )}
+   727→
+   728→        {nextUp && (
+   729→          <button
+   730→            type="button"
+   731→            onClick={() => navigate(`/player/${nextUp.id}`)}
+   732→            aria-label={`Play next: ${nextUp.title}`}
+   733→            className="flex w-full items-center gap-3 rounded-xl border border-rose-500/25 bg-rose-500/[0.08] p-2.5 text-left transition hover:border-rose-500/50 hover:bg-rose-500/[0.14] focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60"
+   734→          >
+   735→            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-rose-600 text-white">
+   736→              <Play className="h-4 w-4 fill-white" aria-hidden />
+   737→            </span>
+   738→            <span className="min-w-0 flex-1">
+   739→              <span className="block text-[10px] font-semibold uppercase tracking-widest text-rose-300">Next up</span>
+   740→              <span className="block truncate text-sm font-semibold text-zinc-100">{nextUp.title}</span>
+   741→            </span>
+   742→          </button>
+   743→        )}
+   744→      </CardContent>
+   745→    </Card>
+   746→  );
+   747→}
+   748→

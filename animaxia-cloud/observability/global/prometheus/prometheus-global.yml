@@ -1,0 +1,141 @@
+# =============================================================================
+# Animaxia — GLOBAL Prometheus configuration (FAZA 23 prep — NOT ACTIVATED)
+# =============================================================================
+# Mounted into the `prometheus` container of
+# observability/global/docker-compose.global-observability.yml
+# (profile "faza23" — never starts by default).
+#
+# Role: the GLOBAL aggregation tier. It does NOT scrape services directly —
+# it FEDERATES from the per-region Prometheus instances (the stacks under
+# observability/ running in each region) via their /federate endpoints, each
+# pulling the full animaxia-* job coverage:
+#
+#   eu-prometheus  → eu-prometheus.animaxia.internal:9090
+#   us-prometheus  → us-prometheus.animaxia.internal:9090
+#   asia-prometheus → asia-prometheus.animaxia.internal:9090
+#
+# honor_labels: true keeps the region/job labels attached by the regional
+# Prometheus (source of truth) instead of overwriting them with the global
+# scrape labels.
+#
+# *.animaxia.internal hostnames resolve through the private DNS / service
+# mesh of the production network — swap for real addresses when FAZA 23
+# activates the stack.
+#
+# ── FAZA 23 (update aditiv) ─────────────────────────────────────────────────
+# Direct scrape jobs for the FAZA 23 observability sources, in ADDITION to
+# the federation tier above. Rationale (honest): in the sandbox / single-host
+# deployment there is no regional Prometheus tier yet — the local runnable
+# equivalent is mini-services/animaxia-observability (:4050), which scrapes
+# the same targets itself. In production these three jobs give the GLOBAL
+# tier first-party visibility into:
+#   - animaxia-backend-faza23 → /api/observability/metrics (OTel-native
+#     pipeline+player+AI+auth metrics exposed by the backend, FAZA 23)
+#   - animaxia-global-gateway → /metrics (gateway self-metrics, FAZA 23)
+#   - animaxia-observability  → :4050/metrics (the full FAZA 23 family set:
+#     animaxia_up, animaxia_neon_*, animaxia_redis_*, animaxia_gateway_*,
+#     animaxia_pipeline_*, animaxia_synthetic_*, animaxia_alerts_*, …)
+# Retention: the 30-day time-series retention for the global tier is set on
+# the Prometheus container command line (docker-compose.global-observability
+# .yml) — '--storage.tsdb.retention.time=30d' matches the local service
+# (config.ts RETENTION_DAYS=30).
+# =============================================================================
+
+global:
+  scrape_interval: 30s       # global tier cadence — regions keep their own 15s
+  evaluation_interval: 30s   # alert/record rule evaluation at the global tier
+
+# FAZA 23 TODO (not activated): global recording + alerting rules live in
+# observability/prometheus/rules/ at the REGIONAL tier; the global tier adds
+# cross-region comparison rules when activated:
+# rule_files:
+#   - /etc/prometheus/rules/global-*.yml
+
+# Alert routing goes through the global Alertmanager (region-aware tree —
+# see ../alertmanager/alertmanager-global.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ── federation: pull animaxia-* series from every regional Prometheus ─────
+  # match[] covers the full job coverage each region exposes (microservices,
+  # gateway, edge workers report, node/host jobs):
+
+  - job_name: eu-prometheus
+    honor_labels: true
+    metrics_path: /federate
+    params:
+      match[]:
+        - '{job=~"animaxia-.*"}'      # all Animaxia microservice jobs
+        - '{job="prometheus"}'         # regional Prometheus self-monitoring
+        - '{job=~"node|cadvisor"}'     # infra/node exporters where deployed
+    static_configs:
+      - targets: ["eu-prometheus.animaxia.internal:9090"]
+        labels:
+          region: eu
+
+  - job_name: us-prometheus
+    honor_labels: true
+    metrics_path: /federate
+    params:
+      match[]:
+        - '{job=~"animaxia-.*"}'
+        - '{job="prometheus"}'
+        - '{job=~"node|cadvisor"}'
+    static_configs:
+      - targets: ["us-prometheus.animaxia.internal:9090"]
+        labels:
+          region: us
+
+  - job_name: asia-prometheus
+    honor_labels: true
+    metrics_path: /federate
+    params:
+      match[]:
+        - '{job=~"animaxia-.*"}'
+        - '{job="prometheus"}'
+        - '{job=~"node|cadvisor"}'
+    static_configs:
+      - targets: ["asia-prometheus.animaxia.internal:9090"]
+        labels:
+          region: asia
+
+  # ── global Alertmanager itself ───────────────────────────────────────────
+  - job_name: alertmanager-global
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  # ── self-monitoring of this global Prometheus ─────────────────────────────
+  - job_name: prometheus-global
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── FAZA 23: direct scrape of the new observability sources ─────────────
+  # (see the FAZA 23 header note — additive; federation above stays intact)
+  # Targets use docker service-name style addresses — they resolve when the
+  # FAZA 23 sources join the same `animaxia` compose network; on the sandbox
+  # the local runnable equivalent is mini-services/animaxia-observability
+  # (:4050) which scrapes the same three sources itself.
+
+  # Backend FAZA 23 OTel-native metrics endpoint (metrics_path differs from
+  # the FAZA 9 default /metrics → explicit metrics_path + port in target).
+  - job_name: animaxia-backend-faza23
+    metrics_path: /api/observability/metrics
+    static_configs:
+      - targets: ["animaxia-backend:4000"]
+
+  # Global gateway self-metrics (FAZA 23): regions, upstream health, cache,
+  # failovers, distributed perimeter layers (anti-spam/cooldown/rate-limit).
+  - job_name: animaxia-global-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["global-gateway:4040"]
+
+  # The FAZA 23 observability service itself: full family set (up, neon,
+  # redis, gateway regions, pipeline, synthetics, alerts, OTel ingest).
+  - job_name: animaxia-observability
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["animaxia-observability:4050"]

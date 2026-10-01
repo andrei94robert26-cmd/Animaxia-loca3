@@ -105,9 +105,9 @@ const router = express.Router();
 router.get('/me', wrap(async (req, res) => {
   const stats = await one(
     `SELECT
-       (SELECT COUNT(*)::int FROM watchlist WHERE userid = $1) AS watchlist,
-       (SELECT COUNT(*)::int FROM watchhistory WHERE userid = $1) AS history,
-       (SELECT COUNT(*)::int FROM comments WHERE userid = $1) AS comments`,
+       (SELECT COUNT(*) FROM watchlist WHERE userid = $1) AS watchlist,
+       (SELECT COUNT(*) FROM watchhistory WHERE userid = $1) AS history,
+       (SELECT COUNT(*) FROM comments WHERE userid = $1) AS comments`,
     [req.user.id],
   );
   res.json({
@@ -158,7 +158,7 @@ router.patch('/me', wrap(async (req, res) => {
     // Partial merge into the existing JSONB preferences.
     const current = req.user.preferences && typeof req.user.preferences === 'object' ? req.user.preferences : {};
     params.push(jsonb({ ...current, ...sanitized.value }));
-    sets.push(`preferences = $${params.length}::jsonb`);
+    sets.push(`preferences = $${params.length}`);
   }
 
   if (!sets.length) {
@@ -223,7 +223,7 @@ router.post('/me/watchlist', wrap(async (req, res) => {
 
   const limit = planLimits(req.user.plan).watchlist; // -1 = unlimited
   if (limit >= 0) {
-    const countRow = await one(`SELECT COUNT(*)::int AS count FROM watchlist WHERE userid = $1`, [req.user.id]);
+    const countRow = await one(`SELECT COUNT(*) AS count FROM watchlist WHERE userid = $1`, [req.user.id]);
     if (num(countRow?.count) >= limit) {
       return res.status(402).json({
         error: 'Plan limit reached — upgrade to add more',
@@ -306,9 +306,9 @@ router.post('/me/history', wrap(async (req, res) => {
 
   await one(
     `INSERT INTO watchhistory (userid, contentid, progress, watchedat)
-     VALUES ($1, $2, $3, NOW())
+     VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
      ON CONFLICT (userid, contentid)
-     DO UPDATE SET progress = EXCLUDED.progress, watchedat = NOW()`,
+     DO UPDATE SET progress = EXCLUDED.progress, watchedat = CURRENT_TIMESTAMP`,
     [req.user.id, contentId, progress],
   );
 
@@ -345,7 +345,7 @@ router.put('/me/preferences', wrap(async (req, res) => {
 
   // Full replace: only the provided (sanitized) keys remain in the object.
   const updated = await one(
-    `UPDATE users SET preferences = $2::jsonb WHERE id = $1 RETURNING *`,
+    `UPDATE users SET preferences = $2 WHERE id = $1 RETURNING *`,
     [req.user.id, jsonb(sanitized.value)],
   );
   emitPlatform('user:changed', { userid: req.user.id });

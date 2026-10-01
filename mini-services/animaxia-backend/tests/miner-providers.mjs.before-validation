@@ -1,0 +1,38 @@
+const tests = [
+  ['VK', 'https://m.vkvideo.ru/video-220754053_456246684'],
+  ['YouTube', 'https://youtu.be/BjwZQBT0qKs'],
+  ['OK.ru', 'https://ok.ru/video/16353421827658'],
+  ['Rumble', 'https://rumble.com/embed/v7dy3jk/?pub=4'],
+  ['Dailymotion', 'https://dai.ly/xbf564y'],
+  ['Odysee', 'https://odysee.com/@hackthemovies:1/did-we-love-or-hate-zach-cregger%27s:d'],
+];
+
+let failed = 0;
+
+for (const [provider, url] of tests) {
+  try {
+    const res = await fetch('http://127.0.0.1:4000/api/miner', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+
+    const data = await res.json();
+    const sources = data?.record?.metadata?.player?.sources || [];
+
+    if (res.ok && data.ok && sources.length) {
+      console.log(`✅ PASS ${provider}`);
+      console.log(`   ${sources.map(s => `${s.type}: ${s.url}`).join('\n   ')}`);
+    } else {
+      failed++;
+      console.log(`❌ FAIL ${provider}`);
+      console.log(`   ${data.error || 'player.sources gol'}`);
+    }
+  } catch (err) {
+    failed++;
+    console.log(`❌ FAIL ${provider}: ${err.message}`);
+  }
+}
+
+console.log(`\nRezultat: ${tests.length - failed}/${tests.length} PASS`);
+process.exitCode = failed ? 1 : 0;

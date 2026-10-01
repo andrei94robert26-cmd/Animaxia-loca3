@@ -1,0 +1,10 @@
+{
+  "name": "animaxia-watchdog",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FAZA 17-d — process supervisor: keeps web :3000, backend :4000 and realtime :4010 alive; respawns them automatically after crashes. Status API on :4020.",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  }
+}

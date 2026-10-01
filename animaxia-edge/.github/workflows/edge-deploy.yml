@@ -1,0 +1,95 @@
+name: Edge Deploy
+
+# FAZA 8 — CI/CD for the Animaxia edge layer (Cloudflare Workers).
+#
+#   verify  — always: install, typecheck, guard lint, hermetic smoke suite
+#             (the smoke suite runs the REAL worker code against the
+#             in-process local harness with a stubbed cloud — no Cloudflare
+#             credentials needed).
+#   deploy  — after verify, only on main, only when CLOUDFLARE_API_TOKEN +
+#             CLOUDFLARE_ACCOUNT_ID secrets exist: deploys the seven workers
+#             in dependency order (sub-workers first, gateway last).
+#   e2e     — commented sketch for the edge → cloud → Neon chain; enable once
+#             a reachable cloud URL is available from the runner.
+
+on:
+  push:
+    branches: [main]
+    paths: ["animaxia-edge/**"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: animaxia-edge
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck (tsc --noEmit, strict)
+        run: bun run typecheck
+
+      - name: Guard lint
+        run: bun run lint
+
+      - name: Hermetic smoke suite (real worker code, stub cloud)
+        run: bun run test:smoke
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Deploy edge workers (sub-workers first, gateway last)
+        if: env.CF_TOKEN != '' && env.CF_ACCOUNT != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for module in auth search ai player analytics cron worker; do
+            echo "━ Deploying animaxia-edge-$module"
+            bunx wrangler deploy --config "$module/wrangler.toml"
+          done
+
+      - name: Skip deploy (missing Cloudflare secrets)
+        if: env.CF_TOKEN == '' || env.CF_ACCOUNT == ''
+        run: |
+          echo "⚠ CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets are not configured."
+          echo "  Add them in repo Settings → Secrets to enable edge deploys."
+
+  # ── Optional: remote smoke + E2E against the deployed edge ────────────────
+  # Enable once the deployed gateway can reach your cloud origin (set
+  # CLOUD_ORIGIN per worker for production) and set an EDGE_BASE_URL variable.
+  #
+  # smoke-remote:
+  #   needs: deploy
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Edge health + routing smoke
+  #       run: |
+  #         BASE="${{ vars.EDGE_BASE_URL }}"
+  #         curl -fsS "$BASE/edge/health" | grep -q '"ok":true'
+  #         curl -fsS "$BASE/search?q=test" >/dev/null
+  #         curl -fsS -o /dev/null -w '%{http_code}' "$BASE/api/health" | grep -q 200

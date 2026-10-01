@@ -1,0 +1,16 @@
+{
+  "name": "animaxia-realtime",
+  "version": "1.0.0",
+  "description": "Animaxia FAZA 10 realtime service \u2014 socket.io watch-party rooms (sync + chat), presence and live social activity ticker. Port 4010.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.js",
+    "start": "bun index.js",
+    "smoke": "bun ../tests/smoke-social.mjs",
+    "test": "bun ../tests/smoke-social.mjs"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
+  }
+}

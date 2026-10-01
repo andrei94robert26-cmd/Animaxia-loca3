@@ -16,8 +16,8 @@ import { rows, zaiComplete, nowIso } from './common.js';
 async function popularitySignal(contentId) {
   try {
     const r = await rows(
-      `SELECT COUNT(*)::int AS n FROM viewevents
-        WHERE contentid = $1 AND createdat > NOW() - INTERVAL '30 days'`,
+      `SELECT COUNT(*) AS n FROM viewevents
+        WHERE contentid = $1 AND createdat > datetime('now','-30 days')`,
       [contentId],
     );
     const views = Number(r[0]?.n ?? 0);

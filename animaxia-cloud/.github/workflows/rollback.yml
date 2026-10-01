@@ -1,0 +1,123 @@
+# Rollback — Animaxia Cloud (manual + emergency)
+#
+# Two entry points:
+#   * workflow_dispatch — human-triggered from the Actions tab (or the CLI /
+#     REST API) with optional `revision` and `namespace` inputs
+#   * repository_dispatch (event_type: rollback) — machine-triggered, e.g.
+#     from an external incident bot or another pipeline, via
+#     POST /repos/<owner>/<repo>/dispatches {"event_type":"rollback",
+#     "client_payload":{"revision":"5","namespace":"animaxia"}}
+#
+# Semantics: `helm rollback animaxia-cloud` to the requested revision —
+# revision "0" (the default) rolls back to the PREVIOUS revision (helm's
+# revision-less form). Requires the KUBE_CONFIG repo secret — see
+# .github/README.md.
+
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Helm revision to roll back to (0 = previous revision)'
+        required: false
+        default: '0'
+        type: string
+      namespace:
+        description: 'Kubernetes namespace of the release'
+        required: false
+        default: 'animaxia'
+        type: string
+  repository_dispatch:
+    types: [rollback]
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Helm rollback (animaxia-cloud)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Write kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          # KUBE_CONFIG = base64-encoded kubeconfig YAML (see .github/README.md).
+          # Tolerant decode: if the secret was stored as PLAIN YAML (no base64),
+          # detect it (base64 -d output lacks an apiVersion: line) and store the
+          # raw content instead — the documented format is base64.
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::error::Repo secret KUBE_CONFIG is not configured (base64 kubeconfig). See .github/README.md."
+            exit 1
+          fi
+          mkdir -p "${HOME}/.kube"
+          # Decode straight into the file (byte-faithful — no $() newline
+          # stripping); if the result does not look like a kubeconfig the
+          # secret was stored as PLAIN YAML — store it verbatim instead.
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "${HOME}/.kube/config" 2>/dev/null || true
+          if ! grep -q 'apiVersion:' "${HOME}/.kube/config"; then
+            printf '%s' "$KUBE_CONFIG" > "${HOME}/.kube/config"
+          fi
+          chmod 600 "${HOME}/.kube/config"
+
+      - name: Resolve rollback parameters
+        # workflow_dispatch fills `inputs`; repository_dispatch fills
+        # github.event.client_payload — fall through both, then defaults
+        # (revision 0 = previous, namespace animaxia).
+        env:
+          INPUT_REVISION: ${{ inputs.revision }}
+          PAYLOAD_REVISION: ${{ github.event.client_payload.revision }}
+          INPUT_NAMESPACE: ${{ inputs.namespace }}
+          PAYLOAD_NAMESPACE: ${{ github.event.client_payload.namespace }}
+        run: |
+          REVISION="${INPUT_REVISION:-${PAYLOAD_REVISION:-0}}"
+          NAMESPACE="${INPUT_NAMESPACE:-${PAYLOAD_NAMESPACE:-animaxia}}"
+          echo "REVISION=${REVISION}" >> "$GITHUB_ENV"
+          echo "NAMESPACE=${NAMESPACE}" >> "$GITHUB_ENV"
+          if [ "$REVISION" = "0" ]; then
+            echo "Rolling release animaxia-cloud back to the PREVIOUS revision (namespace: ${NAMESPACE})."
+          else
+            echo "Rolling release animaxia-cloud back to revision ${REVISION} (namespace: ${NAMESPACE})."
+          fi
+
+      - name: List current revisions
+        run: |
+          echo "Helm release history before rollback:"
+          helm history animaxia-cloud --namespace "${NAMESPACE}" --max 10
+
+      - name: Roll back the release
+        run: |
+          # Revision "0" means "previous revision": helm's revision-less form
+          # `helm rollback <release>` does exactly that — passing a literal 0
+          # would be an invalid revision number.
+          if [ -z "$REVISION" ] || [ "$REVISION" = "0" ]; then
+            helm rollback animaxia-cloud --namespace "${NAMESPACE}" --wait --timeout 10m
+          else
+            helm rollback animaxia-cloud "${REVISION}" --namespace "${NAMESPACE}" --wait --timeout 10m
+          fi
+
+      - name: Verify gateway rollout
+        run: kubectl -n "${NAMESPACE}" rollout status deploy/gateway-service --timeout=300s
+
+      - name: Rollback summary
+        if: always()
+        run: |
+          {
+            echo "## Rollback summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Release | \`animaxia-cloud\` (namespace \`${NAMESPACE}\`) |"
+            echo "| Requested revision | \`${REVISION}\` (0 = previous revision) |"
+            echo "| Trigger | ${GITHUB_EVENT_NAME} on \`${GITHUB_REF_NAME}\` |"
+            echo "| Run | [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+            echo ""
+            echo "Helm release history after rollback:"
+            echo '```'
+            helm history animaxia-cloud --namespace "${NAMESPACE}" --max 10 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

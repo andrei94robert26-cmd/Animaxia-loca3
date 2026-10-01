@@ -1,0 +1,1234 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * player-controls.tsx — FAZA 19 (task 19-2): the custom video stage.
+     5→ *
+     6→ * `VideoStage` replaces the native-controls `<video>` of the main player
+     7→ * surface for the 'mp4' and 'm3u8' source types (YouTube / Vimeo / Rumble /
+     8→ * iframe embeds keep their own controls — untouched). It renders a `<video>`
+     9→ * WITHOUT the native `controls` attribute plus a fully custom overlay:
+    10→ *
+    11→ *   • play/pause (Space / K), custom timeline with buffered ranges, scrub by
+    12→ *     click + drag (pointer capture) and a hover time tooltip;
+    13→ *   • volume icon + slider (M mute, ↑/↓), speed popover 0.25–2× persisted in
+    14→ *     the player settings (localStorage), fullscreen (F), PiP (I), ±10s skips
+    15→ *     (←/→, J/L on mobile), cinema mode toggle (C — applied by player-view);
+    16→ *   • REAL WebVTT subtitles: tracks come from /api/playerhub/subtitles/:contentId
+    17→ *     and are rendered as real `<track kind="subtitles">` elements pointing at
+    18→ *     /api/playerhub/subtitles/:contentId/:trackId; the language preference is
+    19→ *     persisted;
+    20→ *   • quality switching for HLS via hls.js levels (MANIFEST_PARSED /
+    21→ *     LEVEL_SWITCHED) — button visible only when hls.js exposes >1 level;
+    22→ *   • keyboard-shortcuts popover ("?" key or the keyboard button).
+    23→ *
+    24→ * FAZA 17 discipline preserved: hls.js errors (fatal/non-fatal) are delegated
+    25→ * through `onError` so the existing source fallback chain keeps working
+    26→ * exactly as before; the 12s load watchdog keeps working through
+    27→ * onLoadedData / onCanPlay / onLoadProgress; hls.destroy() runs on every
+    28→ * unmount/source change; the video element is released (pause + remove src +
+    29→ * load()) and an active PiP is exited on unmount.
+    30→ */
+    31→
+    32→import {
+    33→  forwardRef,
+    34→  useCallback,
+    35→  useEffect,
+    36→  useImperativeHandle,
+    37→  useRef,
+    38→  useState,
+    39→} from 'react';
+    40→import type Hls from 'hls.js';
+    41→import {
+    42→  Captions,
+    43→  Check,
+    44→  Keyboard,
+    45→  Loader2,
+    46→  Maximize,
+    47→  Minimize,
+    48→  MonitorPlay,
+    49→  Pause,
+    50→  PictureInPicture2,
+    51→  Play,
+    52→  RectangleHorizontal,
+    53→  RotateCcw,
+    54→  RotateCw,
+    55→  Volume1,
+    56→  Volume2,
+    57→  VolumeX,
+    58→} from 'lucide-react';
+    59→import { api, playerHubSubtitleUrl } from '@/lib/animaxia/api';
+    60→import { useApi } from '@/lib/animaxia/hooks';
+    61→import {
+    62→  getPlayerSettings,
+    63→  updatePlayerSettings,
+    64→  usePlayerSettings,
+    65→} from '@/lib/animaxia/player-settings';
+    66→import type { PlayerHubSubtitleTrack } from '@/lib/animaxia/types';
+    67→import { cn } from '@/lib/utils';
+    68→
+    69→/* --------------------------------- types ---------------------------------- */
+    70→
+    71→/** Imperative API for resume / progress saving / mini-player (task 19-3). */
+    72→export interface VideoStageHandle {
+    73→  getCurrentTime(): number;
+    74→  getDuration(): number;
+    75→}
+    76→
+    77→export interface VideoStageProps {
+    78→  /** Direct media URL (mp4 file or HLS manifest). */
+    79→  src: string;
+    80→  type: 'mp4' | 'm3u8';
+    81→  /** Numeric db content id — powers subtitles + progress. Null disables both. */
+    82→  contentId: number | null;
+    83→  autoPlay?: boolean;
+    84→  /** Resume point (seconds) — seeked once, after loadedmetadata. */
+    85→  initialTime?: number;
+    86→  onPlay?: () => void;
+    87→  /** FAZA 19 (19-3a) — fired on a real pause (NOT at 'ended') so parents can
+    88→   *  save the watch progress at the exact stopping point. */
+    89→  onPause?: () => void;
+    90→  onEnded?: () => void;
+    91→  /** Fatal load error — delegated to the FAZA 17 fallback chain. */
+    92→  onError?: (reason: string) => void;
+    93→  /** Watchdog hooks — called like the native <video> events they replace. */
+    94→  onLoadedData?: () => void;
+    95→  onCanPlay?: () => void;
+    96→  onLoadProgress?: () => void;
+    97→  /** Playback heartbeat (t = currentTime, duration) — used for progress saving. */
+    98→  onTimeUpdate?: (t: number, duration: number) => void;
+    99→  className?: string;
+   100→}
+   101→
+   102→/* -------------------------------- helpers --------------------------------- */
+   103→
+   104→const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+   105→const SKIP_SECONDS = 10;
+   106→const UI_HIDE_DELAY_MS = 2_800;
+   107→
+   108→/** mm:ss or h:mm:ss. */
+   109→function fmtTime(sec: number): string {
+   110→  const n = Number.isFinite(sec) && sec > 0 ? Math.floor(sec) : 0;
+   111→  const s = n % 60;
+   112→  const m = Math.floor(n / 60) % 60;
+   113→  const h = Math.floor(n / 3600);
+   114→  const p = (v: number) => String(v).padStart(2, '0');
+   115→  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+   116→}
+   117→
+   118→function clamp01(v: number): number {
+   119→  return Math.min(1, Math.max(0, v));
+   120→}
+   121→
+   122→function isTypingTarget(target: EventTarget | null): boolean {
+   123→  if (!(target instanceof HTMLElement)) return false;
+   124→  const tag = target.tagName.toLowerCase();
+   125→  return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
+   126→}
+   127→
+   128→/* ------------------------------ tiny UI bits ------------------------------ */
+   129→
+   130→function CtrlBtn({
+   131→  label,
+   132→  onClick,
+   133→  active,
+   134→  disabled,
+   135→  wide,
+   136→  children,
+   137→}: {
+   138→  label: string;
+   139→  onClick: () => void;
+   140→  active?: boolean;
+   141→  disabled?: boolean;
+   142→  wide?: boolean;
+   143→  children: React.ReactNode;
+   144→}) {
+   145→  return (
+   146→    <button
+   147→      type="button"
+   148→      onClick={onClick}
+   149→      disabled={disabled}
+   150→      title={label}
+   151→      aria-label={label}
+   152→      className={cn(
+   153→        'grid h-10 w-10 shrink-0 place-items-center rounded-lg text-zinc-100 transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent',
+   154→        wide && 'w-auto gap-1 px-2.5 text-xs font-bold tabular-nums',
+   155→        active && 'bg-rose-600 text-white hover:bg-rose-500',
+   156→      )}
+   157→    >
+   158→      {children}
+   159→    </button>
+   160→  );
+   161→}
+   162→
+   163→function MenuRow({
+   164→  active,
+   165→  onClick,
+   166→  children,
+   167→}: {
+   168→  active: boolean;
+   169→  onClick: () => void;
+   170→  children: React.ReactNode;
+   171→}) {
+   172→  return (
+   173→    <button
+   174→      type="button"
+   175→      role="menuitemradio"
+   176→      aria-checked={active}
+   177→      onClick={onClick}
+   178→      className={cn(
+   179→        'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-semibold transition',
+   180→        active ? 'bg-rose-600/20 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-white',
+   181→      )}
+   182→    >
+   183→      <span className="grid w-3.5 shrink-0 place-items-center">
+   184→        {active ? <Check className="h-3.5 w-3.5 text-rose-400" aria-hidden /> : null}
+   185→      </span>
+   186→      <span className="min-w-0 flex-1 truncate">{children}</span>
+   187→    </button>
+   188→  );
+   189→}
+   190→
+   191→/** Popover panel anchored above its trigger — inline (no portal), so it also
+   192→ *  renders inside the fullscreened stage. */
+   193→function Popover({
+   194→  open,
+   195→  title,
+   196→  children,
+   197→  align = 'left',
+   198→  widthClass = 'w-36',
+   199→}: {
+   200→  open: boolean;
+   201→  title: string;
+   202→  children: React.ReactNode;
+   203→  align?: 'left' | 'right';
+   204→  widthClass?: string;
+   205→}) {
+   206→  if (!open) return null;
+   207→  return (
+   208→    <div
+   209→      role="menu"
+   210→      aria-label={title}
+   211→      className={cn(
+   212→        'absolute bottom-12 z-40 rounded-xl border border-white/10 bg-zinc-950/95 p-1.5 shadow-2xl backdrop-blur',
+   213→        widthClass,
+   214→        align === 'left' ? 'left-0' : 'right-0',
+   215→      )}
+   216→    >
+   217→      <p className="px-2.5 pb-1 pt-0.5 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+   218→        {title}
+   219→      </p>
+   220→      {children}
+   221→    </div>
+   222→  );
+   223→}
+   224→
+   225→/** Thin custom volume slider — pointer-driven, commits on release so the
+   226→ *  settings store is not hammered 60×/s while dragging. */
+   227→function VolumeBar({
+   228→  value,
+   229→  onChange,
+   230→}: {
+   231→  value: number;
+   232→  onChange: (v: number) => void;
+   233→}) {
+   234→  const ref = useRef<HTMLDivElement>(null);
+   235→  const [drag, setDrag] = useState<number | null>(null);
+   236→  const shown = drag ?? value;
+   237→
+   238→  const ratioFrom = useCallback((clientX: number): number => {
+   239→    const el = ref.current;
+   240→    if (!el) return 0;
+   241→    const rect = el.getBoundingClientRect();
+   242→    if (rect.width <= 0) return 0;
+   243→    return clamp01((clientX - rect.left) / rect.width);
+   244→  }, []);
+   245→
+   246→  return (
+   247→    <div
+   248→      ref={ref}
+   249→      role="slider"
+   250→      aria-label="Volum"
+   251→      aria-valuemin={0}
+   252→      aria-valuemax={100}
+   253→      aria-valuenow={Math.round(shown * 100)}
+   254→      tabIndex={0}
+   255→      className="relative h-9 w-16 cursor-pointer touch-none sm:w-20"
+   256→      onPointerDown={(e) => {
+   257→        e.currentTarget.setPointerCapture(e.pointerId);
+   258→        setDrag(ratioFrom(e.clientX));
+   259→      }}
+   260→      onPointerMove={(e) => {
+   261→        if (drag != null) setDrag(ratioFrom(e.clientX));
+   262→      }}
+   263→      onPointerUp={(e) => {
+   264→        if (drag != null) onChange(drag);
+   265→        setDrag(null);
+   266→        try {
+   267→          e.currentTarget.releasePointerCapture(e.pointerId);
+   268→        } catch {
+   269→          /* pointer already released */
+   270→        }
+   271→      }}
+   272→    >
+   273→      <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-white/25">
+   274→        <div
+   275→          className="h-full rounded-full bg-rose-500"
+   276→          style={{ width: `${clamp01(shown) * 100}%` }}
+   277→        />
+   278→      </div>
+   279→    </div>
+   280→  );
+   281→}
+   282→
+   283→/* ------------------------------- VideoStage ------------------------------- */
+   284→
+   285→export const VideoStage = forwardRef<VideoStageHandle, VideoStageProps>(function VideoStage(
+   286→  {
+   287→    src,
+   288→    type,
+   289→    contentId,
+   290→    autoPlay = true,
+   291→    initialTime,
+   292→    onPlay,
+   293→    onPause,
+   294→    onEnded,
+   295→    onError,
+   296→    onLoadedData,
+   297→    onCanPlay,
+   298→    onLoadProgress,
+   299→    onTimeUpdate,
+   300→    className,
+   301→  },
+   302→  ref,
+   303→) {
+   304→  const videoRef = useRef<HTMLVideoElement>(null);
+   305→  const wrapRef = useRef<HTMLDivElement>(null);
+   306→  const barRef = useRef<HTMLDivElement>(null);
+   307→  const hlsRef = useRef<Hls | null>(null);
+   308→
+   309→  /* ---- playback state (mirror of the element — render only) ---- */
+   310→  const [playing, setPlaying] = useState(false);
+   311→  const [loading, setLoading] = useState(true);
+   312→  const [failed, setFailed] = useState(false);
+   313→  const [currentTime, setCurrentTime] = useState(0);
+   314→  const [duration, setDuration] = useState(0);
+   315→  const [bufferedRanges, setBufferedRanges] = useState<{ start: number; end: number }[]>([]);
+   316→  const [fullscreen, setFullscreen] = useState(false);
+   317→  const [pipActive, setPipActive] = useState(false);
+   318→  const [pipSupported, setPipSupported] = useState(false);
+   319→
+   320→  /* ---- control surface state ---- */
+   321→  const [uiVisible, setUiVisible] = useState(true);
+   322→  const [openMenu, setOpenMenu] = useState<'speed' | 'subs' | 'quality' | 'shortcuts' | null>(null);
+   323→  const [hoverX, setHoverX] = useState<number | null>(null);
+   324→  const [scrubbing, setScrubbing] = useState(false);
+   325→
+   326→  /* ---- persisted settings (volume / speed / cinema / subtitle lang) ---- */
+   327→  const { settings } = usePlayerSettings();
+   328→
+   329→  /* ---- HLS quality levels (original hls.js level indices are preserved —
+   330→     duplicate heights are collapsed for the menu, but `index` is the raw
+   331→     hls.levels index used for switching) ---- */
+   332→  const [levels, setLevels] = useState<{ index: number; height: number }[]>([]);
+   333→  const [currentLevel, setCurrentLevel] = useState(-1);
+   334→  const [pinnedLevel, setPinnedLevel] = useState<number | null>(null);
+   335→
+   336→  /* ---- subtitles (REAL WebVTT from the Player Hub) ---- */
+   337→  const subsEnabled = contentId != null && Number.isInteger(contentId) && contentId > 0;
+   338→  const subs = useApi(
+   339→    `playerhub-subs-${contentId}`,
+   340→    () => api.playerHubSubtitles(contentId as number),
+   341→    { enabled: subsEnabled },
+   342→  );
+   343→  const tracks: PlayerHubSubtitleTrack[] = subs.data?.data ?? [];
+   344→  const [activeSub, setActiveSub] = useState<number | null>(null);
+   345→  const subsInitRef = useRef(false);
+   346→
+   347→  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   348→  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   349→  const seekedInitialRef = useRef(false);
+   350→
+   351→  /* ------------------------- imperative handle ------------------------- */
+   352→
+   353→  useImperativeHandle(
+   354→    ref,
+   355→    () => ({
+   356→      getCurrentTime: () => videoRef.current?.currentTime ?? 0,
+   357→      getDuration: () => {
+   358→        const d = videoRef.current?.duration;
+   359→        return Number.isFinite(d) ? (d as number) : 0;
+   360→      },
+   361→    }),
+   362→    [],
+   363→  );
+   364→
+   365→  /* ---------------------- persisted settings → video ---------------------- */
+   366→
+   367→  useEffect(() => {
+   368→    const el = videoRef.current;
+   369→    if (!el) return;
+   370→    el.volume = clamp01(settings.volume);
+   371→    el.muted = settings.muted;
+   372→  }, [settings.volume, settings.muted]);
+   373→
+   374→  useEffect(() => {
+   375→    const el = videoRef.current;
+   376→    if (!el) return;
+   377→    try {
+   378→      el.playbackRate = settings.defaultSpeed;
+   379→    } catch {
+   380→      /* rate rejected (e.g. before metadata) — retried on loadedmetadata */
+   381→    }
+   382→  }, [settings.defaultSpeed]);
+   383→
+   384→  /* ------------------------ subtitles: selection ------------------------- */
+   385→
+   386→  /* Pick the initial track from the persisted language preference, once per
+   387→     track list (the stage remounts per source/content, so no reset needed). */
+   388→  useEffect(() => {
+   389→    if (subsInitRef.current || tracks.length === 0) return;
+   390→    subsInitRef.current = true;
+   391→    const pref = getPlayerSettings().preferredSubtitleLang;
+   392→    if (!pref) return;
+   393→    const wanted = pref.toLowerCase();
+   394→    let idx = tracks.findIndex((t) => t.lang.toLowerCase() === wanted);
+   395→    if (idx < 0) {
+   396→      idx = tracks.findIndex(
+   397→        (t) => t.lang.toLowerCase().split('-')[0] === wanted.split('-')[0],
+   398→      );
+   399→    }
+   400→    if (idx >= 0) setActiveSub(idx);
+   401→  }, [tracks]);
+   402→
+   403→  /* Apply the selection to the real <track> elements. Native HLS text
+   404→     tracks (embedded captions exposed by hls.js) sit in the SAME textTracks
+   405→     list as the hub <track> elements, so the hub selection is matched BY ID
+   406→     (data-hub-id) — never by index. */
+   407→  useEffect(() => {
+   408→    const el = videoRef.current;
+   409→    if (!el) return;
+   410→    for (let i = 0; i < el.textTracks.length; i += 1) {
+   411→      el.textTracks[i].mode = 'disabled';
+   412→    }
+   413→    if (activeSub == null) return;
+   414→    const wanted = tracks[activeSub];
+   415→    if (!wanted) return;
+   416→    const trackEl = el.querySelector<HTMLTrackElement>(`track[data-hub-id="${wanted.id}"]`);
+   417→    try {
+   418→      if (trackEl?.track) trackEl.track.mode = 'showing';
+   419→    } catch {
+   420→      /* track not ready yet — retried on the next tracks.length change */
+   421→    }
+   422→  }, [activeSub, tracks.length, tracks]);
+   423→
+   424→  /* Select a track (or «Oprit») — persists the language preference. */
+   425→  const chooseSubtitle = useCallback(
+   426→    (idx: number | null) => {
+   427→      setActiveSub(idx);
+   428→      const lang = idx != null ? (tracks[idx]?.lang ?? null) : null;
+   429→      updatePlayerSettings({ preferredSubtitleLang: lang });
+   430→    },
+   431→    [tracks],
+   432→  );
+   433→
+   434→  /* ------------------------- media source loading ------------------------- */
+   435→
+   436→  /* HLS via hls.js (dynamic import, same pattern as FAZA 17) — mp4 plays
+   437→     straight from the `src` attribute. Fatal errors destroy the instance and
+   438→     delegate to onError so the FAZA 17 source chain advances exactly as
+   439→     before; non-fatal errors get a light startLoad() retry. */
+   440→  useEffect(() => {
+   441→    if (type !== 'm3u8') return undefined;
+   442→    const el = videoRef.current;
+   443→    if (!el) return undefined;
+   444→    let cancelled = false;
+   445→    let instance: Hls | null = null;
+   446→    (async () => {
+   447→      try {
+   448→        const mod = await import('hls.js');
+   449→        const HlsCtor = mod.default;
+   450→        if (cancelled) return;
+   451→        if (HlsCtor.isSupported()) {
+   452→          const hls = new HlsCtor({ enableWorker: true });
+   453→          hls.on(HlsCtor.Events.ERROR, (_event, data) => {
+   454→            if (cancelled) return;
+   455→            if (data?.fatal) {
+   456→              try {
+   457→                hls.destroy();
+   458→              } catch {
+   459→                /* already destroyed */
+   460→              }
+   461→              onError?.('eroare HLS');
+   462→            } else {
+   463→              try {
+   464→                hls.startLoad();
+   465→              } catch {
+   466→                /* retry not possible — the load watchdog (player-view) advances */
+   467→              }
+   468→            }
+   469→          });
+   470→          /* FAZA 19 — quality levels for the custom quality popover. */
+   471→          hls.on(HlsCtor.Events.MANIFEST_PARSED, (_event, data) => {
+   472→            if (cancelled) return;
+   473→            const seen = new Set<number>();
+   474→            const list: { index: number; height: number }[] = [];
+   475→            data.levels.forEach((level, i) => {
+   476→              const height = Number(level?.height) || 0;
+   477→              if (height <= 0 || seen.has(height)) return;
+   478→              seen.add(height);
+   479→              list.push({ index: i, height });
+   480→            });
+   481→            list.sort((a, b) => b.height - a.height);
+   482→            setLevels(list);
+   483→          });
+   484→          hls.on(HlsCtor.Events.LEVEL_SWITCHED, (_event, data) => {
+   485→            if (cancelled) return;
+   486→            setCurrentLevel(Number(data?.level));
+   487→          });
+   488→          hls.loadSource(src);
+   489→          hls.attachMedia(el);
+   490→          instance = hls;
+   491→          hlsRef.current = hls;
+   492→        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+   493→          el.src = src;
+   494→        } else {
+   495→          onError?.('eroare HLS');
+   496→        }
+   497→      } catch {
+   498→        if (!cancelled) onError?.('eroare HLS');
+   499→      }
+   500→    })();
+   501→    return () => {
+   502→      cancelled = true;
+   503→      hlsRef.current = null;
+   504→      try {
+   505→        instance?.destroy();
+   506→      } catch {
+   507→        /* already destroyed */
+   508→      }
+   509→    };
+   510→  }, [src, type]);
+   511→
+   512→  /* ----------------------------- ui visibility ---------------------------- */
+   513→
+   514→  const pokeUi = useCallback(() => {
+   515→    setUiVisible(true);
+   516→    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+   517→    hideTimerRef.current = setTimeout(() => {
+   518→      hideTimerRef.current = null;
+   519→      const el = videoRef.current;
+   520→      if (el && !el.paused) setUiVisible(false);
+   521→    }, UI_HIDE_DELAY_MS);
+   522→  }, []);
+   523→
+   524→  const updateBuffered = useCallback(() => {
+   525→    const el = videoRef.current;
+   526→    if (!el || el.buffered.length === 0) {
+   527→      setBufferedRanges((prev) => (prev.length === 0 ? prev : []));
+   528→      return;
+   529→    }
+   530→    const out: { start: number; end: number }[] = [];
+   531→    for (let i = 0; i < el.buffered.length; i += 1) {
+   532→      out.push({ start: el.buffered.start(i), end: el.buffered.end(i) });
+   533→    }
+   534→    setBufferedRanges(out);
+   535→  }, []);
+   536→
+   537→  /* ------------------------------ playback ops ---------------------------- */
+   538→
+   539→  const togglePlay = useCallback(() => {
+   540→    const el = videoRef.current;
+   541→    if (!el || failed) return;
+   542→    if (el.paused) {
+   543→      void el.play().catch(() => {
+   544→        /* autoplay rejected — the user can click play again */
+   545→      });
+   546→    } else {
+   547→      el.pause();
+   548→    }
+   549→  }, [failed]);
+   550→
+   551→  const skip = useCallback((delta: number) => {
+   552→    const el = videoRef.current;
+   553→    if (!el || !Number.isFinite(el.duration)) return;
+   554→    el.currentTime = Math.min(el.duration, Math.max(0, el.currentTime + delta));
+   555→    setCurrentTime(el.currentTime);
+   556→    pokeUi();
+   557→  }, [pokeUi]);
+   558→
+   559→  const setVolume = useCallback((v: number) => {
+   560→    const vol = clamp01(v);
+   561→    updatePlayerSettings({ volume: vol, muted: vol > 0 ? false : getPlayerSettings().muted });
+   562→  }, []);
+   563→
+   564→  const nudgeVolume = useCallback((delta: number) => {
+   565→    setVolume(getPlayerSettings().volume + delta);
+   566→  }, [setVolume]);
+   567→
+   568→  const toggleMute = useCallback(() => {
+   569→    updatePlayerSettings({ muted: !getPlayerSettings().muted });
+   570→  }, []);
+   571→
+   572→  const toggleCinema = useCallback(() => {
+   573→    updatePlayerSettings({ cinemaMode: !getPlayerSettings().cinemaMode });
+   574→  }, []);
+   575→
+   576→  const toggleFullscreen = useCallback(() => {
+   577→    const el = wrapRef.current;
+   578→    if (!el) return;
+   579→    if (document.fullscreenElement) {
+   580→      void document.exitFullscreen().catch(() => {});
+   581→    } else {
+   582→      void el.requestFullscreen?.().catch(() => {});
+   583→    }
+   584→  }, []);
+   585→
+   586→  const togglePip = useCallback(async () => {
+   587→    const el = videoRef.current;
+   588→    if (!el || !document.pictureInPictureEnabled) return;
+   589→    try {
+   590→      if (document.pictureInPictureElement) {
+   591→        await document.exitPictureInPicture();
+   592→      } else {
+   593→        await el.requestPictureInPicture();
+   594→      }
+   595→    } catch {
+   596→      /* PiP rejected — ignore */
+   597→    }
+   598→  }, []);
+   599→
+   600→  const toggleSubtitles = useCallback(() => {
+   601→    const el = videoRef.current;
+   602→    if (!el || tracks.length === 0) return;
+   603→    /* A hub track counts as active only when ITS <track> element (matched by
+   604→       id) is showing — native HLS caption tracks never satisfy the toggle. */
+   605→    const hubShowing = tracks.some((t) => {
+   606→      const trackEl = el.querySelector<HTMLTrackElement>(`track[data-hub-id="${t.id}"]`);
+   607→      return trackEl?.track?.mode === 'showing';
+   608→    });
+   609→    if (hubShowing) {
+   610→      chooseSubtitle(null);
+   611→      return;
+   612→    }
+   613→    const pref = getPlayerSettings().preferredSubtitleLang;
+   614→    let idx = 0;
+   615→    if (pref) {
+   616→      const wanted = pref.toLowerCase();
+   617→      const match = tracks.findIndex(
+   618→        (t) => t.lang.toLowerCase() === wanted || t.lang.toLowerCase().split('-')[0] === wanted.split('-')[0],
+   619→      );
+   620→      if (match >= 0) idx = match;
+   621→    }
+   622→    chooseSubtitle(idx);
+   623→  }, [chooseSubtitle, tracks]);
+   624→
+   625→  const setSpeed = useCallback((speed: number) => {
+   626→    updatePlayerSettings({ defaultSpeed: speed });
+   627→  }, []);
+   628→
+   629→  const setQuality = useCallback((idx: number | null) => {
+   630→    setPinnedLevel(idx);
+   631→    const hls = hlsRef.current;
+   632→    if (!hls) return;
+   633→    try {
+   634→      hls.currentLevel = idx == null ? -1 : idx;
+   635→    } catch {
+   636→      /* level switch rejected — stays on the current level */
+   637→    }
+   638→  }, []);
+   639→
+   640→  /* Resume: seek once to initialTime — runs when both the resume point and
+   641→     the metadata (duration) are available, whichever arrives first. */
+   642→  useEffect(() => {
+   643→    if (seekedInitialRef.current) return;
+   644→    if (initialTime == null || initialTime <= 0) return;
+   645→    const el = videoRef.current;
+   646→    if (!el || !Number.isFinite(el.duration) || el.duration <= 0) return;
+   647→    seekedInitialRef.current = true;
+   648→    const t = Math.min(initialTime, Math.max(0, el.duration - 5));
+   649→    try {
+   650→      el.currentTime = t;
+   651→      setCurrentTime(t);
+   652→    } catch {
+   653→      /* seek rejected — playback starts from 0 */
+   654→    }
+   655→  }, [initialTime, duration]);
+   656→
+   657→  /* ------------------------------ click layer ----------------------------- */
+   658→
+   659→  const onStageClick = useCallback(() => {
+   660→    if (openMenu) {
+   661→      setOpenMenu(null);
+   662→      return;
+   663→    }
+   664→    if (clickTimerRef.current) return; // part of an upcoming double click
+   665→    clickTimerRef.current = setTimeout(() => {
+   666→      clickTimerRef.current = null;
+   667→      togglePlay();
+   668→    }, 220);
+   669→  }, [openMenu, togglePlay]);
+   670→
+   671→  const onStageDoubleClick = useCallback(() => {
+   672→    if (clickTimerRef.current) {
+   673→      clearTimeout(clickTimerRef.current);
+   674→      clickTimerRef.current = null;
+   675→    }
+   676→    toggleFullscreen();
+   677→  }, [toggleFullscreen]);
+   678→
+   679→  /* -------------------------------- timeline ------------------------------ */
+   680→
+   681→  const ratioFromClientX = useCallback((clientX: number): number => {
+   682→    const el = barRef.current;
+   683→    if (!el) return 0;
+   684→    const rect = el.getBoundingClientRect();
+   685→    if (rect.width <= 0) return 0;
+   686→    return clamp01((clientX - rect.left) / rect.width);
+   687→  }, []);
+   688→
+   689→  const seekToRatio = useCallback((ratio: number) => {
+   690→    const el = videoRef.current;
+   691→    if (!el || !Number.isFinite(el.duration) || el.duration <= 0) return;
+   692→    el.currentTime = ratio * el.duration;
+   693→    setCurrentTime(el.currentTime);
+   694→    onTimeUpdate?.(el.currentTime, el.duration);
+   695→  }, [onTimeUpdate]);
+   696→
+   697→  /* --------------------------- keyboard shortcuts -------------------------- */
+   698→
+   699→  /* Bound once; the handler closure is refreshed after every render so it
+   700→     always sees the latest state without rebinding the listener. */
+   701→  const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+   702→  useEffect(() => {
+   703→    keyHandlerRef.current = (e: KeyboardEvent) => {
+   704→      if (e.ctrlKey || e.metaKey || e.altKey) return;
+   705→      if (isTypingTarget(e.target)) return;
+   706→      switch (e.key) {
+   707→        case ' ':
+   708→        case 'k':
+   709→        case 'K':
+   710→          e.preventDefault();
+   711→          pokeUi();
+   712→          togglePlay();
+   713→          break;
+   714→        case 'ArrowLeft':
+   715→          e.preventDefault();
+   716→          skip(-SKIP_SECONDS);
+   717→          break;
+   718→        case 'ArrowRight':
+   719→          e.preventDefault();
+   720→          skip(SKIP_SECONDS);
+   721→          break;
+   722→        case 'j':
+   723→        case 'J':
+   724→          skip(-SKIP_SECONDS);
+   725→          break;
+   726→        case 'l':
+   727→        case 'L':
+   728→          skip(SKIP_SECONDS);
+   729→          break;
+   730→        case 'ArrowUp':
+   731→          e.preventDefault();
+   732→          nudgeVolume(0.05);
+   733→          pokeUi();
+   734→          break;
+   735→        case 'ArrowDown':
+   736→          e.preventDefault();
+   737→          nudgeVolume(-0.05);
+   738→          pokeUi();
+   739→          break;
+   740→        case 'm':
+   741→        case 'M':
+   742→          pokeUi();
+   743→          toggleMute();
+   744→          break;
+   745→        case 'f':
+   746→        case 'F':
+   747→          toggleFullscreen();
+   748→          break;
+   749→        case 'c':
+   750→        case 'C':
+   751→          toggleCinema();
+   752→          break;
+   753→        case 's':
+   754→        case 'S':
+   755→          pokeUi();
+   756→          toggleSubtitles();
+   757→          break;
+   758→        case 'i':
+   759→        case 'I':
+   760→          void togglePip();
+   761→          break;
+   762→        case '?':
+   763→          setOpenMenu((v) => (v === 'shortcuts' ? null : 'shortcuts'));
+   764→          break;
+   765→        case 'Escape':
+   766→          setOpenMenu(null);
+   767→          break;
+   768→        default:
+   769→          break;
+   770→      }
+   771→    };
+   772→  });
+   773→
+   774→  useEffect(() => {
+   775→    const listener = (e: KeyboardEvent) => keyHandlerRef.current(e);
+   776→    window.addEventListener('keydown', listener);
+   777→    return () => window.removeEventListener('keydown', listener);
+   778→  }, []);
+   779→
+   780→  /* ----------------------- element / document events ----------------------- */
+   781→
+   782→  useEffect(() => {
+   783→    const onFsChange = () => setFullscreen(Boolean(document.fullscreenElement));
+   784→    document.addEventListener('fullscreenchange', onFsChange);
+   785→    return () => document.removeEventListener('fullscreenchange', onFsChange);
+   786→  }, []);
+   787→
+   788→  useEffect(() => {
+   789→    setPipSupported(
+   790→      typeof document !== 'undefined' &&
+   791→        document.pictureInPictureEnabled &&
+   792→        'requestPictureInPicture' in HTMLVideoElement.prototype,
+   793→    );
+   794→    const el = videoRef.current;
+   795→    if (!el) return undefined;
+   796→    const enter = () => setPipActive(true);
+   797→    const leave = () => setPipActive(false);
+   798→    el.addEventListener('enterpictureinpicture', enter);
+   799→    el.addEventListener('leavepictureinpicture', leave);
+   800→    return () => {
+   801→      el.removeEventListener('enterpictureinpicture', enter);
+   802→      el.removeEventListener('leavepictureinpicture', leave);
+   803→    };
+   804→  }, []);
+   805→
+   806→  /* Total cleanup on unmount (FAZA 17 discipline): timers, PiP, decoder. */
+   807→  useEffect(() => {
+   808→    const el = videoRef.current;
+   809→    return () => {
+   810→      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+   811→      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+   812→      try {
+   813→        if (el) {
+   814→          el.pause();
+   815→          el.removeAttribute('src');
+   816→          el.load();
+   817→        }
+   818→      } catch {
+   819→        /* element already detached */
+   820→      }
+   821→      if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+   822→        void document.exitPictureInPicture().catch(() => {});
+   823→      }
+   824→    };
+   825→  }, []);
+   826→
+   827→  /* --------------------------------- render -------------------------------- */
+   828→
+   829→  const controlsVisible = uiVisible || openMenu != null || !playing || loading;
+   830→  const progress = duration > 0 ? clamp01(currentTime / duration) : 0;
+   831→  const hasSubs = tracks.length > 0;
+   832→  const autoQuality = pinnedLevel == null;
+   833→  const currentLevelHeight = levels.find((l) => l.index === currentLevel)?.height ?? 0;
+   834→  const pinnedHeight = pinnedLevel != null ? (levels.find((l) => l.index === pinnedLevel)?.height ?? 0) : 0;
+   835→  const VolumeIcon = settings.muted || settings.volume === 0 ? VolumeX : settings.volume < 0.5 ? Volume1 : Volume2;
+   836→
+   837→  return (
+   838→    <div
+   839→      ref={wrapRef}
+   840→      className={cn(
+   841→        'relative aspect-video w-full select-none overflow-hidden bg-black',
+   842→        controlsVisible ? 'cursor-auto' : 'cursor-none',
+   843→        className,
+   844→      )}
+   845→      onMouseMove={pokeUi}
+   846→      onMouseLeave={() => {
+   847→        const el = videoRef.current;
+   848→        if (el && !el.paused) setUiVisible(false);
+   849→      }}
+   850→      onTouchStart={pokeUi}
+   851→    >
+   852→      {/* The media element — NO native controls; mp4 declarative src, HLS via hls.js */}
+   853→      <video
+   854→        ref={videoRef}
+   855→        className="absolute inset-0 h-full w-full"
+   856→        autoPlay={autoPlay}
+   857→        playsInline
+   858→        src={type === 'mp4' ? src : undefined}
+   859→        onPlay={() => {
+   860→          setPlaying(true);
+   861→          setLoading(false);
+   862→          pokeUi();
+   863→          onPlay?.();
+   864→        }}
+   865→        onPause={() => {
+   866→          setPlaying(false);
+   867→          setUiVisible(true);
+   868→          onPause?.();
+   869→        }}
+   870→        onEnded={() => {
+   871→          setPlaying(false);
+   872→          setUiVisible(true);
+   873→          onEnded?.();
+   874→        }}
+   875→        onError={() => {
+   876→          setFailed(true);
+   877→          setLoading(false);
+   878→          onError?.(type === 'mp4' ? 'eroare mp4' : 'eroare HLS');
+   879→        }}
+   880→        onLoadedMetadata={() => {
+   881→          const el = videoRef.current;
+   882→          if (!el) return;
+   883→          setDuration(Number.isFinite(el.duration) ? el.duration : 0);
+   884→          try {
+   885→            el.playbackRate = settings.defaultSpeed;
+   886→          } catch {
+   887→            /* rate not applicable yet */
+   888→          }
+   889→        }}
+   890→        onLoadedData={() => {
+   891→          setLoading(false);
+   892→          onLoadedData?.();
+   893→        }}
+   894→        onCanPlay={() => {
+   895→          setLoading(false);
+   896→          onCanPlay?.();
+   897→        }}
+   898→        onWaiting={() => setLoading(true)}
+   899→        onPlaying={() => setLoading(false)}
+   900→        onProgress={() => {
+   901→          updateBuffered();
+   902→          onLoadProgress?.();
+   903→        }}
+   904→        onTimeUpdate={() => {
+   905→          const el = videoRef.current;
+   906→          if (!el) return;
+   907→          const d = Number.isFinite(el.duration) ? el.duration : 0;
+   908→          setCurrentTime(el.currentTime);
+   909→          setDuration(d);
+   910→          updateBuffered();
+   911→          onTimeUpdate?.(el.currentTime, d);
+   912→        }}
+   913→      >
+   914→        {/* REAL WebVTT subtitle tracks from the Player Hub (task 19-1).
+   915→            data-hub-id is the selection key: native HLS caption tracks share
+   916→            the same textTracks list, so indexes can never be trusted. */}
+   917→        {subsEnabled && contentId != null
+   918→          ? tracks.map((t) => (
+   919→              <track
+   920→                key={t.id}
+   921→                kind="subtitles"
+   922→                src={playerHubSubtitleUrl(contentId, t.id)}
+   923→                srcLang={t.lang}
+   924→                label={t.label}
+   925→                data-hub-id={t.id}
+   926→              />
+   927→            ))
+   928→          : null}
+   929→      </video>
+   930→
+   931→      {/* Click layer: single click = play/pause, double click = fullscreen */}
+   932→      <div
+   933→        role="button"
+   934→        tabIndex={0}
+   935→        aria-label="Comută redarea (dublu-click: ecran complet)"
+   936→        className="absolute inset-0 z-10 focus-visible:outline-none"
+   937→        onClick={onStageClick}
+   938→        onDoubleClick={onStageDoubleClick}
+   939→        onKeyDown={(e) => {
+   940→          if (e.key === 'Enter') {
+   941→            e.preventDefault();
+   942→            togglePlay();
+   943→          }
+   944→        }}
+   945→      />
+   946→
+   947→      {/* Center states */}
+   948→      {loading && !failed ? (
+   949→        <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center" aria-hidden>
+   950→          <Loader2 className="h-10 w-10 animate-spin text-white/80" />
+   951→        </div>
+   952→      ) : null}
+   953→      {!playing && !loading && !failed ? (
+   954→        <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center" aria-hidden>
+   955→          <span className="grid h-16 w-16 place-items-center rounded-full bg-black/55 shadow-2xl backdrop-blur-sm">
+   956→            <Play className="ml-1 h-8 w-8 fill-white text-white" />
+   957→          </span>
+   958→        </div>
+   959→      ) : null}
+   960→
+   961→      {/* Backdrop that closes any open popover */}
+   962→      {openMenu ? (
+   963→        <div className="absolute inset-0 z-20" onClick={() => setOpenMenu(null)} aria-hidden />
+   964→      ) : null}
+   965→
+   966→      {/* Custom control bar */}
+   967→      <div
+   968→        className={cn(
+   969→          'absolute inset-x-0 bottom-0 z-30 transition-opacity duration-200',
+   970→          controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0',
+   971→        )}
+   972→      >
+   973→        <div className="bg-gradient-to-t from-black/90 via-black/55 to-transparent px-3 pb-2.5 pt-12 sm:px-4">
+   974→          {/* Timeline: buffered + played + scrub + hover tooltip */}
+   975→          <div
+   976→            ref={barRef}
+   977→            role="slider"
+   978→            aria-label="Bară de progres video"
+   979→            aria-valuemin={0}
+   980→            aria-valuemax={Math.round(duration)}
+   981→            aria-valuenow={Math.round(currentTime)}
+   982→            aria-valuetext={`${fmtTime(currentTime)} din ${fmtTime(duration)}`}
+   983→            tabIndex={0}
+   984→            className="relative h-5 cursor-pointer touch-none"
+   985→            onPointerDown={(e) => {
+   986→              e.currentTarget.setPointerCapture(e.pointerId);
+   987→              setScrubbing(true);
+   988→              setHoverX(ratioFromClientX(e.clientX));
+   989→              seekToRatio(ratioFromClientX(e.clientX));
+   990→            }}
+   991→            onPointerMove={(e) => {
+   992→              const r = ratioFromClientX(e.clientX);
+   993→              setHoverX(r);
+   994→              if (scrubbing) seekToRatio(r);
+   995→            }}
+   996→            onPointerUp={(e) => {
+   997→              setScrubbing(false);
+   998→              try {
+   999→                e.currentTarget.releasePointerCapture(e.pointerId);
+  1000→              } catch {
+  1001→                /* pointer already released */
+  1002→              }
+  1003→            }}
+  1004→            onPointerLeave={() => {
+  1005→              if (!scrubbing) setHoverX(null);
+  1006→            }}
+  1007→          >
+  1008→            <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-white/20">
+  1009→              {/* buffered ranges (gray) */}
+  1010→              {duration > 0
+  1011→                ? bufferedRanges.map((r, i) => (
+  1012→                    <div
+  1013→                      key={i}
+  1014→                      className="absolute inset-y-0 bg-white/30"
+  1015→                      style={{
+  1016→                        left: `${clamp01(r.start / duration) * 100}%`,
+  1017→                        width: `${clamp01((r.end - r.start) / duration) * 100}%`,
+  1018→                      }}
+  1019→                    />
+  1020→                  ))
+  1021→                : null}
+  1022→              {/* played (rose) */}
+  1023→              <div className="absolute inset-y-0 left-0 bg-rose-500" style={{ width: `${progress * 100}%` }} />
+  1024→            </div>
+  1025→            {/* playhead knob */}
+  1026→            <div
+  1027→              className={cn(
+  1028→                'absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.8)] transition-transform',
+  1029→                scrubbing ? 'scale-125' : 'scale-100',
+  1030→              )}
+  1031→              style={{ left: `${progress * 100}%` }}
+  1032→            />
+  1033→            {/* hover time tooltip */}
+  1034→            {hoverX != null && duration > 0 ? (
+  1035→              <div
+  1036→                className="pointer-events-none absolute bottom-5 -translate-x-1/2 whitespace-nowrap rounded-md bg-black/90 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-white shadow-lg"
+  1037→                style={{ left: `${hoverX * 100}%` }}
+  1038→              >
+  1039→                {fmtTime(hoverX * duration)}
+  1040→              </div>
+  1041→            ) : null}
+  1042→          </div>
+  1043→
+  1044→          {/* Buttons row */}
+  1045→          <div className="mt-0.5 flex items-center gap-0.5">
+  1046→            <CtrlBtn label={playing ? 'Pauză (Space/K)' : 'Redare (Space/K)'} onClick={togglePlay}>
+  1047→              {playing ? (
+  1048→                <Pause className="h-5 w-5 fill-current" aria-hidden />
+  1049→              ) : (
+  1050→                <Play className="h-5 w-5 fill-current" aria-hidden />
+  1051→              )}
+  1052→            </CtrlBtn>
+  1053→
+  1054→            <CtrlBtn label="Înapoi 10 secunde (←)" onClick={() => skip(-SKIP_SECONDS)}>
+  1055→              <span className="relative grid place-items-center">
+  1056→                <RotateCcw className="h-5 w-5" aria-hidden />
+  1057→                <span className="absolute -right-0.5 -top-1 text-[8px] font-black leading-none">10</span>
+  1058→              </span>
+  1059→            </CtrlBtn>
+  1060→            <CtrlBtn label="Înainte 10 secunde (→)" onClick={() => skip(SKIP_SECONDS)}>
+  1061→              <span className="relative grid place-items-center">
+  1062→                <RotateCw className="h-5 w-5" aria-hidden />
+  1063→                <span className="absolute -right-1 -top-1 text-[8px] font-black leading-none">10</span>
+  1064→              </span>
+  1065→            </CtrlBtn>
+  1066→
+  1067→            {/* Volume */}
+  1068→            <div className="ml-0.5 flex items-center gap-1">
+  1069→              <CtrlBtn label={settings.muted ? 'Activează sunetul (M)' : 'Mut (M)'} onClick={toggleMute}>
+  1070→                <VolumeIcon className="h-5 w-5" aria-hidden />
+  1071→              </CtrlBtn>
+  1072→              <VolumeBar value={settings.muted ? 0 : settings.volume} onChange={setVolume} />
+  1073→            </div>
+  1074→
+  1075→            <span className="ml-1.5 whitespace-nowrap px-1 text-xs font-semibold tabular-nums text-zinc-200">
+  1076→              {fmtTime(currentTime)} <span className="text-zinc-500">/</span> {fmtTime(duration)}
+  1077→            </span>
+  1078→
+  1079→            <div className="flex-1" />
+  1080→
+  1081→            {/* Speed */}
+  1082→            <div className="relative">
+  1083→              <CtrlBtn
+  1084→                wide
+  1085→                label="Viteză de redare"
+  1086→                active={openMenu === 'speed'}
+  1087→                onClick={() => setOpenMenu(openMenu === 'speed' ? null : 'speed')}
+  1088→              >
+  1089→                {settings.defaultSpeed}×
+  1090→              </CtrlBtn>
+  1091→              <Popover open={openMenu === 'speed'} title="Viteză" align="right">
+  1092→                {PLAYBACK_SPEEDS.map((s) => (
+  1093→                  <MenuRow key={s} active={settings.defaultSpeed === s} onClick={() => setSpeed(s)}>
+  1094→                    {s === 1 ? 'Normal (1×)' : `${s}×`}
+  1095→                  </MenuRow>
+  1096→                ))}
+  1097→              </Popover>
+  1098→            </div>
+  1099→
+  1100→            {/* Subtitles — REAL tracks from /api/playerhub/subtitles/:contentId */}
+  1101→            <div className="relative">
+  1102→              <CtrlBtn
+  1103→                label={hasSubs ? 'Subtitrări (S)' : 'Fără subtitrări disponibile'}
+  1104→                disabled={!hasSubs}
+  1105→                active={openMenu === 'subs' || activeSub != null}
+  1106→                onClick={() => setOpenMenu(openMenu === 'subs' ? null : 'subs')}
+  1107→              >
+  1108→                <Captions className="h-5 w-5" aria-hidden />
+  1109→              </CtrlBtn>
+  1110→              <Popover
+  1111→                open={openMenu === 'subs' && hasSubs}
+  1112→                title="Subtitrări"
+  1113→                align="right"
+  1114→                widthClass="w-44"
+  1115→              >
+  1116→                <MenuRow active={activeSub == null} onClick={() => chooseSubtitle(null)}>
+  1117→                  Oprit
+  1118→                </MenuRow>
+  1119→                {tracks.map((t, i) => (
+  1120→                  <MenuRow key={t.id} active={activeSub === i} onClick={() => chooseSubtitle(i)}>
+  1121→                    {t.label}{' '}
+  1122→                    <span className="font-mono text-[10px] font-normal uppercase text-zinc-500">{t.lang}</span>
+  1123→                  </MenuRow>
+  1124→                ))}
+  1125→              </Popover>
+  1126→            </div>
+  1127→
+  1128→            {/* Quality — HLS only, only when hls.js exposes multiple levels */}
+  1129→            {type === 'm3u8' && levels.length > 1 ? (
+  1130→              <div className="relative">
+  1131→                <CtrlBtn
+  1132→                  wide
+  1133→                  label="Calitate video"
+  1134→                  active={openMenu === 'quality'}
+  1135→                  onClick={() => setOpenMenu(openMenu === 'quality' ? null : 'quality')}
+  1136→                >
+  1137→                  {autoQuality
+  1138→                    ? `Auto${currentLevelHeight > 0 ? ` ${currentLevelHeight}p` : ''}`
+  1139→                    : `${pinnedHeight > 0 ? `${pinnedHeight}p` : '—'}`}
+  1140→                </CtrlBtn>
+  1141→                <Popover open={openMenu === 'quality'} title="Calitate" align="right" widthClass="w-44">
+  1142→                  <MenuRow active={autoQuality} onClick={() => setQuality(null)}>
+  1143→                    {autoQuality && currentLevelHeight > 0 ? `Auto (${currentLevelHeight}p)` : 'Auto'}
+  1144→                  </MenuRow>
+  1145→                  {levels.map((l) => (
+  1146→                    <MenuRow
+  1147→                      key={`${l.index}-${l.height}`}
+  1148→                      active={pinnedLevel === l.index}
+  1149→                      onClick={() => setQuality(l.index)}
+  1150→                    >
+  1151→                      {l.height}p
+  1152→                    </MenuRow>
+  1153→                  ))}
+  1154→                </Popover>
+  1155→              </div>
+  1156→            ) : null}
+  1157→
+  1158→            {/* Cinema mode — the layout change lives in player-view */}
+  1159→            <CtrlBtn
+  1160→              label={settings.cinemaMode ? 'Ieși din modul cinema (C)' : 'Mod cinema (C)'}
+  1161→              active={settings.cinemaMode}
+  1162→              onClick={toggleCinema}
+  1163→            >
+  1164→              {settings.cinemaMode ? (
+  1165→                <MonitorPlay className="h-5 w-5" aria-hidden />
+  1166→              ) : (
+  1167→                <RectangleHorizontal className="h-5 w-5" aria-hidden />
+  1168→              )}
+  1169→            </CtrlBtn>
+  1170→
+  1171→            {pipSupported ? (
+  1172→              <CtrlBtn
+  1173→                label={pipActive ? 'Ieși din Picture-in-Picture (I)' : 'Picture-in-Picture (I)'}
+  1174→                active={pipActive}
+  1175→                onClick={() => void togglePip()}
+  1176→              >
+  1177→                <PictureInPicture2 className="h-5 w-5" aria-hidden />
+  1178→              </CtrlBtn>
+  1179→            ) : null}
+  1180→
+  1181→            <CtrlBtn
+  1182→              label={fullscreen ? 'Ieși din ecran complet (F)' : 'Ecran complet (F)'}
+  1183→              onClick={toggleFullscreen}
+  1184→            >
+  1185→              {fullscreen ? (
+  1186→                <Minimize className="h-5 w-5" aria-hidden />
+  1187→              ) : (
+  1188→                <Maximize className="h-5 w-5" aria-hidden />
+  1189→              )}
+  1190→            </CtrlBtn>
+  1191→
+  1192→            {/* Keyboard shortcuts */}
+  1193→            <div className="relative">
+  1194→              <CtrlBtn
+  1195→                label="Comenzi rapide tastatură (?)"
+  1196→                active={openMenu === 'shortcuts'}
+  1197→                onClick={() => setOpenMenu(openMenu === 'shortcuts' ? null : 'shortcuts')}
+  1198→              >
+  1199→                <Keyboard className="h-5 w-5" aria-hidden />
+  1200→              </CtrlBtn>
+  1201→              <Popover
+  1202→                open={openMenu === 'shortcuts'}
+  1203→                title="Comenzi rapide"
+  1204→                align="right"
+  1205→                widthClass="w-64"
+  1206→              >
+  1207→                <ul className="space-y-1 px-1.5 pb-1 pt-0.5 text-[11px] leading-relaxed text-zinc-300">
+  1208→                  {[
+  1209→                    ['Space / K', 'Redare / pauză'],
+  1210→                    ['← / →', '±10 secunde'],
+  1211→                    ['J / L', '±10 secunde (mobil)'],
+  1212→                    ['↑ / ↓', 'Volum'],
+  1213→                    ['M', 'Mut'],
+  1214→                    ['F', 'Ecran complet'],
+  1215→                    ['C', 'Mod cinema'],
+  1216→                    ['S', 'Subtitrări'],
+  1217→                    ['I', 'Picture-in-Picture'],
+  1218→                    ['?', 'Această listă'],
+  1219→                  ].map(([key, desc]) => (
+  1220→                    <li key={key} className="flex items-center justify-between gap-3">
+  1221→                      <span className="font-mono text-[10px] font-bold text-zinc-100">{key}</span>
+  1222→                      <span className="text-right">{desc}</span>
+  1223→                    </li>
+  1224→                  ))}
+  1225→                </ul>
+  1226→              </Popover>
+  1227→            </div>
+  1228→          </div>
+  1229→        </div>
+  1230→      </div>
+  1231→    </div>
+  1232→  );
+  1233→});
+  1234→

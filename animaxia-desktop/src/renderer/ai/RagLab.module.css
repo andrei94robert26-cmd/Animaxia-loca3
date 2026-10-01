@@ -1,0 +1,216 @@
+/* RagLab.module.css — scoped styles for the AI Hub "RAG Lab" tab. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.intro {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--rose-tint);
+  border: 1px solid var(--rose-line);
+  border-radius: var(--radius-md);
+  padding: 12px 15px;
+}
+
+.introText {
+  flex: 1;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* ------------------------------ tool card grid ------------------------------ */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.tool {
+  background: var(--card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  min-width: 0;
+}
+
+.toolHeader {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.toolTitle {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.toolHint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.toolBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ------------------------------- results area ------------------------------- */
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 2px 4px 6px 2px;
+}
+
+.picksScroll {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  scroll-snap-type: x proximity;
+}
+
+.picksScroll > * {
+  scroll-snap-align: start;
+}
+
+.pickCell {
+  width: 148px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pickScore {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  color: var(--rose-soft);
+  font-size: 10.5px;
+  font-weight: 800;
+  background: var(--rose-tint);
+  border: 1px solid var(--rose-line);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+}
+
+.lead {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* summarize result */
+
+.summaryCard {
+  background: var(--card-soft);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--rose);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.summaryTitle {
+  font-size: 14px;
+  font-weight: 800;
+  margin: 0;
+}
+
+.summaryBody {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+/* explain result */
+
+.matchRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.matchScore {
+  font-size: 30px;
+  font-weight: 900;
+  color: var(--emerald);
+  letter-spacing: -0.5px;
+}
+
+.matchLabel {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.explanation {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.similarTitle {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.similarChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.similarName {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* provider / meta rows */
+
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.openChipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}

@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Animaxia Cloud — canonical per-service Dockerfile (BLUEPRINT §8 — FROZEN)
+# =============================================================================
+#
+# HOW THIS FILE IS USED
+#
+#   This is the TEMPLATE. Every microservice keeps its own copy at
+#   services/<name>/Dockerfile with `<name>` and `<port>` substituted:
+#
+#     gateway-service    <port>=8080     auth-service       <port>=4001
+#     content-service    <port>=4002     ai-service         <port>=4003
+#     analytics-service  <port>=4004     search-service     <port>=4005
+#     premium-service    <port>=4006     social-service     <port>=4007
+#     mobile-service     <port>=4008     queue-service      <port>=4009
+#
+#   The build context is ALWAYS the repo root (animaxia-cloud/): the image
+#   needs the root package.json + bun.lock and the common/ + domain/
+#   workspaces next to the service folder. Build from the repo root with:
+#
+#     docker build -f services/auth-service/Dockerfile -t ghcr.io/animaxia/auth-service:local .
+#
+#   docker compose does this automatically for the whole stack — see
+#   deploy/docker/docker-compose.yml. CI (.github/workflows/ci.yml) builds and
+#   pushes ghcr.io/animaxia/<name>:<sha> / :latest the same way.
+#
+# IMAGE CONTRACT
+#   • multi-stage: deps stage installs workspaces with bun --frozen-lockfile,
+#     runner stage ships only production node_modules + sources
+#   • base image oven/bun:1.2-alpine, runtime = `bun services/<name>/server.js`
+#   • non-root user `animaxia` (uid 10001) — never run as root
+#   • curl installed so the Docker HEALTHCHECK can hit GET /health
+#   • PORT/SERVICEPORT baked in; container port = the service default port
+#     (8080 gateway, 4001-4009 microservices)
+#   • health endpoint contract: GET /health → 200 { "status": "ok", ... }
+#     (BLUEPRINT §6 — every createService() exposes it)
+# =============================================================================
+# Build from repo root: docker build -f services/<name>/Dockerfile .
+FROM oven/bun:1.2-alpine AS deps
+WORKDIR /app
+COPY package.json bun.lock ./
+COPY common/package.json common/
+COPY domain/package.json domain/
+COPY services/<name>/package.json services/<name>/
+RUN bun install --frozen-lockfile --production
+
+FROM oven/bun:1.2-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production SERVICEPORT=<port> PORT=<port>
+RUN apk add --no-cache curl && adduser -D -u 10001 animaxia
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/bun.lock ./bun.lock
+COPY common ./common
+COPY domain ./domain
+COPY services/<name> ./services/<name>
+USER animaxia
+EXPOSE <port>
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:${PORT}/health || exit 1
+CMD ["bun", "services/<name>/server.js"]

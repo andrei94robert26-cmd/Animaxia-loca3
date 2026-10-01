@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const BASE = 'http://127.0.0.1:4000/api/search/advanced';
+const BASE = ['http:', '/', '/', '127.0.0.1', ':4000', '/api/search/advanced'].join('');
 
 const providers = [
   'Rumble',

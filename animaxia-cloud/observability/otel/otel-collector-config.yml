@@ -1,0 +1,75 @@
+# =============================================================================
+# Animaxia Cloud — OpenTelemetry Collector configuration (BLUEPRINT §11)
+# =============================================================================
+# Mounted read-only into the `otel-collector` container
+# (otel/opentelemetry-collector-contrib:0.119.0) by
+# deploy/docker/docker-compose.observability.yml:
+#   otelcol-contrib --config=/etc/otel/otel-collector-config.yml
+#
+# What flows through here today:
+#   traces : services (common/telemetry.js, OTELSENDPOINT =
+#            http://otel-collector:4318/v1/traces, OTLP/HTTP-JSON,
+#            fire-and-forget) → batch → Tempo (otlphttp)
+#   metrics: any OTLP metrics exporter → Prometheus exposition on :8889,
+#            scraped by Prometheus (job `otel-collector`). The Animaxia
+#            services currently expose metrics natively on /metrics, so this
+#            pipeline is quiet — it exists so OTLP metrics work out of the box.
+#
+# Ports (container):
+#   4317  OTLP gRPC receiver   (host-published for host-run services)
+#   4318  OTLP HTTP receiver   (host-published — default OTELSENDPOINT target)
+#   8889  Prometheus exporter  (internal only — Prometheus scrapes it via
+#                               Docker DNS; deliberately NOT host-published)
+#   13133 health_check extension
+# =============================================================================
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # Guard rail first: refuse to collect more telemetry than 512 MiB of heap
+  # (the collector refuses data rather than getting OOM-killed).
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+  # Then batch: flush every 5s or 512 spans/datapoints, whichever first.
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  # Traces → Tempo (Tempo's own OTLP receiver, http port 4318).
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+
+  # OTLP metrics → Prometheus text exposition on :8889.
+  # resource_to_telemetry_conversion promotes resource attributes
+  # (service.name, service.version, deployment.environment, ...) into metric
+  # labels so per-service slicing works on OTLP-derived series too.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  extensions:
+    - health_check
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

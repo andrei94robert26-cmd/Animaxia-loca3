@@ -1,0 +1,13 @@
+{
+  "announcements": [
+    {
+      "id": "animaxia-2.0-dev",
+      "level": "promo",
+      "message": "Animaxia 2.0 — dezvoltare masivă în desfășurare: catalog extins, stare platformă în timp real și 8 capabilități AI noi.",
+      "link": "#/status",
+      "linkLabel": "Vezi starea platformei",
+      "from": "2026-09-24T00:00:00Z",
+      "until": "2026-12-31T23:59:59Z"
+    }
+  ]
+}

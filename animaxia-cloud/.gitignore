@@ -1,0 +1,18 @@
+node_modules/
+.env
+data/
+*.log
+logs/
+dist/
+.turbo/
+coverage/
+.DS_Store
+*.tmp
+*.local
+helm/*.tgz
+
+# runtime artifacts
+dev-pids
+.dev-pids
+logs/
+backups/

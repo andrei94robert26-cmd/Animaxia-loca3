@@ -1,0 +1,17 @@
+# =============================================================================
+# Animaxia Cloud — namespace
+# All raw manifests in this folder target namespace "animaxia".
+# Apply first: kubectl apply -f 00-namespace.yaml
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/version: "3.0.0"
+    # prometheus.io/scrape is configured per-Deployment, not per-namespace
+  annotations:
+    # description is informational only
+    animaxia.io/description: "Animaxia Cloud microservices platform (Phase 3)"

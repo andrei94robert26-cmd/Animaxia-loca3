@@ -1,0 +1,597 @@
+/**
+ * modules/miner/core.js — FAZA 12 miner core: persistent job queue + runners.
+ *
+ * DESIGN (complementary to modules/workers — that pool is untouched):
+ *   • Jobs live in Neon (miner_jobs) — they survive restarts. The runner is
+ *     in-process (jobs are I/O bound: provider fetch + SQL), max 2 at a time
+ *     (Jikan allows ~3 req/s; one page per job keeps us far below).
+ *   • Boot recovery: jobs stuck in 'running' from a previous process are
+ *     marked failed 'interrupted' and reported; queued jobs resume.
+ *   • Side effects after content-changing jobs mirror workers.js exactly:
+ *     cache.clearPrefix('http:') + emitPlatform('content:changed') + audit.
+ *
+ * Job types:
+ *   daily-sync      { pages?: 1 }             → TMDB + Jikan, index + push
+ *   tmdb-sync       { page, mode? }           → one TMDB movies page
+ *   jikan-sync      { page }                  → one Jikan top-anime page
+ *   reindex         { limit?, contentIds? }   → vector (re)index for tenant
+ *   manifest-sweep  { limit? }                → scan metadata.player.sources
+ *                                              m3u8 URLs → miner_manifests
+ *
+ * Metrics (ops/metrics.js, additive):
+ *   animaxia_miner_jobs_total{type,status,tenant}
+ *   animaxia_miner_job_duration_ms{type}          (histogram)
+ *   animaxia_miner_items_upserted_total{provider,tenant}
+ *   animaxia_miner_queue_depth / animaxia_miner_running (gauges)
+ *   + attachPull('miner') → /api/metrics JSON snapshot
+ *
+ * API: scheduleJob, runJob, recordSource, upsertManifest, listJobs, getJob,
+ *      minerStats, recoverInterruptedJobs, minerBoot, logJob.
+ */
+
+import crypto from 'node:crypto';
+import { rows, one, num } from '../platform/sql.js';
+import { upsertContent, listContent } from '../../db.js';
+import { cache } from '../../cache.js';
+import { emitPlatform } from '../platform/events.js';
+import { auditLog } from '../security/security.js';
+import { logger } from '../../utils/logger.js';
+import { metrics } from '../ops/metrics.js';
+import { getTenantBySlug, recordTenantUsage, GLOBAL_TENANT_SLUG } from '../tenant/core.js';
+import { fetchMoviesRows } from './providers/tmdb.js';
+import { fetchAnimeRows } from './providers/jikan.js';
+import { indexContentForTenant, rebuildTenantIndex } from './ai-index.js';
+import { pushToSearchIndex } from './search-index.js';
+
+/* --------------------------------- constants -------------------------------- */
+
+export const MINER_JOB_TYPES = ['daily-sync', 'tmdb-sync', 'jikan-sync', 'reindex', 'manifest-sweep'];
+const MAX_CONCURRENT = 2;
+const JOBS_PAGE_DEFAULT = 20;
+
+/* ---------------------------------- runner ---------------------------------- */
+
+const runner = {
+  running: 0,
+  maxConcurrent: MAX_CONCURRENT,
+  pumping: false,
+};
+
+function safeTenantid(tenantid) {
+  const slug = String(tenantid || GLOBAL_TENANT_SLUG).trim().toLowerCase();
+  return slug || GLOBAL_TENANT_SLUG;
+}
+
+function gaugeQueue() {
+  try {
+    metrics.gauge('animaxia_miner_running', {}, runner.running);
+    metrics.gauge('animaxia_miner_queue_depth', {}, runner.pumping ? 1 : 0);
+  } catch {
+    /* metrics must never break the miner */
+  }
+}
+
+/** Append a structured log line for a job (best-effort). */
+export async function logJob(jobId, level, message) {
+  try {
+    await rows(`INSERT INTO miner_logs (jobid, level, message) VALUES ($1, $2, $3)`, [
+      String(jobId),
+      String(level || 'info'),
+      String(message).slice(0, 2000),
+    ]);
+  } catch {
+    /* logging is best-effort */
+  }
+  if (level === 'error') logger.warn(`[miner:${jobId}] ${message}`);
+  else logger.info(`[miner:${jobId}] ${message}`);
+}
+
+/**
+ * Schedule a job for a tenant. Returns the full queued job row.
+ * The runner pump is kicked asynchronously — scheduling never blocks.
+ */
+export async function scheduleJob(type, tenantid, payload = {}, { createdBy = null } = {}) {
+  if (!MINER_JOB_TYPES.includes(type)) {
+    throw Object.assign(new Error(`Unknown miner job type: ${type}`), { status: 400 });
+  }
+  const id = crypto.randomUUID();
+  const slug = safeTenantid(tenantid);
+  await rows(
+    `INSERT INTO miner_jobs (id, type, status, tenantid, payload, createdby)
+     VALUES ($1, $2, 'queued', $3, $4::jsonb, $5)`,
+    [id, type, slug, JSON.stringify(payload || {}), createdBy ? Number(createdBy) : null],
+  );
+  try {
+    metrics.inc('animaxia_miner_jobs_total', { type, status: 'queued', tenant: slug });
+  } catch { /* ignore */ }
+  await logJob(id, 'info', `Job ${type} queued for tenant '${slug}'`);
+  pump(); // async kick — never awaited
+  return getJob(id);
+}
+
+/** Atomically claim the oldest queued job (or a specific id when forced). */
+async function claimNextJob(forceId = null) {
+  const claim = forceId
+    ? await one(
+        `UPDATE miner_jobs SET status = 'running', startedat = NOW(), attempts = attempts + 1
+         WHERE id = $1 AND status <> 'running' RETURNING *`,
+        [String(forceId)],
+      )
+    : await one(
+        `UPDATE miner_jobs SET status = 'running', startedat = NOW(), attempts = attempts + 1
+         WHERE id = (
+           SELECT id FROM miner_jobs WHERE status = 'queued'
+           ORDER BY queuedat ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+         ) RETURNING *`,
+      );
+  return claim || null;
+}
+
+/** Run the queue while concurrency allows. Safe to call repeatedly. */
+function pump() {
+  if (runner.pumping) return;
+  runner.pumping = true;
+  (async () => {
+    try {
+      while (runner.running < runner.maxConcurrent) {
+        const job = await claimNextJob();
+        if (!job) break;
+        runner.running += 1;
+        gaugeQueue();
+        executeJob(job)
+          .catch(() => {})
+          .finally(() => {
+            runner.running -= 1;
+            gaugeQueue();
+            pump();
+          });
+      }
+    } catch (err) {
+      logger.warn(`[miner] pump error: ${err.message}`);
+    } finally {
+      runner.pumping = false;
+      gaugeQueue();
+    }
+  })();
+}
+
+/** Bounded wait for an in-flight job to settle (poll every 500ms). */
+async function waitForJob(jobId, waitMs) {
+  const deadline = Date.now() + Math.max(1000, waitMs);
+  for (;;) {
+    const job = await getJob(jobId);
+    if (!job || job.status !== 'running') return job;
+    if (Date.now() >= deadline) {
+      return { ...job, note: 'still running — poll GET /api/miner/jobs/:id' };
+    }
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, 500);
+      if (typeof t.unref === 'function') t.unref();
+    });
+  }
+}
+
+/**
+ * Manual run trigger (POST /api/miner/run/:id). A queued job is started
+ * immediately (jumping the queue); a finished/failed job is reset and
+ * re-run (attempts keeps counting); a job already claimed by the background
+ * pump (the natural race when run right after scheduling) is awaited with
+ * a bounded poll instead of being rejected.
+ * Resolves when the job settles or after a bounded wait.
+ */
+export async function runJob(jobId, { waitMs = 25000 } = {}) {
+  const existing = await one(`SELECT * FROM miner_jobs WHERE id = $1`, [String(jobId)]);
+  if (!existing) {
+    throw Object.assign(new Error('Job not found'), { status: 404 });
+  }
+  if (existing.status === 'running') {
+    return waitForJob(jobId, waitMs);
+  }
+  if (existing.status !== 'queued') {
+    await rows(`UPDATE miner_jobs SET status = 'queued', error = NULL WHERE id = $1`, [String(jobId)]);
+    await logJob(jobId, 'info', 'Job re-queued for manual run');
+  }
+  const claimed = await claimNextJob(String(jobId));
+  if (!claimed) {
+    pump();
+    return waitForJob(jobId, waitMs);
+  }
+  runner.running += 1;
+  gaugeQueue();
+  const done = executeJob(claimed).catch(() => {});
+  // Bounded wait so manual triggers get the settled result in the response
+  // path, while very slow jobs keep running in the background.
+  const settled = await Promise.race([
+    done.then(() => true),
+    new Promise((resolve) => {
+      const t = setTimeout(() => resolve(false), Math.max(1000, waitMs));
+      if (typeof t.unref === 'function') t.unref();
+    }),
+  ]).finally(() => {
+    runner.running -= 1;
+    gaugeQueue();
+    pump();
+  });
+  const job = await getJob(jobId);
+  return settled ? job : { ...job, note: 'still running — poll GET /api/miner/jobs/:id' };
+}
+
+/* ------------------------------- job handlers ------------------------------- */
+
+/** Sync one provider page: upsert + provenance + index + search push. */
+async function syncProviderPage({ provider, page, mode, tenantid, jobId }) {
+  const fetcher = provider === 'tmdb' ? fetchMoviesRows : fetchAnimeRows;
+  const fetched = provider === 'tmdb'
+    ? await fetcher(page, { mode })
+    : await fetcher(page);
+
+  let upserted = 0;
+  let created = 0;
+  const contentRows = [];
+  const errors = [];
+  for (const row of fetched.rows || []) {
+    try {
+      const { record, created: isNew } = await upsertContent({
+        externalid: row.externalid,
+        type: row.type,
+        title: row.title,
+        metadata: row.metadata,
+        thumbnail: row.thumbnail,
+      });
+      upserted += 1;
+      if (isNew) created += 1;
+      await recordSource(provider, row.externalid, record.id, tenantid, { title: record.title });
+      contentRows.push(record);
+    } catch (err) {
+      errors.push(`${row.externalid}: ${err.message}`);
+      await logJob(jobId, 'warn', `Row skipped (${row.externalid}): ${err.message}`);
+    }
+  }
+  try {
+    metrics.inc('animaxia_miner_items_upserted_total', { provider, tenant: tenantid }, upserted);
+  } catch { /* ignore */ }
+
+  // AI pipeline: embeddings for the tenant namespace + search catalog push
+  let indexed = 0;
+  let pushed = 0;
+  if (contentRows.length) {
+    const idx = await indexContentForTenant(tenantid, contentRows.map((r) => r.id));
+    indexed = idx.indexed || 0;
+    const push = await pushToSearchIndex(contentRows, tenantid);
+    pushed = push.pushed || 0;
+  }
+  return {
+    provider,
+    page: fetched.page,
+    mode: fetched.mode || 'top',
+    fetched: (fetched.rows || []).length,
+    upserted,
+    created,
+    indexed,
+    pushed,
+    errors: errors.length ? errors.slice(0, 5) : [],
+  };
+}
+
+/** Scan content metadata for HLS manifests → miner_manifests. */
+async function manifestSweep({ limit = 100, tenantid, jobId }) {
+  const cap = Math.max(1, Math.min(500, Number(limit) || 100));
+  let scanned = 0;
+  let found = 0;
+  let page = 1;
+  while (scanned < cap && page <= 10) {
+    const list = await listContent({ page, limit: Math.min(100, cap - scanned) });
+    const data = list?.data || [];
+    if (!data.length) break;
+    for (const row of data) {
+      scanned += 1;
+      const sources = row?.metadata?.player?.sources;
+      if (!Array.isArray(sources)) continue;
+      for (const src of sources) {
+        if (!src?.url || (src.type && src.type !== 'm3u8')) continue;
+        let host = null;
+        try {
+          host = new URL(src.url).host;
+        } catch {
+          host = null;
+        }
+        await upsertManifest(row.id, src.url, host, tenantid, 'discovered');
+        found += 1;
+      }
+    }
+    if (data.length < Math.min(100, cap - scanned + data.length)) break;
+    page += 1;
+  }
+  await logJob(jobId, 'info', `Manifest sweep: scanned ${scanned} rows, found ${found} manifests`);
+  return { scanned, found };
+}
+
+/** Dispatch a claimed job by type. Returns the result payload. */
+async function executeJobType(job) {
+  const payload = typeof job.payload === 'string' ? JSON.parse(job.payload || '{}') : job.payload || {};
+  const tenantid = safeTenantid(job.tenantid);
+  switch (job.type) {
+    case 'tmdb-sync':
+      return syncProviderPage({
+        provider: 'tmdb',
+        page: payload.page || 1,
+        mode: payload.mode || 'trending',
+        tenantid,
+        jobId: job.id,
+      });
+    case 'jikan-sync':
+      return syncProviderPage({ provider: 'jikan', page: payload.page || 1, tenantid, jobId: job.id });
+    case 'daily-sync': {
+      const pages = Math.max(1, Math.min(3, Number(payload.pages) || 1));
+      const tmdb = await syncProviderPage({ provider: 'tmdb', page: payload.tmdbPage || 1, mode: 'trending', tenantid, jobId: job.id });
+      await logJob(job.id, 'info', `daily-sync tmdb leg: upserted ${tmdb.upserted}`);
+      const jikan = await syncProviderPage({ provider: 'jikan', page: payload.jikanPage || 1, tenantid, jobId: job.id });
+      await logJob(job.id, 'info', `daily-sync jikan leg: upserted ${jikan.upserted}`);
+      return {
+        providers: ['tmdb', 'jikan'],
+        pages,
+        upserted: tmdb.upserted + jikan.upserted,
+        created: tmdb.created + jikan.created,
+        indexed: tmdb.indexed + jikan.indexed,
+        pushed: tmdb.pushed + jikan.pushed,
+        legs: { tmdb, jikan },
+      };
+    }
+    case 'reindex': {
+      if (Array.isArray(payload.contentIds) && payload.contentIds.length) {
+        const r = await indexContentForTenant(tenantid, payload.contentIds);
+        return { ...r, scope: 'contentIds' };
+      }
+      const r = await rebuildTenantIndex(tenantid, { limit: payload.limit });
+      return { ...r, scope: 'tenant' };
+    }
+    case 'manifest-sweep':
+      return manifestSweep({ limit: payload.limit, tenantid, jobId: job.id });
+    default:
+      throw new Error(`Unhandled job type: ${job.type}`);
+  }
+}
+
+/** Execute a claimed job: transitions + metrics + side effects. */
+async function executeJob(job) {
+  const tenantid = safeTenantid(job.tenantid);
+  const startedAt = Date.now();
+  try {
+    const result = await executeJobType(job);
+    const durationMs = Date.now() - startedAt;
+    await rows(
+      `UPDATE miner_jobs SET status = 'done', result = $2::jsonb, error = NULL, finishedat = NOW() WHERE id = $1`,
+      [job.id, JSON.stringify(result)],
+    );
+    try {
+      metrics.inc('animaxia_miner_jobs_total', { type: job.type, status: 'done', tenant: tenantid });
+      metrics.observe('animaxia_miner_job_duration_ms', { type: job.type }, durationMs);
+    } catch { /* ignore */ }
+    await logJob(job.id, 'info', `Job done in ${durationMs}ms: ${JSON.stringify(result).slice(0, 300)}`);
+
+    // Content-changing side effects — identical policy to workers.js.
+    if (job.type === 'daily-sync' || job.type === 'tmdb-sync' || job.type === 'jikan-sync') {
+      try {
+        cache.clearPrefix('http:');
+      } catch { /* cache is optional */ }
+      try {
+        emitPlatform('content:changed', { source: 'miner', jobId: job.id, tenant: tenantid });
+      } catch { /* bus is optional */ }
+      const tenant = await getTenantBySlug(tenantid);
+      if (tenant && !tenant.isfallback) {
+        await recordTenantUsage(tenant, {
+          metric: 'miner_sync',
+          quantity: Number(result?.upserted) || 0,
+          unit: 'items',
+          meta: { jobid: job.id, type: job.type },
+        });
+      }
+    }
+    await auditLog({
+      userid: job.createdby ? Number(job.createdby) : null,
+      action: `miner.${job.type}.done`,
+      meta: { jobid: job.id, tenant: tenantid, upserted: result?.upserted ?? null, indexed: result?.indexed ?? null },
+    }).catch(() => {});
+  } catch (err) {
+    const durationMs = Date.now() - startedAt;
+    await rows(
+      `UPDATE miner_jobs SET status = 'failed', error = $2, finishedat = NOW() WHERE id = $1`,
+      [job.id, String(err?.message || err).slice(0, 1000)],
+    ).catch(() => {});
+    try {
+      metrics.inc('animaxia_miner_jobs_total', { type: job.type, status: 'failed', tenant: tenantid });
+      metrics.observe('animaxia_miner_job_duration_ms', { type: job.type }, durationMs);
+    } catch { /* ignore */ }
+    await logJob(job.id, 'error', `Job failed: ${err?.message || err}`);
+    await auditLog({
+      userid: job.createdby ? Number(job.createdby) : null,
+      action: `miner.${job.type}.failed`,
+      meta: { jobid: job.id, tenant: tenantid, error: String(err?.message || err).slice(0, 500) },
+    }).catch(() => {});
+  }
+}
+
+/* ------------------------------ provenance APIs ----------------------------- */
+
+/**
+ * Record (or refresh) a provider→content provenance row for a tenant.
+ * UNIQUE(provider, externalid, tenantid) — an ON CONFLICT refresh of lastsync.
+ */
+export async function recordSource(provider, externalid, contentid, tenantid, meta = null) {
+  const slug = safeTenantid(tenantid);
+  await rows(
+    `INSERT INTO miner_sources (provider, externalid, contentid, tenantid, meta, lastsync)
+     VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+     ON CONFLICT (provider, externalid, tenantid) DO UPDATE SET
+       contentid = EXCLUDED.contentid,
+       meta = EXCLUDED.meta,
+       lastsync = NOW()`,
+    [String(provider), String(externalid), Number(contentid), slug, JSON.stringify(meta ?? {})],
+  );
+  return { provider, externalid, contentid: Number(contentid), tenantid: slug };
+}
+
+/**
+ * Record (or refresh) an HLS manifest inventory row.
+ * UNIQUE(contentid, manifesturl, tenantid) — refresh of lastchecked.
+ */
+export async function upsertManifest(contentid, manifesturl, host, tenantid, status = 'unknown') {
+  const slug = safeTenantid(tenantid);
+  await rows(
+    `INSERT INTO miner_manifests (contentid, manifesturl, host, tenantid, status, lastchecked)
+     VALUES ($1, $2, $3, $4, $5, NOW())
+     ON CONFLICT (contentid, manifesturl, tenantid) DO UPDATE SET
+       host = EXCLUDED.host,
+       status = EXCLUDED.status,
+       lastchecked = NOW()`,
+    [Number(contentid), String(manifesturl), host ? String(host) : null, slug, String(status)],
+  );
+  return { contentid: Number(contentid), manifesturl, host, tenantid: slug, status };
+}
+
+/* --------------------------------- queries ---------------------------------- */
+
+function normalizeJob(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    type: row.type,
+    status: row.status,
+    tenant: row.tenantid,
+    payload: typeof row.payload === 'string' ? JSON.parse(row.payload || '{}') : row.payload ?? {},
+    result: typeof row.result === 'string' ? JSON.parse(row.result || 'null') : row.result ?? null,
+    error: row.error,
+    attempts: num(row.attempts),
+    createdBy: row.createdby != null ? num(row.createdby) : null,
+    queuedat: row.queuedat instanceof Date ? row.queuedat.toISOString() : row.queuedat,
+    startedat: row.startedat instanceof Date ? row.startedat.toISOString() : row.startedat,
+    finishedat: row.finishedat instanceof Date ? row.finishedat.toISOString() : row.finishedat,
+  };
+}
+
+/** List jobs with optional filters (newest first). */
+export async function listJobs({ status, tenant, type, limit = JOBS_PAGE_DEFAULT } = {}) {
+  const clauses = [];
+  const values = [];
+  if (status) {
+    values.push(String(status));
+    clauses.push(`status = $${values.length}`);
+  }
+  if (tenant) {
+    values.push(safeTenantid(tenant));
+    clauses.push(`tenantid = $${values.length}`);
+  }
+  if (type) {
+    values.push(String(type));
+    clauses.push(`type = $${values.length}`);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const cap = Math.max(1, Math.min(100, Number(limit) || JOBS_PAGE_DEFAULT));
+  values.push(cap);
+  const list = await rows(
+    `SELECT * FROM miner_jobs ${where} ORDER BY queuedat DESC LIMIT $${values.length}`,
+    values,
+  );
+  return (list || []).map(normalizeJob);
+}
+
+/** Full job record (with its log lines). */
+export async function getJob(jobId) {
+  const row = await one(`SELECT * FROM miner_jobs WHERE id = $1`, [String(jobId)]);
+  if (!row) return null;
+  const logs = await rows(`SELECT level, message, ts FROM miner_logs WHERE jobid = $1 ORDER BY ts ASC LIMIT 100`, [String(jobId)]);
+  return {
+    ...normalizeJob(row),
+    logs: (logs || []).map((l) => ({
+      level: l.level,
+      message: l.message,
+      ts: l.ts instanceof Date ? l.ts.toISOString() : l.ts,
+    })),
+  };
+}
+
+/** Aggregated miner status (pool + jobs + per-tenant sources/manifests). */
+export async function minerStats() {
+  const jobsByStatus = {};
+  try {
+    const st = await rows(`SELECT status, COUNT(*)::int AS count FROM miner_jobs GROUP BY status`);
+    for (const r of st || []) jobsByStatus[r.status] = num(r.count);
+  } catch { /* degraded */ }
+  const jobsByType = {};
+  try {
+    const ty = await rows(`SELECT type, COUNT(*)::int AS count FROM miner_jobs GROUP BY type`);
+    for (const r of ty || []) jobsByType[r.type] = num(r.count);
+  } catch { /* degraded */ }
+
+  let tenants = [];
+  try {
+    tenants = await rows(
+      `SELECT m.tenantid AS tenant,
+              COUNT(*)::int AS sources,
+              COUNT(*) FILTER (WHERE m.lastsync > NOW() - interval '1 day')::int AS synced24h
+       FROM miner_sources m GROUP BY m.tenantid ORDER BY sources DESC LIMIT 20`,
+    );
+  } catch { /* degraded */ }
+
+  let manifests = { total: 0, tenants: 0 };
+  try {
+    const m = await one(`SELECT COUNT(*)::int AS total, COUNT(DISTINCT tenantid)::int AS tenants FROM miner_manifests`);
+    manifests = { total: num(m?.total), tenants: num(m?.tenants) };
+  } catch { /* degraded */ }
+
+  let lastJob = null;
+  try {
+    const lj = await one(`SELECT * FROM miner_jobs ORDER BY queuedat DESC LIMIT 1`);
+    lastJob = lj ? normalizeJob(lj) : null;
+  } catch { /* degraded */ }
+
+  return {
+    pool: { maxConcurrent: runner.maxConcurrent, running: runner.running },
+    jobs: { byStatus: jobsByStatus, byType: jobsByType, last: lastJob },
+    tenants: (tenants || []).map((t) => ({ tenant: t.tenant, sources: num(t.sources), synced24h: num(t.synced24h) })),
+    manifests,
+    jobTypes: MINER_JOB_TYPES,
+  };
+}
+
+/* ---------------------------------- boot ------------------------------------ */
+
+/** Mark jobs left 'running' by a previous process as failed (restart-safe). */
+export async function recoverInterruptedJobs() {
+  try {
+    const r = await rows(
+      `UPDATE miner_jobs SET status = 'failed', error = 'interrupted by restart', finishedat = NOW()
+       WHERE status = 'running' RETURNING id`,
+    );
+    const count = (r || []).length;
+    if (count > 0) logger.warn(`[miner] Recovered ${count} interrupted job(s) from a previous process`);
+    return count;
+  } catch (err) {
+    logger.warn(`[miner] Interrupted-job recovery failed: ${err.message}`);
+    return 0;
+  }
+}
+
+/**
+ * Miner boot: recovery + metrics pull-collector + resume the queue.
+ * Called from server.js AFTER ensureMinerSchema() succeeds.
+ */
+export function minerBoot() {
+  try {
+    metrics.attachPull('miner', async () => {
+      const stats = await minerStats();
+      return {
+        pool: stats.pool,
+        jobs: stats.jobs.byStatus,
+        manifests: stats.manifests,
+      };
+    });
+  } catch {
+    /* metrics optional */
+  }
+  (async () => {
+    await recoverInterruptedJobs();
+    pump();
+  })();
+  logger.info('[miner] Boot: metrics collector attached, queue resumed');
+}

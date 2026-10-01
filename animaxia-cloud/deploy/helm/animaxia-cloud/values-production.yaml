@@ -1,0 +1,208 @@
+# =============================================================================
+# Animaxia Cloud — PRODUCTION overrides
+#
+# Install:
+#   helm upgrade --install animaxia deploy/helm/animaxia-cloud \
+#     --namespace animaxia --create-namespace \
+#     -f deploy/helm/animaxia-cloud/values-production.yaml \
+#     --set env.secret.DATABASEURL=...          # only if NOT using existingSecret
+#
+# Hardening: pinned image tag, higher replicas/resources, wider HPA bounds,
+# TLS ingress, longer queue retention, tracing offload to a real collector.
+# =============================================================================
+
+global:
+  imageRegistry: ghcr.io
+  imagePullSecrets: []
+  namespaceOverride: "animaxia"
+
+image:
+  repository: animaxia
+  # PINNED — never :latest in production
+  tag: "3.0.0"
+  pullPolicy: IfNotPresent
+
+# never bake production secrets into the release — reference the real Secret
+existingSecret: "animaxia-secrets"
+
+env:
+  config:
+    NODE_ENV: "production"
+    # real public origin
+    CORS_ORIGIN: "https://animaxia.example.com"
+    PGSSL: "true"
+    PGPOOLMAX: "20"
+    RATELIMITMAX: "240"
+    CACHETTLMS: "60000"
+    PROVIDERCACHETTL_MS: "300000"
+    GATEWAYRATELIMITMAX: "600"
+    GATEWAYEDGECACHEENTRIES: "20000"
+    QUEUECONCURRENCY: "8"
+
+# ---------------------------------------------------------------------------
+services:
+  gateway:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPU: 65
+    targetMemory: 75
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
+  auth:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 10
+    resources:
+      requests:
+        cpu: 150m
+        memory: 192Mi
+      limits:
+        cpu: "1"
+        memory: 768Mi
+
+  content:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 16
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  ai:
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 12
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  analytics:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 10
+    resources:
+      requests:
+        cpu: 150m
+        memory: 192Mi
+      limits:
+        cpu: "1"
+        memory: 768Mi
+
+  search:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 12
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  premium:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 8
+    resources:
+      requests:
+        cpu: 150m
+        memory: 192Mi
+      limits:
+        cpu: 500m
+        memory: 768Mi
+
+  social:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 10
+    resources:
+      requests:
+        cpu: 150m
+        memory: 192Mi
+      limits:
+        cpu: "1"
+        memory: 768Mi
+
+  mobile:
+    replicas: 3
+    minReplicas: 3
+    maxReplicas: 8
+    resources:
+      requests:
+        cpu: 150m
+        memory: 192Mi
+      limits:
+        cpu: 500m
+        memory: 768Mi
+
+  queue:
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 6
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  defaultTargetCPU: 70
+
+ingress:
+  enabled: true
+  className: nginx
+  host: animaxia.example.com
+  annotations:
+    # force HTTPS in production
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    prometheus.io/scrape: "false"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+  tls:
+    enabled: true
+    secretName: animaxia-gateway-tls
+
+queue:
+  retentionDays: 30
+  cronJobs:
+    enabled: true
+    queueServiceUrl: http://queue-service:4009
+    curlImage: curlimages/curl:8.10.1
+
+observability:
+  # real in-cluster collector
+  otelEndpoint: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
+  tracingEnabled: true
+  metricsEnabled: true
+  otelSampleRate: "0.2"
+
+persistence:
+  enabled: true
+  # RWM for multi-AZ — pick a shared-fs storage class (NFS/CephFS/cloud)
+  # or split per-service PVCs if you must stay on RWO.
+  storageClass: ""
+  accessModes:
+    - ReadWriteMany
+  size: 50Gi

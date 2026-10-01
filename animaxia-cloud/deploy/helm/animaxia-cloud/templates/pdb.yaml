@@ -1,0 +1,28 @@
+{{/* =============================================================================
+PodDisruptionBudget per enabled service with minReplicas > 1.
+
+Services that can run on a single replica (queue: min 1, ai: min 1 by default)
+deliberately get NO PDB: a PDB with minAvailable 1 on a single-replica
+Deployment blocks ALL voluntary evictions and stalls node drains.
+============================================================================= */}}
+{{- range $key, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $min := $svc.minReplicas | default ($svc.replicas | default 1) }}
+{{- if gt (int $min) 1 }}
+{{- $svcName := include "animaxia.serviceName" (dict "root" $ "key" $key "service" $svc) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $svcName }}
+  namespace: {{ include "animaxia.namespace" $ }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" $ "serviceName" $svcName "component" $key) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "animaxia.selectorLabels" (dict "root" $ "serviceName" $svcName) | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

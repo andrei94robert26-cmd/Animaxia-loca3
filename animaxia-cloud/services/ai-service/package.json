@@ -1,0 +1,18 @@
+{
+  "name": "@animaxia/ai-service",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Animaxia Cloud AI service — LLM recommendations, summaries, descriptions and content-scoped chat via z-ai-web-dev-sdk with deterministic heuristic fallbacks, daily quota guards and 7-day chat-session retention.",
+  "scripts": {
+    "start": "bun server.js",
+    "dev": "bun --watch server.js"
+  },
+  "dependencies": {
+    "@animaxia/common": "*",
+    "@animaxia/domain": "*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "z-ai-web-dev-sdk": "^0.0.18"
+  }
+}

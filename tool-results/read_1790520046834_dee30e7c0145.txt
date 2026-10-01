@@ -1,0 +1,719 @@
+     1→     1→/**
+     2→     2→ * modules/hub/hub.js — FAZA 20: public hub API (mounted at /api/hub).
+     3→     3→ *
+     4→     4→ * 9 routes, 100% real Neon data (zero mock/placeholder — every number is a
+     5→     5→ * live SQL measurement; the ONLY mirrored constant is LOGICAL_ADDRESS_SPACE,
+     6→     6→ * a read-only mirror of ADDRESS_SPACE in the protected stress.js):
+     7→     7→ *
+     8→     8→ *   GET /browse          → faceted browse: type[]/genre/year(+From/To)/q/
+     9→     9→ *                          actor/studio/minRating filters + sort
+    10→    10→ *                          (relevance|rating|year|title|recent) + facets
+    11→    11→ *                          computed on the filtered set minus each facet's
+    12→    12→ *                          own dimension (standard faceted browse).
+    13→    13→ *   GET /stats           → public stats: counts by type, metadata completeness
+    14→    14→ *                          (CASE WHEN), sources (contentsources registry +
+    15→    15→ *                          content providers), viewevents (total/24h/top5),
+    16→    16→ *                          users, uptime.
+    17→    17→ *   GET /scale           → honest scale report: real Neon numbers vs the
+    18→    18→ *                          logical 30B addressing space (labeled, never mixed).
+    19→    19→ *   GET /years           → distinct years + count + best-rated sample per year.
+    20→    20→ *   GET /genres          → distinct genres + count + best-rated sample per genre.
+    21→    21→ *   GET /actors          → distinct actors (metadata.actors) + count + sample.
+    22→    22→ *   GET /studios         → distinct studios (metadata.studios + network) + sample.
+    23→    23→ *   GET /feed            → 3-source feed: personal (watchlist+history when
+    24→    24→ *                          logged in) / global (activityevents, honest
+    25→    25→ *                          viewevents fallback) / ai (top-rated per genre —
+    26→    26→ *                          honest 'ai-fallback', the protected AI Home engine
+    27→    27→ *                          is not importable) + 1:1:1 interleaved combined.
+    28→    28→ *   GET /recommendations → honest split: real (trending 7d views + top-rated
+    29→    29→ *                          fallback, criteria per item) | logical (first items
+    30→    30→ *                          of the protected virtual 30B catalog, fetched via
+    31→    31→ *                          an internal localhost call, labeled simulated).
+    32→    32→ *
+    33→    33→ * All queries are parameterized ($1..$n) through modules/platform/sql.js
+    34→    34→ * (same house style as the other platform modules).
+    35→    35→ */
+    36→    36→
+    37→    37→import express from 'express';
+    38→    38→import { rows, one, num, isoOrNull, parseJsonb, assertPostgres } from '../platform/sql.js';
+    39→    39→import { shardingModelSnapshot } from '../sharding/model.js'; // pure module (FAZA 13 model)
+    40→    40→import { logger } from '../../utils/logger.js';
+    41→    41→
+    42→    42→const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+    43→    43→
+    44→    44→/* LOGICAL_ADDRESS_SPACE mirrors ADDRESS_SPACE = 30000000000 in the protected
+    45→    45→ * modules/platform/stress.js (read-only file — the value is the platform's
+    46→    46→ * pinned logical addressing-space claim, proven by /api/platform/scale/virtual). */
+    47→    47→const LOGICAL_ADDRESS_SPACE = 30000000000;
+    48→    48→/* Pinned RANGE rule from modules/sharding/model.js: content id / 1B per shard. */
+    49→    49→const SHARD_RANGE = 1000000000;
+    50→    50→
+    51→    51→/* Pagination / facet caps (the only other constants in this module). */
+    52→    52→const DEFAULT_PAGE_LIMIT = 24;
+    53→    53→const MAX_PAGE_LIMIT = 100;
+    54→    54→const FACET_GENRES_CAP = 40;
+    55→    55→const FACET_YEARS_CAP = 60;
+    56→    56→const YEARS_CAP = 60;
+    57→    57→const DIMENSION_SAMPLE_CAP = 100; // actors/studios top-N
+    58→    58→const GENRES_LIST_CAP = 80;
+    59→    59→const FEED_LIMIT = 12;
+    60→    60→const FEED_COMBINED_CAP = 24;
+    61→    61→const RECOMMENDATIONS_REAL_LIMIT = 12;
+    62→    62→const RECOMMENDATIONS_TRENDING_LIMIT = 6;
+    63→    63→const RECOMMENDATIONS_LOGICAL_LIMIT = 6;
+    64→    64→const VIRTUAL_CALL_TIMEOUT_MS = 3000;
+    65→    65→
+    66→    66→/* ------------------------- JSONB helper expressions ------------------------- */
+    67→    67→/* Safe JSONB array extraction ('[]' when the key is missing or not an array)
+    68→    68→ * and safe numeric casts (regex-guarded — a malformed value degrades to NULL
+    69→    69→ * instead of failing the whole query). Same approach as search.js filters. */
+    70→    70→const GENRES_ARRAY = `CASE WHEN jsonb_typeof(metadata->'genres') = 'array' THEN metadata->'genres' ELSE '[]'::jsonb END`;
+    71→    71→const ACTORS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'actors') = 'array' THEN metadata->'actors' ELSE '[]'::jsonb END`;
+    72→    72→const STUDIOS_ARRAY = `CASE WHEN jsonb_typeof(metadata->'studios') = 'array' THEN metadata->'studios' ELSE '[]'::jsonb END`;
+    73→    73→const RATING_NUM = `CASE WHEN (metadata->>'rating') ~ '^[0-9]+\\.?[0-9]*$' THEN (metadata->>'rating')::numeric ELSE NULL END`;
+    74→    74→const YEAR_INT = `CASE WHEN (metadata->>'year') ~ '^[0-9]+$' THEN (metadata->>'year')::int ELSE NULL END`;
+    75→    75→
+    76→    76→const router = express.Router();
+    77→    77→
+    78→    78→/** Shape a content row exactly like db.js normalizeRow (house contract). */
+    79→    79→function contentRow(row) {
+    80→    80→  return {
+    81→    81→    id: num(row.id),
+    82→    82→    externalid: row.externalid ?? null,
+    83→    83→    type: row.type ?? null,
+    84→    84→    title: row.title ?? null,
+    85→    85→    metadata: parseJsonb(row.metadata, {}),
+    86→    86→    thumbnail: row.thumbnail ?? null,
+    87→    87→    createdat: isoOrNull(row.createdat),
+    88→    88→  };
+    89→    89→}
+    90→    90→
+    91→    91→/** Parse an int query param (null when absent/malformed). */
+    92→    92→function intOrNull(value) {
+    93→    93→  if (value === undefined || value === null || value === '') return null;
+    94→    94→  const n = parseInt(value, 10);
+    95→    95→  return Number.isInteger(n) ? n : null;
+    96→    96→}
+    97→    97→
+    98→    98→/* ================================ 1. /browse ================================ */
+    99→    99→
+   100→   100→/** Build the parameterized WHERE clause for the browse filters.
+   101→   101→ *  `exclude` drops a dimension's clauses — used for facet queries, which are
+   102→   102→ *  computed on the filtered set WITHOUT their own dimension (standard
+   103→   103→ *  faceted browse: filtering by genre still shows all genre counts). */
+   104→   104→function buildBrowseWhere(filters, exclude = new Set()) {
+   105→   105→  const clauses = [];
+   106→   106→  const params = [];
+   107→   107→  const add = (value) => {
+   108→   108→    params.push(value);
+   109→   109→    return `$${params.length}`;
+   110→   110→  };
+   111→   111→  if (!exclude.has('type') && filters.types.length) {
+   112→   112→    clauses.push(`type = ANY(${add(filters.types)}::text[])`);
+   113→   113→  }
+   114→   114→  if (!exclude.has('genre') && filters.genre) {
+   115→   115→    // Exact case-insensitive match inside metadata.genres[] (ILIKE without wildcards).
+   116→   116→    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${GENRES_ARRAY}) g WHERE g ILIKE ${add(filters.genre)})`);
+   117→   117→  }
+   118→   118→  if (!exclude.has('year') && (filters.year != null || filters.yearFrom != null || filters.yearTo != null)) {
+   119→   119→    clauses.push(`${YEAR_INT} IS NOT NULL`);
+   120→   120→    if (filters.year != null) clauses.push(`${YEAR_INT} = ${add(filters.year)}`);
+   121→   121→    if (filters.yearFrom != null) clauses.push(`${YEAR_INT} >= ${add(filters.yearFrom)}`);
+   122→   122→    if (filters.yearTo != null) clauses.push(`${YEAR_INT} <= ${add(filters.yearTo)}`);
+   123→   123→  }
+   124→   124→  if (!exclude.has('q') && filters.q) {
+   125→   125→    clauses.push(`title ILIKE '%' || ${add(filters.q)} || '%'`);
+   126→   126→  }
+   127→   127→  if (!exclude.has('actor') && filters.actor) {
+   128→   128→    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${ACTORS_ARRAY}) a WHERE a ILIKE '%' || ${add(filters.actor)} || '%')`);
+   129→   129→  }
+   130→   130→  if (!exclude.has('studio') && filters.studio) {
+   131→   131→    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${STUDIOS_ARRAY}) st WHERE st ILIKE '%' || ${add(filters.studio)} || '%')`);
+   132→   132→  }
+   133→   133→  if (!exclude.has('minRating') && filters.minRating != null) {
+   134→   134→    clauses.push(`${RATING_NUM} >= ${add(filters.minRating)}`);
+   135→   135→  }
+   136→   136→  return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+   137→   137→}
+   138→   138→
+   139→   139→/** Build the ORDER BY clause (its params are appended after the WHERE params). */
+   140→   140→function buildBrowseOrder(sort, filters, startIdx) {
+   141→   141→  const params = [];
+   142→   142→  const add = (value) => {
+   143→   143→    params.push(value);
+   144→   144→    return `$${startIdx + params.length}`;
+   145→   145→  };
+   146→   146→  let sql;
+   147→   147→  if (sort === 'rating') {
+   148→   148→    sql = `ORDER BY ${RATING_NUM} DESC NULLS LAST, id ASC`;
+   149→   149→  } else if (sort === 'year') {
+   150→   150→    sql = `ORDER BY ${YEAR_INT} DESC NULLS LAST, id ASC`;
+   151→   151→  } else if (sort === 'title') {
+   152→   152→    sql = `ORDER BY title ASC, id ASC`;
+   153→   153→  } else if (sort === 'relevance' && filters.q) {
+   154→   154→    // Prefix hits outrank infix hits; ties break on recency (deterministic).
+   155→   155→    const q1 = add(filters.q);
+   156→   156→    const q2 = add(filters.q);
+   157→   157→    sql = `ORDER BY (CASE WHEN title ILIKE ${q1} || '%' THEN 2 WHEN title ILIKE '%' || ${q2} || '%' THEN 1 ELSE 0 END) DESC, createdat DESC, id ASC`;
+   158→   158→  } else {
+   159→   159→    sql = `ORDER BY createdat DESC, id DESC`; // 'recent' (default)
+   160→   160→  }
+   161→   161→  return { sql, params };
+   162→   162→}
+   163→   163→
+   164→   164→router.get('/browse', wrap(async (req, res) => {
+   165→   165→  assertPostgres();
+   166→   166→  const startedAt = Date.now();
+   167→   167→
+   168→   168→  // ---- filter parsing (echoed in the response) ----
+   169→   169→  const rawType = req.query.type;
+   170→   170→  const typeList = (Array.isArray(rawType) ? rawType.join(',') : String(rawType || ''))
+   171→   171→    .split(',').map((s) => s.trim()).filter(Boolean);
+   172→   172→  const filters = {
+   173→   173→    types: typeList,
+   174→   174→    genre: String(req.query.genre || '').trim().slice(0, 120) || null,
+   175→   175→    year: intOrNull(req.query.year),
+   176→   176→    yearFrom: intOrNull(req.query.yearFrom),
+   177→   177→    yearTo: intOrNull(req.query.yearTo),
+   178→   178→    q: String(req.query.q || '').trim().slice(0, 120) || null,
+   179→   179→    actor: String(req.query.actor || '').trim().slice(0, 120) || null,
+   180→   180→    studio: String(req.query.studio || '').trim().slice(0, 120) || null,
+   181→   181→    minRating: (() => {
+   182→   182→      const v = req.query.minRating;
+   183→   183→      if (v === undefined || v === null || v === '') return null;
+   184→   184→      const n = Number(v);
+   185→   185→      return Number.isFinite(n) ? n : null;
+   186→   186→    })(),
+   187→   187→  };
+   188→   188→
+   189→   189→  const page = Math.max(1, intOrNull(req.query.page) ?? 1);
+   190→   190→  const limit = Math.min(MAX_PAGE_LIMIT, Math.max(1, intOrNull(req.query.limit) ?? DEFAULT_PAGE_LIMIT));
+   191→   191→  const wantFacets = String(req.query.facet ?? 'true') !== 'false';
+   192→   192→
+   193→   193→  const requestedSort = String(req.query.sort || 'recent');
+   194→   194→  const allowedSorts = ['relevance', 'rating', 'year', 'title', 'recent'];
+   195→   195→  const sort = allowedSorts.includes(requestedSort) ? requestedSort : 'recent';
+   196→   196→  // 'relevance' without a q falls back to 'recent' (nothing to rank on).
+   197→   197→  const effectiveSort = sort === 'relevance' && !filters.q ? 'recent' : sort;
+   198→   198→
+   199→   199→  // ---- one parallel round: COUNT + data page + the 3 facet queries ----
+   200→   200→  // (facets are computed on the filtered set minus each facet's own dimension)
+   201→   201→  const where = buildBrowseWhere(filters);
+   202→   202→  const order = buildBrowseOrder(effectiveSort, filters, where.params.length);
+   203→   203→  const dataParams = [...where.params, ...order.params, limit, (page - 1) * limit];
+   204→   204→  const whereNoType = buildBrowseWhere(filters, new Set(['type']));
+   205→   205→  const whereNoGenre = buildBrowseWhere(filters, new Set(['genre']));
+   206→   206→  const whereNoYear = buildBrowseWhere(filters, new Set(['year']));
+   207→   207→  const queries = [
+   208→   208→    one(`SELECT COUNT(*)::int AS total FROM content ${where.sql}`, where.params),
+   209→   209→    rows(`SELECT * FROM content ${where.sql} ${order.sql} LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`, dataParams),
+   210→   210→  ];
+   211→   211→  if (wantFacets) {
+   212→   212→    queries.push(
+   213→   213→      rows(`SELECT type AS value, COUNT(*)::int AS count FROM content ${whereNoType.sql} GROUP BY type ORDER BY count DESC, value ASC`, whereNoType.params),
+   214→   214→      rows(`SELECT g AS value, COUNT(DISTINCT content.id)::int AS count
+   215→   215→            FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+   216→   216→            ${whereNoGenre.sql}
+   217→   217→            GROUP BY g ORDER BY count DESC, value ASC LIMIT ${FACET_GENRES_CAP}`, whereNoGenre.params),
+   218→   218→      rows(`SELECT ${YEAR_INT} AS value, COUNT(*)::int AS count
+   219→   219→            FROM content ${whereNoYear.sql ? `${whereNoYear.sql} AND` : 'WHERE'} ${YEAR_INT} IS NOT NULL
+   220→   220→            GROUP BY 1 ORDER BY 1 DESC LIMIT ${FACET_YEARS_CAP}`, whereNoYear.params),
+   221→   221→    );
+   222→   222→  }
+   223→   223→  const [countRow, dataRows, typesFacet, genresFacet, yearsFacet] = await Promise.all(queries);
+   224→   224→  const total = num(countRow?.total);
+   225→   225→  const facets = wantFacets ? { types: typesFacet, genres: genresFacet, years: yearsFacet } : null;
+   226→   226→
+   227→   227→  const filtersEcho = {};
+   228→   228→  if (filters.types.length) filtersEcho.types = filters.types;
+   229→   229→  if (filters.genre) filtersEcho.genre = filters.genre;
+   230→   230→  if (filters.year != null) filtersEcho.year = filters.year;
+   231→   231→  if (filters.yearFrom != null) filtersEcho.yearFrom = filters.yearFrom;
+   232→   232→  if (filters.yearTo != null) filtersEcho.yearTo = filters.yearTo;
+   233→   233→  if (filters.q) filtersEcho.q = filters.q;
+   234→   234→  if (filters.actor) filtersEcho.actor = filters.actor;
+   235→   235→  if (filters.studio) filtersEcho.studio = filters.studio;
+   236→   236→  if (filters.minRating != null) filtersEcho.minRating = filters.minRating;
+   237→   237→
+   238→   238→  res.json({
+   239→   239→    ok: true,
+   240→   240→    source: 'neon',
+   241→   241→    data: dataRows.map(contentRow),
+   242→   242→    total,
+   243→   243→    page,
+   244→   244→    pages: Math.max(1, Math.ceil(total / limit)),
+   245→   245→    limit,
+   246→   246→    facets,
+   247→   247→    sort: effectiveSort,
+   248→   248→    sortRequested: sort,
+   249→   249→    filters: filtersEcho,
+   250→   250→    tookMs: Date.now() - startedAt,
+   251→   251→  });
+   252→   252→}));
+   253→   253→
+   254→   254→/* ============================ stats collector (shared) ======================= */
+   255→   255→
+   256→   256→/** Live platform stats — shared verbatim by /stats and /scale (no HTTP reuse). */
+   257→   257→async function collectHubStats() {
+   258→   258→  const [totalRow, byType, completeRow, registryRow, registryByKind, providers, viewsRow, topViewed, usersRow] = await Promise.all([
+   259→   259→    one('SELECT COUNT(*)::int AS n FROM content'),
+   260→   260→    rows('SELECT type AS value, COUNT(*)::int AS count FROM content GROUP BY type ORDER BY count DESC, value ASC'),
+   261→   261→    // Metadata completeness — CASE/FILTER WHEN per field + all three combined (0-100).
+   262→   262→    one(`SELECT
+   263→   263→           COUNT(*)::int AS rows,
+   264→   264→           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(thumbnail, '') <> '') / COUNT(*))::int AS pct_thumbnail,
+   265→   265→           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(metadata->>'overview', '') <> '') / COUNT(*))::int AS pct_overview,
+   266→   266→           ROUND(100.0 * COUNT(*) FILTER (WHERE jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_genres,
+   267→   267→           ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(thumbnail, '') <> ''
+   268→   268→             AND COALESCE(metadata->>'overview', '') <> ''
+   269→   269→             AND jsonb_array_length(${GENRES_ARRAY}) > 0) / COUNT(*))::int AS pct_complete
+   270→   270→         FROM content`),
+   271→   271→    // contentsources registry (structure per modules/ingest/dedup.js — urlhash/url/kind/addedby).
+   272→   272→    one('SELECT COUNT(*)::int AS total, COUNT(DISTINCT url)::int AS distinct_urls FROM contentsources'),
+   273→   273→    rows('SELECT kind AS value, COUNT(*)::int AS count FROM contentsources GROUP BY kind ORDER BY count DESC'),
+   274→   274→    // Ingest provider labels embedded in content metadata (honest supplement —
+   275→   275→    // the registry itself is authoritative and may legitimately be empty).
+   276→   276→    rows(`SELECT metadata->>'source' AS value, COUNT(*)::int AS count
+   277→   277→          FROM content WHERE COALESCE(metadata->>'source', '') <> ''
+   278→   278→          GROUP BY metadata->>'source' ORDER BY count DESC, value ASC`),
+   279→   279→    one(`SELECT COUNT(*)::int AS total,
+   280→   280→                COUNT(*) FILTER (WHERE createdat > NOW() - INTERVAL '24 hours')::int AS last24h
+   281→   281→         FROM viewevents`),
+   282→   282→    rows(`SELECT c.id, c.title, c.type, c.thumbnail, COUNT(*)::int AS views
+   283→   283→          FROM viewevents v JOIN content c ON c.id = v.contentid
+   284→   284→          GROUP BY c.id, c.title, c.type, c.thumbnail
+   285→   285→          ORDER BY views DESC, c.id ASC LIMIT 5`),
+   286→   286→    one('SELECT COUNT(*)::int AS n FROM users'),
+   287→   287→  ]);
+   288→   288→
+   289→   289→  const countsByType = {};
+   290→   290→  for (const r of byType) countsByType[r.value] = num(r.count);
+   291→   291→
+   292→   292→  return {
+   293→   293→    totalItems: num(totalRow?.n),
+   294→   294→    countsByType,
+   295→   295→    countsByTypeRows: byType.map((r) => ({ value: r.value, count: num(r.count) })),
+   296→   296→    completeness: {
+   297→   297→      rows: num(completeRow?.rows),
+   298→   298→      thumbnailPct: num(completeRow?.pct_thumbnail),
+   299→   299→      overviewPct: num(completeRow?.pct_overview),
+   300→   300→      genresPct: num(completeRow?.pct_genres),
+   301→   301→      completePct: num(completeRow?.pct_complete), // thumbnail+overview+genres all non-empty
+   302→   302→    },
+   303→   303→    sources: {
+   304→   304→      registry: {
+   305→   305→        total: num(registryRow?.total),
+   306→   306→        distinct: num(registryRow?.distinct_urls),
+   307→   307→        byKind: registryByKind.map((r) => ({ value: r.value, count: num(r.count) })),
+   308→   308→      },
+   309→   309→      providers, // [{value,count}] from content.metadata.source
+   310→   310→    },
+   311→   311→    viewevents: {
+   312→   312→      total: num(viewsRow?.total),
+   313→   313→      last24h: num(viewsRow?.last24h),
+   314→   314→      topViewed: topViewed.map((r) => ({ id: num(r.id), title: r.title, type: r.type, thumbnail: r.thumbnail, views: num(r.views) })),
+   315→   315→    },
+   316→   316→    users: num(usersRow?.n),
+   317→   317→  };
+   318→   318→}
+   319→   319→
+   320→   320→/* 2. GET /stats — public platform stats (live SQL counters). */
+   321→   321→router.get('/stats', wrap(async (req, res) => {
+   322→   322→  assertPostgres();
+   323→   323→  const stats = await collectHubStats();
+   324→   324→  res.json({
+   325→   325→    ok: true,
+   326→   326→    source: 'neon',
+   327→   327→    totalItems: stats.totalItems,
+   328→   328→    countsByType: stats.countsByType,
+   329→   329→    metadataCompleteness: stats.completeness.completePct, // 0-100 (thumbnail+overview+genres)
+   330→   330→    completeness: stats.completeness,
+   331→   331→    sources: stats.sources,
+   332→   332→    viewevents: stats.viewevents,
+   333→   333→    users: { count: stats.users },
+   334→   334→    uptimeSec: Math.floor(process.uptime()),
+   335→   335→    generatedAt: new Date().toISOString(),
+   336→   336→  });
+   337→   337→}));
+   338→   338→
+   339→   339→/* 3. GET /scale — honest scale report: real Neon vs logical 30B space. */
+   340→   340→router.get('/scale', wrap(async (req, res) => {
+   341→   341→  assertPostgres();
+   342→   342→  const stats = await collectHubStats();
+   343→   343→  const model = shardingModelSnapshot(); // { shardcount, shards, mode } — FAZA 13 model
+   344→   344→
+   345→   345→  const realItems = stats.totalItems;
+   346→   346→  const ratio = realItems > 0 ? Number((LOGICAL_ADDRESS_SPACE / realItems).toFixed(2)) : null;
+   347→   347→
+   348→   348→  res.json({
+   349→   349→    ok: true,
+   350→   350→    source: 'neon + sharding model (logical)',
+   351→   351→    real: {
+   352→   352→      label: 'measured live from Neon (real rows)',
+   353→   353→      totalItems: stats.totalItems,
+   354→   354→      countsByType: stats.countsByType,
+   355→   355→      users: stats.users,
+   356→   356→      viewevents: { total: stats.viewevents.total, last24h: stats.viewevents.last24h },
+   357→   357→    },
+   358→   358→    logical: {
+   359→   359→      label: 'logical addressing space (virtual — not stored rows)',
+   360→   360→      claim: 'logical address space',
+   361→   361→      addressSpace: LOGICAL_ADDRESS_SPACE,
+   362→   362→      engine: '/api/platform/scale/virtual (protected stress.js, simulated: true)',
+   363→   363→      shards: {
+   364→   364→        shardcount: model.shardcount,
+   365→   365→        mode: model.mode,
+   366→   366→        rangePerShard: SHARD_RANGE, // pinned RANGE rule: floor(id / 1B) % SHARDCOUNT
+   367→   367→        idsAddressable: model.shardcount * SHARD_RANGE,
+   368→   368→        map: model.shards, // [{ shardid, branch, urlConfigured }]
+   369→   369→      },
+   370→   370→    },
+   371→   371→    realVsLogical: {
+   372→   372→      realItems,
+   373→   373→      logicalSpace: LOGICAL_ADDRESS_SPACE,
+   374→   374→      ratio, // logicalSpace / realItems (how many times larger the logical claim is)
+   375→   375→    },
+   376→   376→    honesty: 'real* numbers are live Neon measurements; the 30B figure is a LOGICAL addressing-space claim (deterministic virtual catalog — simulated, zero stored rows). Physical capacity remains a single Neon branch.',
+   377→   377→    generatedAt: new Date().toISOString(),
+   378→   378→  });
+   379→   379→}));
+   380→   380→
+   381→   381→/* 4. GET /years — distinct years + count + best-rated sample per year. */
+   382→   382→router.get('/years', wrap(async (req, res) => {
+   383→   383→  assertPostgres();
+   384→   384→  const data = await rows(
+   385→   385→    `WITH years AS (
+   386→   386→       SELECT ${YEAR_INT} AS year, COUNT(*)::int AS count
+   387→   387→       FROM content
+   388→   388→       GROUP BY 1
+   389→   389→       HAVING ${YEAR_INT} IS NOT NULL
+   390→   390→     ),
+   391→   391→     samples AS (
+   392→   392→       SELECT DISTINCT ON (${YEAR_INT})
+   393→   393→         ${YEAR_INT} AS year, id, title, thumbnail, type
+   394→   394→       FROM content
+   395→   395→       WHERE ${YEAR_INT} IS NOT NULL
+   396→   396→       ORDER BY ${YEAR_INT}, ${RATING_NUM} DESC NULLS LAST, id ASC
+   397→   397→     )
+   398→   398→     SELECT years.year, years.count, samples.id AS sid, samples.title AS stitle,
+   399→   399→            samples.thumbnail AS sthumbnail, samples.type AS stype
+   400→   400→     FROM years LEFT JOIN samples ON samples.year = years.year
+   401→   401→     ORDER BY years.year DESC
+   402→   402→     LIMIT $1`,
+   403→   403→    [YEARS_CAP],
+   404→   404→  );
+   405→   405→  res.json({
+   406→   406→    ok: true,
+   407→   407→    source: 'neon',
+   408→   408→    data: data.map((r) => ({
+   409→   409→      year: num(r.year),
+   410→   410→      count: num(r.count),
+   411→   411→      sample: r.sid != null
+   412→   412→        ? { id: num(r.sid), title: r.stitle, thumbnail: r.sthumbnail, type: r.stype }
+   413→   413→        : null,
+   414→   414→    })),
+   415→   415→    total: data.length,
+   416→   416→    generatedAt: new Date().toISOString(),
+   417→   417→  });
+   418→   418→}));
+   419→   419→
+   420→   420→/* ------------------- shared dimension listing (genres/actors/studios) ------- */
+   421→   421→
+   422→   422→/** Distinct values of a metadata array (+ optional network supplement for
+   423→   423→ *  studios) with count + best-rated sample per value, sorted count DESC. */
+   424→   424→async function listDimension({ arrayExpr, extraValues, cap }) {
+   425→   425→  const extra = extraValues
+   426→   426→    ? `UNION ALL
+   427→   427→       SELECT content.id, content.metadata->>'network' AS value
+   428→   428→       FROM content WHERE COALESCE(content.metadata->>'network', '') <> ''`
+   429→   429→    : '';
+   430→   430→  const data = await rows(
+   431→   431→    `WITH exploded AS (
+   432→   432→       SELECT content.id, e AS value
+   433→   433→       FROM content, jsonb_array_elements_text(${arrayExpr}) AS e
+   434→   434→       ${extra}
+   435→   435→     ),
+   436→   436→     counts AS (
+   437→   437→       SELECT value, COUNT(DISTINCT id)::int AS count FROM exploded GROUP BY value
+   438→   438→     ),
+   439→   439→     samples AS (
+   440→   440→       SELECT DISTINCT ON (e.value)
+   441→   441→         e.value AS value, content.id AS sid, content.title AS stitle,
+   442→   442→         content.thumbnail AS sthumbnail, content.type AS stype
+   443→   443→       FROM exploded e JOIN content ON content.id = e.id
+   444→   444→       ORDER BY e.value, ${RATING_NUM} DESC NULLS LAST, content.id ASC
+   445→   445→     )
+   446→   446→     SELECT counts.value, counts.count, samples.sid, samples.stitle,
+   447→   447→            samples.sthumbnail, samples.stype
+   448→   448→     FROM counts LEFT JOIN samples ON samples.value = counts.value
+   449→   449→     ORDER BY counts.count DESC, counts.value ASC
+   450→   450→     LIMIT $1`,
+   451→   451→    [cap],
+   452→   452→  );
+   453→   453→  return data.map((r) => ({
+   454→   454→    value: r.value,
+   455→   455→    count: num(r.count),
+   456→   456→    sample: r.sid != null
+   457→   457→      ? { id: num(r.sid), title: r.stitle, thumbnail: r.sthumbnail, type: r.stype }
+   458→   458→      : null,
+   459→   459→  }));
+   460→   460→}
+   461→   461→
+   462→   462→/* 5. GET /genres — distinct genres (count DESC) + best-rated sample per genre. */
+   463→   463→router.get('/genres', wrap(async (req, res) => {
+   464→   464→  assertPostgres();
+   465→   465→  const data = await listDimension({ arrayExpr: GENRES_ARRAY, extraValues: false, cap: GENRES_LIST_CAP });
+   466→   466→  res.json({ ok: true, source: 'neon', data, total: data.length, generatedAt: new Date().toISOString() });
+   467→   467→}));
+   468→   468→
+   469→   469→/* 6. GET /actors — distinct actors + count + best-rated sample (top 100). */
+   470→   470→router.get('/actors', wrap(async (req, res) => {
+   471→   471→  assertPostgres();
+   472→   472→  const data = await listDimension({ arrayExpr: ACTORS_ARRAY, extraValues: false, cap: DIMENSION_SAMPLE_CAP });
+   473→   473→  res.json({
+   474→   474→    ok: true,
+   475→   475→    source: 'neon',
+   476→   476→    data,
+   477→   477→    total: data.length,
+   478→   478→    note: data.length === 0
+   479→   479→      ? 'metadata.actors is not populated in the current catalog — honest empty list (zero mock)'
+   480→   480→      : `metadata.actors is sparsely populated in the current catalog (${data.length} distinct actors) — honest counts, zero mock`,
+   481→   481→    generatedAt: new Date().toISOString(),
+   482→   482→  });
+   483→   483→}));
+   484→   484→
+   485→   485→/* 7. GET /studios — distinct studios (+ network) + count + sample (top 100).
+   486→   486→ *  /stududios is registered as an alias (the FAZA 20 spec spells it both ways). */
+   487→   487→async function handleStudios(_req, res) {
+   488→   488→  assertPostgres();
+   489→   489→  const data = await listDimension({ arrayExpr: STUDIOS_ARRAY, extraValues: true, cap: DIMENSION_SAMPLE_CAP });
+   490→   490→  res.json({
+   491→   491→    ok: true,
+   492→   492→    source: 'neon',
+   493→   493→    data,
+   494→   494→    total: data.length,
+   495→   495→    note: data.length === 0
+   496→   496→      ? 'metadata.studios/network is not populated in the current catalog — honest empty list (zero mock)'
+   497→   497→      : `metadata.studios/network in the current catalog (${data.length} distinct studios) — honest counts, zero mock`,
+   498→   498→    generatedAt: new Date().toISOString(),
+   499→   499→  });
+   500→   500→}
+   501→   501→router.get('/studios', wrap(handleStudios));
+   502→   502→router.get('/stududios', wrap(handleStudios));
+   503→   503→
+   504→   504→/* 8. GET /feed — 3-source feed: personal / global / ai + 1:1:1 combined. */
+   505→   505→router.get('/feed', wrap(async (req, res) => {
+   506→   506→  assertPostgres();
+   507→   507→
+   508→   508→  // Source A — personal: latest watchlist + history items (requires login).
+   509→   509→  let personal;
+   510→   510→  if (req.user) {
+   511→   511→    const items = await rows(
+   512→   512→      `SELECT c.*, 'watchlist' AS origin, w.createdat AS at
+   513→   513→       FROM watchlist w JOIN content c ON c.id = w.contentid
+   514→   514→       WHERE w.userid = $1
+   515→   515→       UNION ALL
+   516→   516→       SELECT c.*, 'history' AS origin, h.watchedat AS at
+   517→   517→       FROM watchhistory h JOIN content c ON c.id = h.contentid
+   518→   518→       WHERE h.userid = $1
+   519→   519→       ORDER BY at DESC LIMIT $2`,
+   520→   520→      [num(req.user.id), FEED_LIMIT],
+   521→   521→    );
+   522→   522→    personal = {
+   523→   523→      items: items.map((r) => ({ content: contentRow(r), origin: r.origin, at: isoOrNull(r.at) })),
+   524→   524→      source: 'neon:watchlist+history',
+   525→   525→    };
+   526→   526→  } else {
+   527→   527→    personal = {
+   528→   528→      items: [],
+   529→   529→      source: 'neon:watchlist+history',
+   530→   530→      note: 'personal feed requires a bearer token (attachUser found no user) — honest empty list',
+   531→   531→    };
+   532→   532→  }
+   533→   533→
+   534→   534→  // Source B — global: latest public activity; honest viewevents fallback when empty.
+   535→   535→  let global;
+   536→   536→  const acts = await rows(
+   537→   537→    `SELECT ae.id, ae.type, ae.createdat, ae.contentid, ae.metadata,
+   538→   538→            u.username AS actorname, c.title AS contenttitle,
+   539→   539→            c.type AS contenttype, c.thumbnail AS contentthumbnail
+   540→   540→     FROM activityevents ae
+   541→   541→     JOIN users u ON u.id = ae.actorid
+   542→   542→     LEFT JOIN content c ON c.id = ae.contentid
+   543→   543→     ORDER BY ae.createdat DESC, ae.id DESC LIMIT $1`,
+   544→   544→    [FEED_LIMIT],
+   545→   545→  );
+   546→   546→  if (acts.length > 0) {
+   547→   547→    global = {
+   548→   548→      items: acts.map((r) => ({
+   549→   549→        id: num(r.id),
+   550→   550→        type: r.type,
+   551→   551→        createdat: isoOrNull(r.createdat),
+   552→   552→        actor: r.actorname ?? null,
+   553→   553→        content: r.contentid != null
+   554→   554→          ? { id: num(r.contentid), title: r.contenttitle, type: r.contenttype, thumbnail: r.contentthumbnail }
+   555→   555→          : null,
+   556→   556→        preview: (r.metadata && (r.metadata.preview || r.metadata.body))?.slice?.(0, 140) || null,
+   557→   557→      })),
+   558→   558→      source: 'neon:activity',
+   559→   559→    };
+   560→   560→  } else {
+   561→   561→    const recent = await rows(
+   562→   562→      `SELECT c.*, MAX(v.createdat) AS at, COUNT(*)::int AS views
+   563→   563→       FROM viewevents v JOIN content c ON c.id = v.contentid
+   564→   564→       GROUP BY c.id ORDER BY at DESC LIMIT $1`,
+   565→   565→      [FEED_LIMIT],
+   566→   566→    );
+   567→   567→    global = {
+   568→   568→      items: recent.map((r) => ({ content: contentRow(r), at: isoOrNull(r.at), views: num(r.views) })),
+   569→   569→      source: 'neon:viewevents-fallback',
+   570→   570→      note: 'activityevents is empty — honest fallback to the most recently viewed titles',
+   571→   571→    };
+   572→   572→  }
+   573→   573→
+   574→   574→  // Source C — ai: the protected AI Home engine (modules/ai/home.js) does not
+   575→   575→  // export its feed builder, so the honest in-process fallback is a simple
+   576→   576→  // top-rated-title-per-top-genre query, clearly labeled 'ai-fallback'.
+   577→   577→  const picks = await rows(
+   578→   578→    `WITH top_genres AS (
+   579→   579→       SELECT g AS genre, COUNT(DISTINCT content.id)::int AS count
+   580→   580→       FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+   581→   581→       GROUP BY g ORDER BY count DESC, g ASC LIMIT $1
+   582→   582→     ),
+   583→   583→     best_per_genre AS (
+   584→   584→       SELECT DISTINCT ON (g) g AS genre, content.*
+   585→   585→       FROM content, jsonb_array_elements_text(${GENRES_ARRAY}) AS g
+   586→   586→       ORDER BY g, ${RATING_NUM} DESC NULLS LAST, content.id ASC
+   587→   587→     )
+   588→   588→     SELECT best_per_genre.*, top_genres.count AS genre_count
+   589→   589→     FROM best_per_genre JOIN top_genres ON top_genres.genre = best_per_genre.genre
+   590→   590→     ORDER BY top_genres.count DESC, best_per_genre.genre ASC
+   591→   591→     LIMIT $1`,
+   592→   592→    [FEED_LIMIT],
+   593→   593→  );
+   594→   594→  const ai = {
+   595→   595→    items: picks.map((r) => ({ ...contentRow(r), genre: r.genre, criteria: 'top-rated-per-genre' })),
+   596→   596→    source: 'neon:ai-fallback',
+   597→   597→    note: 'AI Home engine (modules/ai/home.js) is protected/not exportable — honest fallback: best-rated title per top genre',
+   598→   598→  };
+   599→   599→
+   600→   600→  // Combined — interleave 1:1:1 (personal → global → ai per round), first 24.
+   601→   601→  const combined = [];
+   602→   602→  const sources = [
+   603→   603→    ['personal', personal.items],
+   604→   604→    ['global', global.items],
+   605→   605→    ['ai', ai.items],
+   606→   606→  ];
+   607→   607→  for (let i = 0; combined.length < FEED_COMBINED_CAP; i += 1) {
+   608→   608→    let added = false;
+   609→   609→    for (const [name, list] of sources) {
+   610→   610→      if (combined.length >= FEED_COMBINED_CAP) break;
+   611→   611→      if (list[i]) {
+   612→   612→        combined.push({ origin: name, item: list[i] });
+   613→   613→        added = true;
+   614→   614→      }
+   615→   615→    }
+   616→   616→    if (!added) break;
+   617→   617→  }
+   618→   618→
+   619→   619→  res.json({
+   620→   620→    ok: true,
+   621→   621→    personal,
+   622→   622→    global,
+   623→   623→    ai,
+   624→   624→    combined,
+   625→   625→    combinedCount: combined.length,
+   626→   626→    generatedAt: new Date().toISOString(),
+   627→   627→  });
+   628→   628→}));
+   629→   629→
+   630→   630→/* 9. GET /recommendations — honest split: real Neon picks | logical 30B sample. */
+   631→   631→
+   632→   632→/** First N items of the protected virtual 30B catalog, fetched via an internal
+   633→   633→ *  localhost call to the REAL engine (/api/platform/scale/virtual — stress.js
+   634→   634→ *  is protected/read-only, so the engine is reused, never duplicated). */
+   635→   635→async function virtualCatalogSample(limit) {
+   636→   636→  const port = parseInt(process.env.PORT || '4000', 10);
+   637→   637→  const url = `http://localhost:${port}/api/platform/scale/virtual?limit=${limit}`;
+   638→   638→  try {
+   639→   639→    const res = await fetch(url, { signal: AbortSignal.timeout(VIRTUAL_CALL_TIMEOUT_MS) });
+   640→   640→    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+   641→   641→    const body = await res.json();
+   642→   642→    if (!body?.ok || !Array.isArray(body.items)) throw new Error('unexpected payload');
+   643→   643→    return { items: body.items, error: null };
+   644→   644→  } catch (err) {
+   645→   645→    return { items: [], error: err?.message || String(err) };
+   646→   646→  }
+   647→   647→}
+   648→   648→
+   649→   649→router.get('/recommendations', wrap(async (req, res) => {
+   650→   650→  assertPostgres();
+   651→   651→
+   652→   652→  // Real — trending: most-viewed titles in the last 7 days.
+   653→   653→  const trending = await rows(
+   654→   654→    `SELECT c.*, COUNT(*)::int AS views
+   655→   655→     FROM viewevents v JOIN content c ON c.id = v.contentid
+   656→   656→     WHERE v.createdat > NOW() - INTERVAL '7 days'
+   657→   657→     GROUP BY c.id
+   658→   658→     ORDER BY views DESC, c.id ASC LIMIT $1`,
+   659→   659→    [RECOMMENDATIONS_TRENDING_LIMIT],
+   660→   660→  );
+   661→   661→  const trendingIds = trending.map((r) => num(r.id));
+   662→   662→
+   663→   663→  // Real — top-rated fill (high completeness first): covers the "too few
+   664→   664→  // trending" case and completes the 12-item real section.
+   665→   665→  const fillCount = Math.max(0, RECOMMENDATIONS_REAL_LIMIT - trending.length);
+   666→   666→  const fill = fillCount > 0
+   667→   667→    ? await rows(
+   668→   668→        `SELECT * FROM content
+   669→   669→         WHERE id <> ANY($1::int[])
+   670→   670→         ORDER BY (CASE WHEN COALESCE(thumbnail, '') <> ''
+   671→   671→                        AND COALESCE(metadata->>'overview', '') <> ''
+   672→   672→                        AND jsonb_array_length(${GENRES_ARRAY}) > 0
+   673→   673→                   THEN 1 ELSE 0 END) DESC,
+   674→   674→                  ${RATING_NUM} DESC NULLS LAST, id ASC
+   675→   675→         LIMIT $2`,
+   676→   676→        [trendingIds.length ? trendingIds : [0], fillCount],
+   677→   677→      )
+   678→   678→    : [];
+   679→   679→  const realItems = [
+   680→   680→    ...trending.map((r) => ({ ...contentRow(r), criteria: 'trending', views: num(r.views) })),
+   681→   681→    ...fill.map((r) => ({ ...contentRow(r), criteria: 'top-rated' })),
+   682→   682→  ].slice(0, RECOMMENDATIONS_REAL_LIMIT);
+   683→   683→
+   684→   684→  // Logical — first items of the virtual 30B catalog (labeled simulated).
+   685→   685→  const virtual = await virtualCatalogSample(RECOMMENDATIONS_LOGICAL_LIMIT);
+   686→   686→  const logicalItems = virtual.items.map((item) => ({
+   687→   687→    index: item.index,
+   688→   688→    title: item.title,
+   689→   689→    type: item.type,
+   690→   690→    year: item.year,
+   691→   691→    rating: item.rating,
+   692→   692→    genres: item.genres,
+   693→   693→    space: 'logical-30b',
+   694→   694→    simulated: true,
+   695→   695→  }));
+   696→   696→
+   697→   697→  logger.debug(
+   698→   698→    `[hub] recommendations: real=${realItems.length} (trending=${trending.length}, fill=${fill.length}) logical=${logicalItems.length}${virtual.error ? ` (virtual error: ${virtual.error})` : ''}`,
+   699→   699→  );
+   700→   700→
+   701→   701→  res.json({
+   702→   702→    ok: true,
+   703→   703→    split: 'onest',
+   704→   704→    real: { items: realItems, count: realItems.length, source: 'neon' },
+   705→   705→    logical: {
+   706→   706→      items: logicalItems,
+   707→   707→      count: logicalItems.length,
+   708→   708→      source: 'virtual-30b',
+   709→   709→      space: 'logical-30b',
+   710→   710→      simulated: true,
+   711→   711→      note: 'spațiu logic de adresare, nu conținut real — generated by the protected /api/platform/scale/virtual engine via an internal localhost call',
+   712→   712→      ...(virtual.error ? { error: `virtual catalog unavailable: ${virtual.error} (honest empty — no mock)` } : {}),
+   713→   713→    },
+   714→   714→    generatedAt: new Date().toISOString(),
+   715→   715→  });
+   716→   716→}));
+   717→   717→
+   718→   718→export default router;
+   719→   719→

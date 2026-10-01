@@ -26,8 +26,8 @@ const DDL_STATEMENTS = [
     userid INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT DEFAULT '',
-    createdat TIMESTAMPTZ DEFAULT now(),
-    updatedat TIMESTAMPTZ DEFAULT now()
+    createdat TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updatedat TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists (userid)`,
   `CREATE TABLE IF NOT EXISTS playlistitems (
@@ -35,7 +35,7 @@ const DDL_STATEMENTS = [
     playlistid INT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
     contentid INT NOT NULL REFERENCES content(id) ON DELETE CASCADE,
     position INT NOT NULL DEFAULT 0,
-    addedat TIMESTAMPTZ DEFAULT now(),
+    addedat TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (playlistid, contentid)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_playlistitems_playlist ON playlistitems (playlistid, position)`,
@@ -46,7 +46,7 @@ const DDL_STATEMENTS = [
     label TEXT NOT NULL DEFAULT 'Română',
     vtt TEXT NOT NULL,
     createdby INT,
-    createdat TIMESTAMPTZ DEFAULT now(),
+    createdat TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (contentid, lang, label)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_subtitles_content ON subtitles (contentid)`,

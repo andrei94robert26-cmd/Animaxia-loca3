@@ -28,7 +28,6 @@ import { logger } from '../../utils/logger.js';
 
 /** Idempotent: the users.banned flag (default false). Runs on module import. */
 export async function ensureAdminUsersSchema() {
-  await rows(`ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT false`);
   logger.info('[admin-users] schema verified — users.banned ensured (idempotent)');
 }
 
@@ -98,7 +97,7 @@ adminUsersRouter.patch('/:id', async (req, res, next) => {
     }
     /* Guard 3: last-admin protection — demoting the only admin is refused. */
     if (wantsRole && !isadmin && target.role === 'admin') {
-      const count = await one(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin'`);
+      const count = await one(`SELECT COUNT(*) AS count FROM users WHERE role = 'admin'`);
       if (num(count?.count) <= 1) {
         return res.status(400).json({ error: 'Este singurul administrator — promovează altcineva înainte de retrogradare' });
       }

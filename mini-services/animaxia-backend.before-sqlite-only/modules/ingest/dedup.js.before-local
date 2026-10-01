@@ -1,0 +1,325 @@
+/**
+ * modules/ingest/dedup.js — FAZA 16-a: global source dedup registry
+ * (mounted at /api/ingest BEFORE the content routes in server.js).
+ *
+ * Every external source (URL / embed / iframe / JS) ever ingested is
+ * registered in `contentsources` — the same link is NEVER stored twice.
+ * normalizeSource() canonicalises each source (platform IDs for YouTube /
+ * Vimeo / Dailymotion, tracking-param stripping + param sorting + lowercase
+ * host for generic URLs, first src="…" extraction for embed code) and
+ * derives urlhash = sha256(normalized).
+ *
+ * Routes:
+ *   POST /api/ingest/check    { url } → { ok, exists, duplicate, source, content }   (public)
+ *   POST /api/ingest/register { url, kind?, contentId?, externalId?, addedBy? }
+ *                             → { ok, registered, duplicate, source }     (rate-limit 30/min)
+ *   GET  /api/ingest/sources?limit=50&page=&kind= → { data, total, page }            (public)
+ *   GET  /api/ingest/stats    → { total, byKind, duplicatesBlocked,
+ *                                 lastRegisteredAt, linkedContents }                (public)
+ *
+ * Central hook: db.js upsertContent() calls registerSource() (addedBy='upsert')
+ * after every successful postgres upsert, so every ingest path (miner, POST
+ * /api/content, discover add, AI enrichment, external frontend adds) is
+ * covered without touching each caller. Best-effort — never throws.
+ */
+
+import express from 'express';
+import crypto from 'node:crypto';
+import { rows, one, jsonb, parseJsonb, isoOrNull } from '../platform/sql.js';
+import { userRateLimit } from '../security/security.js';
+import { logger } from '../../utils/logger.js';
+
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+const registerLimiter = userRateLimit({ scope: 'ip', max: 30, windowMs: 60000, key: 'ingest-register' });
+
+/* ------------------------------ normalization ------------------------------- */
+
+const TRACKING_PARAMS = new Set(['fbclid', 'gclid', 'ref', 'ref_src', 'spm']);
+const isTrackingParam = (name) => name.startsWith('utm_') || TRACKING_PARAMS.has(name);
+
+function sha256hex(text) {
+  return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
+}
+
+function extensionKind(pathname) {
+  const p = String(pathname || '').toLowerCase();
+  if (p.endsWith('.mp4')) return 'mp4';
+  if (p.endsWith('.m3u8')) return 'm3u8';
+  if (p.endsWith('.mpd')) return 'dash';
+  return null;
+}
+
+/** YouTube canonical: watch?v= | youtu.be/ | /embed/ | /shorts/ → `youtube:{11-char id}`. */
+function youtubeCanonical(u) {
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  let id = null;
+  if (host === 'youtu.be') {
+    id = u.pathname.split('/').filter(Boolean)[0];
+  } else if (host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) {
+    if (u.searchParams.get('v')) {
+      id = u.searchParams.get('v');
+    } else {
+      const parts = u.pathname.split('/').filter(Boolean);
+      if ((parts[0] === 'embed' || parts[0] === 'shorts' || parts[0] === 'live') && parts[1]) {
+        id = parts[1];
+      }
+    }
+  }
+  if (id && /^[A-Za-z0-9_-]{11}$/.test(id)) return { canonical: `youtube:${id}` };
+  return null;
+}
+
+/** Vimeo canonical: vimeo.com/{id} (or player.vimeo.com/video/{id}) → `vimeo:{id}`. */
+function vimeoCanonical(u) {
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  let id = null;
+  if (host === 'vimeo.com' || host === 'player.vimeo.com') {
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts[0] === 'video') id = parts[1];
+    else id = parts[0];
+  }
+  if (id && /^\d+$/.test(id)) return { canonical: `vimeo:${id}` };
+  return null;
+}
+
+/** Dailymotion canonical: dailymotion.com/video/{id} → `dailymotion:{id}`. */
+function dailymotionCanonical(u) {
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  if (host !== 'dailymotion.com' && host !== 'dai.ly') return null;
+  const parts = u.pathname.split('/').filter(Boolean);
+  let id = null;
+  if (parts[0] === 'video') id = parts[1];
+  else if (host === 'dai.ly') id = parts[0];
+  if (id && /^[A-Za-z0-9]+$/.test(id)) return { canonical: `dailymotion:${id}` };
+  return null;
+}
+
+/** Generic URL canonical: lowercase protocol+host, no fragment, no tracking
+ *  params, remaining query params sorted alphabetically, no trailing slash. */
+function normalizeGenericUrl(u) {
+  const host = u.hostname.toLowerCase();
+  let pathname = u.pathname || '/';
+  const params = [...u.searchParams.entries()].filter(([k]) => !isTrackingParam(k.toLowerCase()));
+  params.sort((a, b) => {
+    const ka = a[0];
+    const kb = b[0];
+    if (ka !== kb) return ka < kb ? -1 : 1;
+    return a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0;
+  });
+  if (pathname.length > 1) pathname = pathname.replace(/\/+$/, '');
+  const qs = params.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+  return `${u.protocol.toLowerCase()}//${host}${pathname}${qs ? `?${qs}` : ''}`;
+}
+
+/**
+ * Normalize any raw source (URL / embed / iframe / JS code / plain string).
+ * @returns {{ url, originalurl, kind, urlhash } | null} — null for empty input.
+ */
+export function normalizeSource(raw) {
+  const input = String(raw ?? '').trim();
+  if (!input) return null;
+
+  // Embed / JS code blobs: extract the first src="…" when present, else hash the code.
+  const looksLikeCode =
+    input.startsWith('<') || /<script/i.test(input) || /<iframe/i.test(input);
+  if (looksLikeCode) {
+    const srcMatch = /src\s*=\s*["']([^"']+)["']/i.exec(input);
+    if (srcMatch) {
+      const sub = normalizeSource(srcMatch[1]);
+      if (sub) return sub;
+    }
+    const kind = /<script/i.test(input) ? 'js' : 'embed';
+    return { url: input, originalurl: null, kind, urlhash: sha256hex(input) };
+  }
+
+  // Absolute http(s) URL?
+  let u = null;
+  try {
+    u = new URL(input);
+  } catch {
+    u = null;
+  }
+  if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) {
+    // Not an absolute URL — bucket by extension, hash the trimmed string.
+    const kind = extensionKind(input) || 'link';
+    return { url: input, originalurl: null, kind, urlhash: sha256hex(input) };
+  }
+
+  // Platform canonics.
+  const yt = youtubeCanonical(u);
+  if (yt) return { url: yt.canonical, originalurl: input, kind: 'youtube', urlhash: sha256hex(yt.canonical) };
+  const vm = vimeoCanonical(u);
+  if (vm) return { url: vm.canonical, originalurl: input, kind: 'vimeo', urlhash: sha256hex(vm.canonical) };
+  const dm = dailymotionCanonical(u);
+  if (dm) return { url: dm.canonical, originalurl: input, kind: 'dailymotion', urlhash: sha256hex(dm.canonical) };
+
+  // Direct media / generic link.
+  const kind = extensionKind(u.pathname) || 'link';
+  const normalized = normalizeGenericUrl(u);
+  return { url: normalized, originalurl: input, kind, urlhash: sha256hex(normalized) };
+}
+
+/* ------------------------------ registration -------------------------------- */
+
+function normalizeSourceRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    urlhash: row.urlhash,
+    url: row.url,
+    originalurl: row.originalurl ?? null,
+    kind: row.kind,
+    contentid: row.contentid == null ? null : Number(row.contentid),
+    externalid: row.externalid ?? null,
+    addedby: row.addedby ?? 'manual',
+    hits: Number(row.hits ?? 1),
+    metadata: parseJsonb(row.metadata, {}),
+    createdat: isoOrNull(row.createdat),
+    lastseenat: isoOrNull(row.lastseenat),
+  };
+}
+
+/**
+ * Register (or bump) one source in the global registry.
+ * INSERT … ON CONFLICT (urlhash) DO UPDATE hits = hits + 1, lastseenat = NOW().
+ * @returns {{ ok, registered, duplicate, source }}
+ */
+export async function registerSource({ url, kind, contentId, externalId, addedBy, metadata } = {}) {
+  const norm = normalizeSource(url);
+  if (!norm) return { ok: false, registered: false, duplicate: false, source: null, error: 'empty source' };
+
+  const row = await one(
+    `INSERT INTO contentsources (urlhash, url, originalurl, kind, contentid, externalid, addedby, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+     ON CONFLICT (urlhash) DO UPDATE SET
+       hits = contentsources.hits + 1,
+       lastseenat = NOW()
+     RETURNING *`,
+    [
+      norm.urlhash,
+      norm.url,
+      norm.originalurl,
+      kind || norm.kind,
+      contentId ?? null,
+      externalId ?? null,
+      addedBy || 'manual',
+      jsonb(metadata ?? {}),
+    ],
+  );
+
+  const duplicate = Number(row?.hits ?? 1) > 1;
+  return { ok: true, registered: !duplicate, duplicate, source: normalizeSourceRow(row) };
+}
+
+/* ---------------------------------- router ----------------------------------- */
+
+const router = express.Router();
+
+/** POST /api/ingest/check — public: is this source already registered? */
+router.post('/check', wrap(async (req, res) => {
+  const url = req.body?.url != null ? String(req.body.url).trim() : '';
+  if (!url) return res.status(400).json({ error: 'Missing required field: url' });
+
+  const norm = normalizeSource(url);
+  if (!norm) return res.status(400).json({ error: 'Empty url' });
+
+  const row = await one('SELECT * FROM contentsources WHERE urlhash = $1', [norm.urlhash]);
+  const source = normalizeSourceRow(row);
+
+  let content = null;
+  if (source?.contentid != null) {
+    try {
+      const c = await one('SELECT * FROM content WHERE id = $1', [source.contentid]);
+      if (c) {
+        content = {
+          id: Number(c.id),
+          externalid: c.externalid ?? null,
+          type: c.type ?? null,
+          title: c.title ?? null,
+          metadata: parseJsonb(c.metadata, {}),
+          thumbnail: c.thumbnail ?? null,
+          createdat: isoOrNull(c.createdat),
+        };
+      }
+    } catch (err) {
+      logger.debug(`[ingest] linked content fetch failed: ${err.message}`);
+    }
+  }
+
+  return res.json({
+    ok: true,
+    exists: Boolean(source),
+    duplicate: Boolean(source),
+    source,
+    content,
+  });
+}));
+
+/** POST /api/ingest/register — rate-limited 30/min. */
+router.post('/register', registerLimiter, wrap(async (req, res) => {
+  const { url, kind, contentId, externalId, addedBy } = req.body || {};
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return res.status(400).json({ error: 'Missing required field: url' });
+  }
+  const result = await registerSource({
+    url,
+    kind: kind || undefined,
+    contentId: contentId ?? undefined,
+    externalId: externalId ?? undefined,
+    addedBy: addedBy || undefined,
+  });
+  if (!result.ok) return res.status(400).json({ error: result.error || 'Registration failed' });
+  return res.json(result);
+}));
+
+/** GET /api/ingest/sources?limit=50&page=&kind= — paginated registry listing. */
+router.get('/sources', wrap(async (req, res) => {
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const kind = req.query.kind ? String(req.query.kind) : null;
+  const offset = (page - 1) * limit;
+
+  const params = [];
+  const where = kind ? (() => { params.push(kind); return `WHERE kind = $${params.length}`; })() : '';
+
+  const [countRow, data] = await Promise.all([
+    one(`SELECT COUNT(*)::int AS total FROM contentsources ${where}`, params),
+    rows(
+      `SELECT * FROM contentsources ${where}
+       ORDER BY lastseenat DESC NULLS LAST, id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset],
+    ),
+  ]);
+
+  return res.json({
+    data: data.map(normalizeSourceRow),
+    total: Number(countRow?.total ?? 0),
+    page,
+  });
+}));
+
+/** GET /api/ingest/stats — registry aggregates. */
+router.get('/stats', wrap(async (req, res) => {
+  const [totalRow, kindRows, dupRow, lastRow, linkedRow] = await Promise.all([
+    one('SELECT COUNT(*)::int AS total FROM contentsources'),
+    rows('SELECT kind, COUNT(*)::int AS count FROM contentsources GROUP BY kind ORDER BY count DESC'),
+    one('SELECT COUNT(*)::int AS n FROM contentsources WHERE hits > 1'),
+    one('SELECT MAX(createdat) AS last FROM contentsources'),
+    one('SELECT COUNT(*)::int AS n FROM contentsources WHERE contentid IS NOT NULL'),
+  ]);
+
+  const byKind = {};
+  for (const r of kindRows) byKind[r.kind] = Number(r.count);
+
+  return res.json({
+    total: Number(totalRow?.total ?? 0),
+    byKind,
+    duplicatesBlocked: Number(dupRow?.n ?? 0),
+    lastRegisteredAt: isoOrNull(lastRow?.last),
+    linkedContents: Number(linkedRow?.n ?? 0),
+  });
+}));
+
+export default router;

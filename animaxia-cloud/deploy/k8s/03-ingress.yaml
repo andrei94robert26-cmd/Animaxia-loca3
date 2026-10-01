@@ -1,0 +1,45 @@
+# =============================================================================
+# Animaxia Cloud — ingress (gateway-service is the only public entrypoint)
+#
+# Requires an ingress controller with class "nginx" (ingress-nginx).
+# For local dev add to /etc/hosts:  <ingress-ip>  animaxia.local
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: animaxia-gateway
+  namespace: animaxia
+  labels:
+    app.kubernetes.io/name: animaxia-gateway
+    app.kubernetes.io/part-of: animaxia-cloud
+    app.kubernetes.io/component: ingress
+  annotations:
+    # dev: allow plain HTTP; set "true" once TLS below is enabled
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # prometheus does NOT scrape the ingress itself
+    prometheus.io/scrape: "false"
+    # generous timeouts — the gateway proxies upstreams with a 15s timeout
+    # (GATEWAYUPSTREAMTIMEOUTMS), plus streaming/AI endpoints can be slow
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    # client body limit aligned with the services' 2mb JSON limit
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: animaxia.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway-service
+                port:
+                  number: 8080
+  # ---- optional TLS (uncomment + set ssl-redirect "true" above) ----------------
+  # tls:
+  #   - hosts:
+  #       - animaxia.local
+  #     secretName: animaxia-gateway-tls

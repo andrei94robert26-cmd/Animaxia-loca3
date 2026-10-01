@@ -1,0 +1,408 @@
+# =============================================================================
+# Animaxia Cloud — Helm chart values
+#
+# Images:      {{ .Values.global.imageRegistry }}/{{ .Values.image.repository }}/<service-name>:{{ tag }}
+#              e.g. ghcr.io/animaxia/auth-service:3.0.0
+#              (override per service via services.<key>.repository / .tag)
+# Secrets:     prefer `existingSecret` — set env.secret values only for
+#              throwaway/dev installs (they end up in Helm release metadata).
+# Managed keys: TRACINGENABLED / OTELSAMPLERATE / METRICSENABLED come from
+#              `observability`, QUEUERETENTIONDAYS from `queue.retentionDays`,
+#              OTELSENDPOINT from `observability.otelEndpoint` (injected per
+#              Deployment) — do NOT also add them to env.config.
+# Phase 4:     the Animaxia AI Cloud env (AI_PROVIDER, AI_MODEL, AI_TIMEOUTMS,
+#              VECTOR_BACKEND, QDRANTURL, PINECONEURL + secrets AI_API_KEY,
+#              QDRANTAPIKEY, PINECONEAPIKEY) flows through env.config /
+#              env.secret like every other key (consumed by ai-service's
+#              domain/aicloud layer, BLUEPRINT §11).
+# Keys expected inside an existing animaxia-secrets: DATABASEURL, AUTHSECRET,
+# TMDBAPIKEY, STRIPESECRETKEY, FOOTBALLDATAAPI_KEY, ADMINEMAILS (and
+# optionally AI_API_KEY, QDRANTAPIKEY, PINECONEAPIKEY, OTELSENDPOINT).
+# =============================================================================
+
+global:
+  # registry prepended to service image repositories
+  imageRegistry: ghcr.io
+  # optional pull secrets (list of names), e.g. [ "ghcr-creds" ]
+  imagePullSecrets: []
+  # "" → install into the release namespace; set to pin e.g. "animaxia"
+  namespaceOverride: ""
+  # pin the release name for rendered resource names
+  fullnameOverride: ""
+
+# default image coordinates for ALL services (per-service overrides possible)
+image:
+  # organization/user part: <registry>/<repository>/<service-name>:<tag>
+  repository: animaxia
+  tag: "3.0.0"
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Secrets — PREFERRED: create out-of-band and reference by name:
+#   kubectl -n animaxia create secret generic animaxia-secrets \
+#     --from-literal=DATABASEURL=... --from-literal=AUTHSECRET=... ...
+# Keys expected inside: DATABASEURL, AUTHSECRET, TMDBAPIKEY, STRIPESECRETKEY,
+# FOOTBALLDATAAPI_KEY, ADMINEMAILS (and optionally AI_API_KEY, QDRANTAPIKEY,
+# PINECONEAPIKEY for the Phase-4 AI Cloud layer, OTELSENDPOINT).
+# ---------------------------------------------------------------------------
+existingSecret: "animaxia-secrets"
+
+env:
+  # non-secret configuration → ConfigMap "<release>-config" (envFrom by every
+  # Deployment). Keys follow the Animaxia house style (root .env.example).
+  config:
+    NODE_ENV: "production"
+    CORS_ORIGIN: "https://animaxia.local"
+    PGSSL: "true"
+    PGPOOLMAX: "10"
+    # cache / rate limit
+    CACHETTLMS: "60000"
+    RATELIMITWINDOW_MS: "60000"
+    RATELIMITMAX: "120"
+    # provider circuit breaker / cache
+    PROVIDERCACHETTL_MS: "120000"
+    PROVIDERFAILURETHRESHOLD: "3"
+    PROVIDERCIRCUITOPEN_MS: "60000"
+    # provider base URLs
+    TMDBBASEURL: "https://api.themoviedb.org/3"
+    TVMAZEBASEURL: "https://api.tvmaze.com"
+    JIKANBASEURL: "https://api.jikan.moe/v4"
+    FOOTBALLDATABASE_URL: "https://api.football-data.org/v4"
+    ERGASTBASEURL: "https://api.jolpi.ca/ergast/f1"
+    BBCRSSURL: "https://feeds.bbci.co.uk/news/rss.xml"
+    CNNRSSURL: "http://rss.cnn.com/rss/edition.rss"
+    NHKRSSURL: "https://www3.nhk.or.jp/rss/news/cat0.xml"
+    ALJAZEERARSSURL: "https://www.aljazeera.com/xml/rss/all.xml"
+    # miner / player
+    MINERTIMEOUTMS: "15000"
+    MINERMAXHTML_BYTES: "5242880"
+    MINERALLOWPRIVATE_NETWORK: "false"
+    PLAYERALLOWMP4: "true"
+    PLAYERALLOWM3U8: "true"
+    PLAYERALLOWIFRAME: "true"
+    PLAYERALLOWYOUTUBE: "true"
+    WORKERSREFRESHMS: "1800000"
+    # queue worker tuning (retention lives under `queue.retentionDays`)
+    QUEUEPOLLMS: "2000"
+    QUEUECONCURRENCY: "4"
+    QUEUEWORKERTTLSEC: "180"
+    # internal cron scheduler — k8s CronJobs (queue.cronJobs) are belt & braces
+    QUEUESCHEDULERENABLED: "true"
+    # gateway tuning
+    GATEWAYUPSTREAMTIMEOUTMS: "15000"
+    GATEWAYEDGECACHEENTRIES: "5000"
+    GATEWAYEDGEDEFAULTTTLMS: "30000"
+    GATEWAYRATELIMITMAX: "300"
+    GATEWAYRATELIMITWINDOW_MS: "60000"
+    # Phase 4 — Animaxia AI Cloud (ai-service llm-core provider chain +
+    # pluggable vector backends; secrets AI_API_KEY / QDRANTAPIKEY /
+    # PINECONEAPIKEY live in env.secret below)
+    AI_PROVIDER: "z-ai"
+    AI_MODEL: "gpt-4o-mini"
+    AI_TIMEOUTMS: "25000"
+    VECTOR_BACKEND: "auto"
+    QDRANTURL: ""
+    PINECONEURL: ""
+    # inter-service URLs — in-cluster DNS; service names are FIXED as
+    # <key>-service (see templates/service.yaml). If you override
+    # services.<key>.name you must update these URLs too.
+    GATEWAYSERVICEURL: "http://gateway-service:8080"
+    AUTHSERVICEURL: "http://auth-service:4001"
+    CONTENTSERVICEURL: "http://content-service:4002"
+    AISERVICEURL: "http://ai-service:4003"
+    ANALYTICSSERVICEURL: "http://analytics-service:4004"
+    SEARCHSERVICEURL: "http://search-service:4005"
+    PREMIUMSERVICEURL: "http://premium-service:4006"
+    SOCIALSERVICEURL: "http://social-service:4007"
+    MOBILESERVICEURL: "http://mobile-service:4008"
+    QUEUESERVICEURL: "http://queue-service:4009"
+
+  # secret values — ONLY rendered into a chart Secret when existingSecret is "".
+  # NEVER commit real credentials here; values land in release metadata.
+  secret:
+    DATABASEURL: "REPLACE_ME"
+    AUTHSECRET: "REPLACE_ME"
+    TMDBAPIKEY: "REPLACE_ME"
+    STRIPESECRETKEY: "REPLACE_ME"
+    FOOTBALLDATAAPI_KEY: "REPLACE_ME"
+    ADMINEMAILS: "REPLACE_ME"
+    # Phase 4 — Animaxia AI Cloud (llm-core openai key + external vector
+    # adapters; empty = z-ai/mock fallback chain + pgvector/mock backends)
+    AI_API_KEY: ""
+    QDRANTAPIKEY: ""
+    PINECONEAPIKEY: ""
+
+# ---------------------------------------------------------------------------
+# Per-service definitions. Templates (deployment/service/hpa/pdb) iterate this
+# map. Supported keys per service:
+#   enabled        — skip the service entirely (also update env.config URLs!)
+#   name           — k8s resource name (default "<key>-service", DNS contract)
+#   port           — container + Service port
+#   replicas       — initial replicas (used verbatim when autoscaling.enabled=false)
+#   minReplicas / maxReplicas — HPA bounds (when autoscaling.enabled)
+#   targetCPU      — optional HPA CPU target (default autoscaling.defaultTargetCPU)
+#   targetMemory   — optional HPA memory target (omit → CPU-only)
+#   repository/tag — optional image overrides (repository must be fully qualified)
+#   resources      — requests/limits
+#   dataMountPath  — mount the shared PVC at this path (content + queue only)
+#   role           — extra pod label (queue: worker-consumer)
+#   nodeSelector / affinity / tolerations — scheduling knobs
+# ---------------------------------------------------------------------------
+services:
+  gateway:
+    enabled: true
+    port: 8080
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPU: 70
+    targetMemory: 80
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  auth:
+    enabled: true
+    port: 4001
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  content:
+    enabled: true
+    port: 4002
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 8
+    dataMountPath: /app/data
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  ai:
+    enabled: true
+    port: 4003
+    replicas: 2
+    minReplicas: 1
+    maxReplicas: 6
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  analytics:
+    enabled: true
+    port: 4004
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  search:
+    enabled: true
+    port: 4005
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 6
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  premium:
+    enabled: true
+    port: 4006
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  social:
+    enabled: true
+    port: 4007
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  mobile:
+    enabled: true
+    port: 4008
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  queue:
+    enabled: true
+    port: 4009
+    replicas: 1
+    minReplicas: 1
+    maxReplicas: 3
+    dataMountPath: /app/data
+    role: worker-consumer
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# ---------------------------------------------------------------------------
+serviceAccount:
+  # create a dedicated ServiceAccount used by every Deployment
+  create: true
+  # explicit name (default "<fullname>")
+  name: ""
+  annotations: {}
+
+# HPA (autoscaling/v2). When enabled, Deployments omit `replicas` and the HPA
+# owns the count; PDBs are only rendered for services with minReplicas > 1
+# (a PDB on a single-replica service would block node drains).
+autoscaling:
+  enabled: true
+  defaultTargetCPU: 70
+
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: animaxia.local
+  annotations:
+    # dev: plain HTTP; flip to "true" together with tls.enabled
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    prometheus.io/scrape: "false"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+  tls:
+    enabled: false
+    secretName: ""
+
+# ---------------------------------------------------------------------------
+queue:
+  # finished-job retention (days) → QUEUERETENTIONDAYS in the ConfigMap
+  retentionDays: 7
+  cronJobs:
+    # k8s CronJobs ticking queue-service POST /api/queue/cron/tick — belt &
+    # braces on top of the internal scheduler (QUEUESCHEDULERENABLED)
+    enabled: true
+    queueServiceUrl: http://queue-service:4009
+    curlImage: curlimages/curl:8.10.1
+    schedules:
+      tmdb-refresh:
+        schedule: "0 */6 * * *"
+        job: providers.refresh
+        payload:
+          source: tmdb
+      jikan-refresh:
+        schedule: "30 */6 * * *"
+        job: providers.refresh
+        payload:
+          source: jikan
+      cleanup-logs:
+        schedule: "0 3 * * *"
+        job: maintenance.cleanup-logs
+        payload: {}
+      cleanup-audit:
+        schedule: "15 3 * * *"
+        job: maintenance.cleanup-audit
+        payload: {}
+      cleanup-sessions:
+        schedule: "0 * * * *"
+        job: maintenance.cleanup-sessions
+        payload: {}
+      reindex:
+        schedule: "0 4 * * *"
+        job: maintenance.reindex
+        payload: {}
+
+# ---------------------------------------------------------------------------
+observability:
+  # OTLP/HTTP trace endpoint — injected as OTELSENDPOINT into every Deployment
+  # when non-empty (leave "" to rely on the existingSecret / code default)
+  otelEndpoint: ""
+  tracingEnabled: true
+  metricsEnabled: true
+  otelSampleRate: "1.0"
+
+# ---------------------------------------------------------------------------
+persistence:
+  # shared PVC "<fullname>-data" mounted by content + queue at dataMountPath.
+  # ReadWriteOnce = single-node; use RWM storageClass for multi-AZ.
+  enabled: true
+  # "" (empty) → field omitted → cluster default StorageClass; set a name to pin
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+
+# ---------------------------------------------------------------------------
+# On-demand worker Job: enqueues ONE batch job into the queue
+# (POST /api/queue/jobs {"type": jobType, "payload": payload}).
+# Enable temporarily:  helm upgrade --set workerJob.enabled=true [...]
+# ---------------------------------------------------------------------------
+workerJob:
+  enabled: false
+  jobType: indexing.batch
+  payload: {}
+  queueServiceUrl: http://queue-service:4009
+  curlImage: curlimages/curl:8.10.1
+  activeDeadlineSeconds: 300
+
+# ---------------------------------------------------------------------------
+# pod-level defaults applied to every Deployment
+podAnnotations: {}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001

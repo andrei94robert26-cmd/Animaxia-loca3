@@ -1,0 +1,27 @@
+{{/* ClusterIP Service per enabled entry in .Values.services.
+     Port = service port (8080 / 4001-4009); name is FIXED "<key>-service". */}}
+{{- range $key, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $svcName := include "animaxia.serviceName" (dict "root" $ "key" $key "service" $svc) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svcName }}
+  namespace: {{ include "animaxia.namespace" $ }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" $ "serviceName" $svcName "component" $key) | nindent 4 }}
+    {{- with $svc.role }}
+    role: {{ . }}
+    {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "animaxia.selectorLabels" (dict "root" $ "serviceName" $svcName) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $svc.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
+{{- end }}

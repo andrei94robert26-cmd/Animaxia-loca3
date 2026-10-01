@@ -21,16 +21,13 @@ import { logger } from '../../utils/logger.js';
 import { rows } from '../platform/sql.js';
 
 const DDL_STATEMENTS = [
-  `ALTER TABLE users ADD COLUMN IF NOT EXISTS emailverified BOOLEAN DEFAULT false`,
-  `ALTER TABLE users ADD COLUMN IF NOT EXISTS twofasecret TEXT DEFAULT NULL`,
-  `ALTER TABLE users ADD COLUMN IF NOT EXISTS twofaenabled BOOLEAN DEFAULT false`,
   `CREATE TABLE IF NOT EXISTS emailtokens (
     token TEXT PRIMARY KEY,
     userid INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     purpose TEXT NOT NULL,
     expiresat TIMESTAMPTZ NOT NULL,
     usedat TIMESTAMPTZ DEFAULT NULL,
-    createdat TIMESTAMPTZ DEFAULT now()
+    createdat TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS idx_emailtokens_user ON emailtokens (userid)`,
   `CREATE INDEX IF NOT EXISTS idx_emailtokens_purpose ON emailtokens (purpose) WHERE usedat IS NULL`,

@@ -44,21 +44,7 @@ const DDL_STATEMENTS = [
   `DELETE FROM contentsources WHERE contentid IS NOT NULL AND contentid NOT IN (SELECT id FROM content)`,
   // 4) FK searchdocs.contentid → content.id (ON DELETE CASCADE). No
   //    IF NOT EXISTS for constraints in PG → pg_constraint guard in DO block.
-  `DO $$ BEGIN
-     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'searchdocs_contentid_fkey') THEN
-       ALTER TABLE searchdocs
-         ADD CONSTRAINT searchdocs_contentid_fkey
-         FOREIGN KEY (contentid) REFERENCES content(id) ON DELETE CASCADE;
-     END IF;
-   END $$`,
   // 5) Same for the dedup registry (contentsources.contentid → content.id).
-  `DO $$ BEGIN
-     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contentsources_contentid_fkey') THEN
-       ALTER TABLE contentsources
-         ADD CONSTRAINT contentsources_contentid_fkey
-         FOREIGN KEY (contentid) REFERENCES content(id) ON DELETE CASCADE;
-     END IF;
-   END $$`,
 ];
 
 /**

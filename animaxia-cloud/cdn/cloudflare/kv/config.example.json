@@ -1,0 +1,16 @@
+{
+  "maintenance": false,
+  "edgeRateLimitPerMin": 600,
+  "cacheablePaths": [
+    "/api/all",
+    "/api/content",
+    "/api/anime",
+    "/api/movies",
+    "/api/tv",
+    "/api/sports",
+    "/api/news",
+    "/api/search"
+  ],
+  "originHeaders": {},
+  "fallbackOrigin": ""
+}

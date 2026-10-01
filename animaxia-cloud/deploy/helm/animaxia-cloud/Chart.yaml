@@ -1,0 +1,19 @@
+apiVersion: v2
+name: animaxia-cloud
+description: |
+  Animaxia Cloud — 10-service microservices platform (API gateway, auth,
+  content/providers, AI, analytics, search, premium/Stripe, social, mobile BFF,
+  Postgres-backed durable queue) with autoscaling, cron scheduling, shared
+  persistence and optional ingress.
+type: application
+# chart version — bump on chart changes (app version tracks the images)
+version: 3.0.0
+appVersion: "3.0.0"
+keywords:
+  - animaxia
+  - microservices
+  - api-gateway
+  - streaming
+home: https://github.com/animaxia/animaxia-cloud
+maintainers:
+  - name: Animaxia Cloud Team

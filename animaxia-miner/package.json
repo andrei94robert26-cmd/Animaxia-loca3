@@ -1,0 +1,15 @@
+{
+  "name": "animaxia-miner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FAZA 12 — Animaxia Miner: ingest + indexing service (TMDB/Jikan providers, persistent Neon job queue, tenant-scoped vector indexing, search catalog push)",
+  "type": "module",
+  "scripts": {
+    "smoke": "bun scripts/smoke-miner.mjs",
+    "e2e": "bun tests/e2e-miner.mjs",
+    "test": "bun scripts/smoke-miner.mjs && bun tests/e2e-miner.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
+}

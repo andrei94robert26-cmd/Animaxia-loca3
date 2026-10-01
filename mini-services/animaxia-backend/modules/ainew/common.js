@@ -223,8 +223,8 @@ export async function loadLabSettings() {
 export async function setLabEnabled(key, enabled) {
   const value = { enabled, updatedAt: new Date().toISOString() };
   await rows(
-    `INSERT INTO aisettings (key, value) VALUES ($1, $2::jsonb)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = NOW()`,
+    `INSERT INTO aisettings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updatedat = CURRENT_TIMESTAMP`,
     [`${SETTINGS_PREFIX}${key}`, jsonb(value)],
   );
   settingsCache.at = 0; // invalidate — toggles must apply immediately

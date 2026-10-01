@@ -1,0 +1,14 @@
+CREATE TABLE contentsources (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ urlhash TEXT NOT NULL UNIQUE,
+ url TEXT NOT NULL,
+ originalurl TEXT,
+ kind TEXT NOT NULL DEFAULT 'link',
+ contentid INTEGER REFERENCES Content(id) ON DELETE CASCADE,
+ externalid TEXT,
+ addedby TEXT DEFAULT 'manual',
+ hits INTEGER DEFAULT 1,
+ metadata TEXT DEFAULT '{}',
+ createdat TEXT DEFAULT CURRENT_TIMESTAMP,
+ lastseenat TEXT DEFAULT CURRENT_TIMESTAMP
+);

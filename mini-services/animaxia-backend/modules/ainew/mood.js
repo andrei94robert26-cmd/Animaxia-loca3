@@ -136,7 +136,7 @@ export async function moodGenerate({ mood, limit = 12, seed = 'animaxia' }) {
     matched = await rows(
       `SELECT id, title, type, thumbnail, metadata
          FROM content
-        WHERE metadata->'genres' ?| $1::text[]
+        WHERE metadata->'genres' ?| $1[]
         ORDER BY (metadata->>'rating') DESC NULLS LAST, id ASC
         LIMIT $2`,
       [moodDef.genres, Math.max(safeLimit * 3, 36)],

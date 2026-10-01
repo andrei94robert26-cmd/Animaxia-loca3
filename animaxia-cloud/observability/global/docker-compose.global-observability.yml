@@ -1,0 +1,115 @@
+# =============================================================================
+# Animaxia — GLOBAL observability stack (FAZA 23 prep — NOT ACTIVATED)
+# =============================================================================
+# Prepared during FAZA 22, activated in FAZA 23. EVERY service carries
+#   profiles: ["faza23"]
+# so the stack NEVER starts by default (no port conflicts, no CPU cost with
+# the per-region/local observability stacks).
+#
+# Activate explicitly when FAZA 23 begins:
+#   docker compose --profile faza23 up -d
+# Stop it again:
+#   docker compose --profile faza23 down
+# (Running without --profile faza23 ignores every service in this file.)
+#
+# What it runs (global aggregation tier, on top of the per-region stacks in
+# observability/ — prometheus/prometheus.yml, loki, tempo, otel):
+#   • prometheus     — federation: scrapes eu/us/asia regional Prometheus
+#                      /federate endpoints (prometheus/prometheus-global.yml)
+#   • grafana        — dashboards on the global Prometheus
+#   • alertmanager   — region-routed alert tree (alertmanager/alertmanager-global.yml)
+#   • otel-collector — global OTel pipeline (otel/otel-collector-global.yaml):
+#                      otlp receivers → memory_limiter/batch/tail_sampling →
+#                      prometheusremotewrite + otlp/tempo
+# =============================================================================
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: animaxia-prometheus-global
+    restart: unless-stopped
+    profiles: ["faza23"]
+    ports:
+      - "9095:9090" # host 9095 — 9090 belongs to the per-region Prometheus
+    volumes:
+      - ../../observability/global/prometheus/prometheus-global.yml:/etc/prometheus/prometheus-global.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus-global.yml
+      - --storage.tsdb.retention.time=30d # global tier keeps a month of federated history
+    networks: [animaxia]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: animaxia-grafana-global
+    restart: unless-stopped
+    profiles: ["faza23"]
+    ports:
+      - "3002:3000" # host 3002 — 3000 frontend, 3001 per-region Grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin # change before real FAZA 23 activation
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ../../observability/global/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks: [animaxia]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: animaxia-alertmanager-global
+    restart: unless-stopped
+    profiles: ["faza23"]
+    ports:
+      - "9097:9093" # host 9097 — 9093 reserved for a per-region alertmanager
+    volumes:
+      - ../../observability/global/alertmanager/alertmanager-global.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: [animaxia]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: animaxia-otel-global
+    restart: unless-stopped
+    profiles: ["faza23"]
+    command: ["--config=/etc/otelcol-global/config.yaml"]
+    ports:
+      - "4327:4317" # OTLP gRPC (host 4327 — 4317 belongs to the per-region collector)
+      - "4328:4318" # OTLP HTTP  (host 4328 — 4318 belongs to the per-region collector)
+    volumes:
+      - ../../observability/global/otel/otel-collector-global.yaml:/etc/otelcol-global/config.yaml:ro
+    networks: [animaxia]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:13133/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  animaxia:
+    external: true
+    # Same bridge network as deploy/docker/docker-compose.yml — the per-region
+    # stack must be up first (docker network create animaxia if standalone).

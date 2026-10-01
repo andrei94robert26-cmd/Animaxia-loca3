@@ -1,0 +1,693 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * admin-search-rate-tab.tsx — FAZA 16 Search Rate Management console: live
+     5→ * pacing gauges (rate-limit hits, cooldown blocks, spam blocks, burst
+     6→ * events), the rolling arrivals / blocked chart (recharts via the shadcn
+     7→ * chart wrapper), the active configuration cards (per-user limit, cooldown,
+     8→ * anti-spam, burst control), the 30-row per-shard attribution table and the
+     9→ * admin runtime settings form (POST /api/search/rate/settings, Bearer +
+    10→ * admin-gated). The banner keeps the FAZA 16 promise visible: the pacing
+    11→ * layer only decides WHO may search HOW OFTEN — the searches themselves stay
+    12→ * 100% REAL (byte-identical FTS through the FAZA 15 queue). Public
+    13→ * read-only data (GET /api/search/rate); auto-refreshes every 2 s while
+    14→ * visible. Deep-linked via #/admin/search-rate.
+    15→ */
+    16→
+    17→import { useEffect, useMemo, useState } from 'react';
+    18→import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+    19→import {
+    20→  Activity,
+    21→  Ban,
+    22→  CheckCircle2,
+    23→  Hourglass,
+    24→  LineChart,
+    25→  Lock,
+    26→  Network,
+    27→  RefreshCw,
+    28→  Save,
+    29→  Server,
+    30→  ShieldCheck,
+    31→  SlidersHorizontal,
+    32→  Timer,
+    33→  TrendingUp,
+    34→  Users,
+    35→  Zap,
+    36→} from 'lucide-react';
+    37→import { toast } from 'sonner';
+    38→import { api, BACKEND_PORT } from '@/lib/animaxia/api';
+    39→import { authRequest, PlatformError } from '@/lib/animaxia/platform';
+    40→import { useApi } from '@/lib/animaxia/hooks';
+    41→import type { SearchRateConfig, SearchRateShardStats } from '@/lib/animaxia/types';
+    42→import { Button } from '@/components/ui/button';
+    43→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+    44→import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
+    45→import { Input } from '@/components/ui/input';
+    46→import { Label } from '@/components/ui/label';
+    47→import { Skeleton } from '@/components/ui/skeleton';
+    48→import {
+    49→  Table,
+    50→  TableBody,
+    51→  TableCell,
+    52→  TableHead,
+    53→  TableHeader,
+    54→  TableRow,
+    55→} from '@/components/ui/table';
+    56→import { cn } from '@/lib/utils';
+    57→import { useAuth } from '../auth-provider';
+    58→import { EmptyState, ErrorState } from '../states';
+    59→
+    60→/* ------------------------------- helpers --------------------------------- */
+    61→
+    62→/** Live console cadence — /api/search/rate is in-memory and fast. */
+    63→const POLL_MS = 2_000;
+    64→
+    65→const RO_NUMBER = new Intl.NumberFormat('ro-RO');
+    66→const RO_RATE = new Intl.NumberFormat('ro-RO', { maximumFractionDigits: 2 });
+    67→
+    68→function fmtRoNum(v: number | null | undefined): string {
+    69→  return RO_NUMBER.format(Number(v ?? 0));
+    70→}
+    71→
+    72→function fmtMs(v: number | null | undefined): string {
+    73→  const n = Number(v ?? 0);
+    74→  return Number.isFinite(n) && n > 0 ? `${RO_NUMBER.format(Math.round(n))} ms` : '—';
+    75→}
+    76→
+    77→/** HH:MM:SS clock label for the history X axis (samples are 1 s apart). */
+    78→function fmtClock(iso: string): string {
+    79→  const d = new Date(iso);
+    80→  if (Number.isNaN(d.getTime())) return iso;
+    81→  const p = (n: number) => String(n).padStart(2, '0');
+    82→  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    83→}
+    84→
+    85→/* ------------------------------ gauges strip ------------------------------ */
+    86→
+    87→type Tone = 'zinc' | 'emerald' | 'amber' | 'red';
+    88→
+    89→const TONE_CHIP: Record<Tone, string> = {
+    90→  zinc: 'border-white/10 bg-white/[0.04] text-zinc-300',
+    91→  emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+    92→  amber: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    93→  red: 'border-red-500/30 bg-red-500/10 text-red-300',
+    94→};
+    95→
+    96→function GaugeCard({
+    97→  icon,
+    98→  label,
+    99→  value,
+   100→  sub,
+   101→  tone = 'zinc',
+   102→}: {
+   103→  icon: React.ReactNode;
+   104→  label: string;
+   105→  value: React.ReactNode;
+   106→  sub?: React.ReactNode;
+   107→  tone?: Tone;
+   108→}) {
+   109→  return (
+   110→    <Card className="border-white/10 bg-white/[0.03]">
+   111→      <CardContent className="flex items-center gap-3 p-4">
+   112→        <span
+   113→          className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl border', TONE_CHIP[tone])}
+   114→          aria-hidden
+   115→        >
+   116→          {icon}
+   117→        </span>
+   118→        <div className="min-w-0">
+   119→          <p className="truncate text-2xl font-black leading-tight text-white">{value}</p>
+   120→          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{label}</p>
+   121→          {sub ? <p className="mt-0.5 truncate text-[11px] leading-snug text-zinc-600">{sub}</p> : null}
+   122→        </div>
+   123→      </CardContent>
+   124→    </Card>
+   125→  );
+   126→}
+   127→
+   128→/** Protection counter chip: zinc „0” while quiet, red the moment the layer
+   129→ *  actually blocked something (spam protection doing its job). */
+   130→function ProtectValue({ value }: { value: number }) {
+   131→  return value > 0 ? (
+   132→    <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-0.5 font-mono text-base font-bold text-red-300">
+   133→      {fmtRoNum(value)}
+   134→    </span>
+   135→  ) : (
+   136→    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 font-mono text-base font-bold text-zinc-400">
+   137→      <span className="h-1.5 w-1.5 rounded-full bg-zinc-500" aria-hidden />
+   138→      0
+   139→    </span>
+   140→  );
+   141→}
+   142→
+   143→/* -------------------------------- chart ---------------------------------- */
+   144→
+   145→const RATE_CHART_CONFIG = {
+   146→  sosiri: { label: 'Sosiri', color: '#10b981' },
+   147→  blocate: { label: 'Blocate', color: '#f43f5e' },
+   148→} satisfies ChartConfig;
+   149→
+   150→/* ---------------------------- settings form ------------------------------ */
+   151→
+   152→const SETTINGS_FIELDS = [
+   153→  { key: 'perUserMs', label: 'Limită / utilizator', hint: '100 – 5.000 ms', min: 100, max: 5000 },
+   154→  { key: 'cooldownMs', label: 'Cooldown după rezultat', hint: '250 – 10.000 ms', min: 250, max: 10000 },
+   155→  { key: 'spamThreshold', label: 'Prag anti-spam (ENTER)', hint: '2 – 10 apăsări', min: 2, max: 10 },
+   156→  { key: 'spamBlockMs', label: 'Blocare anti-spam', hint: '100 – 10.000 ms', min: 100, max: 10000 },
+   157→  { key: 'burstThreshold', label: 'Prag burst / fereastră', hint: '10 – 100.000', min: 10, max: 100000 },
+   158→] as const;
+   159→
+   160→type SettingsKey = (typeof SETTINGS_FIELDS)[number]['key'];
+   161→type SettingsForm = Record<SettingsKey, string>;
+   162→
+   163→function RateSettingsCard({
+   164→  config,
+   165→  isAdmin,
+   166→  onSaved,
+   167→}: {
+   168→  config: SearchRateConfig;
+   169→  isAdmin: boolean;
+   170→  onSaved: () => void;
+   171→}) {
+   172→  const [form, setForm] = useState<SettingsForm>({
+   173→    perUserMs: String(config.perUserMs),
+   174→    cooldownMs: String(config.cooldownMs),
+   175→    spamThreshold: String(config.spamThreshold),
+   176→    spamBlockMs: String(config.spamBlockMs),
+   177→    burstThreshold: String(config.burstThreshold),
+   178→  });
+   179→  const [dirty, setDirty] = useState(false);
+   180→  const [saving, setSaving] = useState(false);
+   181→
+   182→  /* Re-sync the pre-filled inputs from the polled config while the user has
+   183→     not edited anything (and right after a successful save). */
+   184→  useEffect(() => {
+   185→    if (dirty) return;
+   186→    setForm((prev) => {
+   187→      const next: SettingsForm = {
+   188→        perUserMs: String(config.perUserMs),
+   189→        cooldownMs: String(config.cooldownMs),
+   190→        spamThreshold: String(config.spamThreshold),
+   191→        spamBlockMs: String(config.spamBlockMs),
+   192→        burstThreshold: String(config.burstThreshold),
+   193→      };
+   194→      return (Object.keys(next) as SettingsKey[]).every((k) => prev[k] === next[k]) ? prev : next;
+   195→    });
+   196→  }, [config, dirty]);
+   197→
+   198→  async function handleSave() {
+   199→    if (saving) return;
+   200→    const parsed: Record<SettingsKey, number> = {
+   201→      perUserMs: Number(form.perUserMs),
+   202→      cooldownMs: Number(form.cooldownMs),
+   203→      spamThreshold: Number(form.spamThreshold),
+   204→      spamBlockMs: Number(form.spamBlockMs),
+   205→      burstThreshold: Number(form.burstThreshold),
+   206→    };
+   207→    for (const f of SETTINGS_FIELDS) {
+   208→      const v = parsed[f.key];
+   209→      if (!Number.isFinite(v) || v < f.min || v > f.max) {
+   210→        toast.error(`${f.label} trebuie să fie între ${RO_NUMBER.format(f.min)} și ${RO_NUMBER.format(f.max)}`);
+   211→        return;
+   212→      }
+   213→    }
+   214→    setSaving(true);
+   215→    try {
+   216→      await authRequest<{ ok: boolean; config: SearchRateConfig }>(
+   217→        `/api/search/rate/settings?XTransformPort=${BACKEND_PORT}`,
+   218→        { method: 'POST', body: JSON.stringify(parsed) },
+   219→      );
+   220→      toast.success('Setări salvate');
+   221→      setDirty(false);
+   222→      onSaved();
+   223→    } catch (e) {
+   224→      if (e instanceof PlatformError && (e.status === 401 || e.status === 403)) {
+   225→        toast.error('Setările ritmului necesită cont de administrator');
+   226→      } else {
+   227→        toast.error(e instanceof Error ? e.message : 'Salvarea setărilor a eșuat');
+   228→      }
+   229→    } finally {
+   230→      setSaving(false);
+   231→    }
+   232→  }
+   233→
+   234→  return (
+   235→    <Card className="border-white/10 bg-white/[0.03]">
+   236→      <CardHeader className="pb-3">
+   237→        <CardTitle className="flex items-center gap-2 text-base">
+   238→          <ShieldCheck className="h-4 w-4 text-rose-400" aria-hidden />
+   239→          Setări runtime (administrator)
+   240→        </CardTitle>
+   241→        <CardDescription>
+   242→          Reglare live a ritmului de căutare — se aplică imediat, fără restart.
+   243→        </CardDescription>
+   244→      </CardHeader>
+   245→      <CardContent className="space-y-4">
+   246→        {isAdmin ? (
+   247→          <>
+   248→            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+   249→              {SETTINGS_FIELDS.map((f) => (
+   250→                <div key={f.key} className="space-y-1.5">
+   251→                  <Label htmlFor={`rate-setting-${f.key}`} className="text-xs text-zinc-400">
+   252→                    {f.label} <span className="font-normal text-zinc-600">({f.hint})</span>
+   253→                  </Label>
+   254→                  <Input
+   255→                    id={`rate-setting-${f.key}`}
+   256→                    type="number"
+   257→                    inputMode="numeric"
+   258→                    min={f.min}
+   259→                    max={f.max}
+   260→                    step={1}
+   261→                    value={form[f.key]}
+   262→                    onChange={(e) => {
+   263→                      setDirty(true);
+   264→                      setForm((prev) => ({ ...prev, [f.key]: e.target.value }));
+   265→                    }}
+   266→                    className="border-white/10 bg-white/[0.04] font-mono text-zinc-100"
+   267→                    aria-label={`${f.label}, interval acceptat ${f.hint}`}
+   268→                  />
+   269→                </div>
+   270→              ))}
+   271→            </div>
+   272→            <div className="flex flex-wrap items-center justify-between gap-3">
+   273→              <p className="max-w-xl text-[11px] leading-snug text-zinc-600">
+   274→                Validarea și limitarea valorilor (clamping) se fac pe server — valorile finale sunt cele
+   275→                returnate după salvare și reflectate mai sus în cardurile de configurare.
+   276→              </p>
+   277→              <Button
+   278→                size="sm"
+   279→                onClick={() => void handleSave()}
+   280→                disabled={saving || !dirty}
+   281→                className="bg-rose-600 font-bold hover:bg-rose-500"
+   282→              >
+   283→                {saving ? <RefreshCw className="animate-spin" aria-hidden /> : <Save aria-hidden />}
+   284→                Salvează
+   285→              </Button>
+   286→            </div>
+   287→          </>
+   288→        ) : (
+   289→          <p className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-2.5 text-xs text-amber-200">
+   290→            <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden />
+   291→            Setările ritmului necesită cont de administrator — valorile curente sunt read-only.
+   292→          </p>
+   293→        )}
+   294→      </CardContent>
+   295→    </Card>
+   296→  );
+   297→}
+   298→
+   299→/* -------------------------------- main tab -------------------------------- */
+   300→
+   301→export function AdminSearchRateTab() {
+   302→  const { isAdmin, initializing } = useAuth();
+   303→  const rate = useApi('admin-search-rate', () => api.searchRate());
+   304→
+   305→  /* Auto-refresh every 2 s while mounted (pause when the tab is hidden). */
+   306→  useEffect(() => {
+   307→    const timer = setInterval(() => {
+   308→      if (typeof document !== 'undefined' && document.hidden) return;
+   309→      void rate.refetch();
+   310→    }, POLL_MS);
+   311→    return () => clearInterval(timer);
+   312→  }, [rate.refetch]);
+   313→
+   314→  const data = rate.data;
+   315→  const rl = data?.rateLimit ?? null;
+   316→  const bc = data?.burstControl ?? null;
+   317→  const config = data?.config ?? null;
+   318→  const counters = data?.counters ?? null;
+   319→  const shards = useMemo<SearchRateShardStats[]>(
+   320→    () => [...(data?.perShard ?? [])].sort((a, b) => a.shardid - b.shardid),
+   321→    [data?.perShard],
+   322→  );
+   323→  /* Chronological history (oldest → newest) for the area chart. */
+   324→  const chartData = useMemo(
+   325→    () =>
+   326→      [...(data?.history ?? [])]
+   327→        .sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime())
+   328→        .map((p) => ({ clock: fmtClock(p.t), sosiri: p.arrivals, blocate: p.blocked })),
+   329→    [data?.history],
+   330→  );
+   331→
+   332→  const loadingFirst = rate.loading && !data;
+   333→
+   334→  return (
+   335→    <div className="space-y-5">
+   336→      {/* Banner — the FAZA 16 promise: pacing never fakes or delays a search. */}
+   337→      <Card className="border-emerald-500/25 bg-emerald-500/[0.04]">
+   338→        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:p-5">
+   339→          <span
+   340→            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-emerald-500/30 bg-emerald-500/10"
+   341→            aria-hidden
+   342→          >
+   343→            <Timer className="h-5 w-5 text-emerald-400" />
+   344→          </span>
+   345→          <div>
+   346→            <p className="text-sm font-bold text-emerald-200">
+   347→              Controlul ritmului de căutări — căutările rămân 100% reale
+   348→            </p>
+   349→            <p className="mt-1 text-xs leading-relaxed text-zinc-400">
+   350→              Stratul FAZA 16 decide <span className="font-semibold text-zinc-200">cine</span> poate căuta{' '}
+   351→              <span className="font-semibold text-zinc-200">cât de des</span>: limită per utilizator (
+   352→              {fmtMs(rl?.perUserMs ?? config?.perUserMs)}), cooldown după rezultat (
+   353→              {fmtMs(rl?.cooldownMs ?? config?.cooldownMs)}), anti-spam ENTER (
+   354→              {fmtRoNum(config?.spamThreshold ?? 3)} apăsări / {fmtMs(config?.spamWindowMs ?? 200)} → blocare{' '}
+   355→              {fmtMs(config?.spamBlockMs ?? 1000)}) și detectare de burst-uri. Cererile admise trec neschimbate
+   356→              prin coada FAZA 15 — interogările FTS rămân byte-identice cu FAZA 14, iar respingerile sunt
+   357→              întotdeauna explicite (429 + retryInMs), niciodată pierdute.
+   358→            </p>
+   359→          </div>
+   360→        </CardContent>
+   361→      </Card>
+   362→
+   363→      {/* Toolbar: live pulse + manual refresh */}
+   364→      <div className="flex flex-wrap items-center justify-between gap-3">
+   365→        <p className="flex items-center gap-2 text-xs text-zinc-500" aria-live="off">
+   366→          <span className="relative flex h-2 w-2" aria-hidden>
+   367→            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+   368→            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+   369→          </span>
+   370→          Consolă live — auto-refresh la 2 s
+   371→        </p>
+   372→        <Button
+   373→          variant="outline"
+   374→          size="sm"
+   375→          onClick={() => rate.refetch()}
+   376→          aria-label="Reîmprospătează starea ritmului de căutare"
+   377→          className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   378→        >
+   379→          {rate.loading ? <RefreshCw className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+   380→          Refresh
+   381→        </Button>
+   382→      </div>
+   383→
+   384→      {/* Live gauges */}
+   385→      {loadingFirst ? (
+   386→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   387→          {Array.from({ length: 8 }).map((_, i) => (
+   388→            <Skeleton key={i} className="h-[92px] rounded-xl" />
+   389→          ))}
+   390→        </div>
+   391→      ) : rate.error && !data ? (
+   392→        <ErrorState message={rate.error} onRetry={rate.refetch} compact />
+   393→      ) : rl && counters ? (
+   394→        <section aria-label="Indicatori live ai ritmului de căutare" className="space-y-3">
+   395→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   396→            <GaugeCard
+   397→              icon={<Hourglass className="h-5 w-5" aria-hidden />}
+   398→              label="Rate-limit"
+   399→              value={<ProtectValue value={rl.hits} />}
+   400→              tone={rl.hits > 0 ? 'red' : 'zinc'}
+   401→              sub={`o căutare / ${fmtMs(rl.perUserMs)} / utilizator`}
+   402→            />
+   403→            <GaugeCard
+   404→              icon={<Timer className="h-5 w-5" aria-hidden />}
+   405→              label="Cooldown active"
+   406→              value={<ProtectValue value={rl.cooldownBlocks} />}
+   407→              tone={rl.cooldownBlocks > 0 ? 'red' : 'zinc'}
+   408→              sub={`blocate ${fmtMs(rl.cooldownMs)} după rezultat`}
+   409→            />
+   410→            <GaugeCard
+   411→              icon={<Ban className="h-5 w-5" aria-hidden />}
+   412→              label="Spam blocate"
+   413→              value={<ProtectValue value={rl.spamBlocked} />}
+   414→              tone={rl.spamBlocked > 0 ? 'red' : 'zinc'}
+   415→              sub={`${fmtRoNum(config?.spamThreshold ?? 3)} ENTER / ${fmtMs(config?.spamWindowMs ?? 200)} → blocare`}
+   416→            />
+   417→            <GaugeCard
+   418→              icon={<Zap className="h-5 w-5" aria-hidden />}
+   419→              label="Burst-uri"
+   420→              value={fmtRoNum(bc?.events ?? 0)}
+   421→              tone={bc?.burstActive ? 'amber' : 'zinc'}
+   422→              sub={bc?.burstActive ? 'burst ACTIV acum' : `prag ${fmtRoNum(bc?.maxBurstPerWindow ?? 1000)} / ${fmtMs(bc?.windowMs ?? 1000)}`}
+   423→            />
+   424→            <GaugeCard
+   425→              icon={<Activity className="h-5 w-5" aria-hidden />}
+   426→              label="Sosiri / s"
+   427→              value={RO_RATE.format(bc?.arrivalsPerS ?? 0)}
+   428→              tone={(bc?.arrivalsPerS ?? 0) > 0 ? 'amber' : 'zinc'}
+   429→              sub={`max observat ${fmtRoNum(bc?.peak ?? 0)} / fereastră`}
+   430→            />
+   431→            <GaugeCard
+   432→              icon={<CheckCircle2 className="h-5 w-5" aria-hidden />}
+   433→              label="Admise"
+   434→              value={fmtRoNum(counters.admitted)}
+   435→              tone="emerald"
+   436→              sub={`${fmtRoNum(counters.completed)} rezultate livrate`}
+   437→            />
+   438→            <GaugeCard
+   439→              icon={<Users className="h-5 w-5" aria-hidden />}
+   440→              label="Utilizatori urmăriți"
+   441→              value={fmtRoNum(rl.trackedUsers)}
+   442→              sub={`max ${fmtRoNum(counters.trackedUsersHighWater)}`}
+   443→            />
+   444→            <GaugeCard
+   445→              icon={<TrendingUp className="h-5 w-5" aria-hidden />}
+   446→              label="Sosiri totale"
+   447→              value={fmtRoNum(counters.arrivals)}
+   448→              sub={`${fmtRoNum(counters.rateLimitHits + counters.cooldownBlocks + counters.spamBlocked)} respingeri explicite`}
+   449→            />
+   450→          </div>
+   451→          {bc ? (
+   452→            <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 font-mono text-[11px] text-zinc-400">
+   453→              <span className="font-sans text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+   454→                Burst control
+   455→              </span>
+   456→              <span>
+   457→                {bc.active ? 'ACTIV' : 'inactiv'}{' '}
+   458→                <span className="text-zinc-600">— 1000 utilizatori simultan = coadă FAZA 15 + ferestre, zero pierderi</span>
+   459→              </span>
+   460→              <span>
+   461→                {fmtRoNum(bc.arrivalsInWindow)} <span className="text-zinc-600">sosiri în fereastră</span>
+   462→              </span>
+   463→              <span>
+   464→                ultimul burst: {bc.lastBurstAt ? new Date(bc.lastBurstAt).toLocaleTimeString('ro-RO') : '—'}
+   465→              </span>
+   466→            </p>
+   467→          ) : null}
+   468→        </section>
+   469→      ) : null}
+   470→
+   471→      {/* Config cards */}
+   472→      {config ? (
+   473→        <section aria-label="Configurația ritmului de căutare" className="space-y-3">
+   474→          <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   475→            <SlidersHorizontal className="h-4 w-4 text-rose-400" aria-hidden />
+   476→            Configurație activă
+   477→          </h3>
+   478→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+   479→            {[
+   480→              {
+   481→                label: 'Limită / utilizator',
+   482→                value: fmtMs(config.perUserMs),
+   483→                sub: 'interval minim între căutări (per tip)',
+   484→              },
+   485→              {
+   486→                label: 'Cooldown',
+   487→                value: fmtMs(config.cooldownMs),
+   488→                sub: 'după primirea unui rezultat',
+   489→              },
+   490→              {
+   491→                label: 'Anti-spam',
+   492→                value: `${fmtRoNum(config.spamThreshold)} / ${fmtMs(config.spamWindowMs)}`,
+   493→                sub: `apăsări ENTER → blocare ${fmtMs(config.spamBlockMs)}`,
+   494→              },
+   495→              {
+   496→                label: 'Burst prag',
+   497→                value: fmtRoNum(config.burstThreshold),
+   498→                sub: `sosiri / ${fmtMs(config.burstWindowMs)} = eveniment burst`,
+   499→              },
+   500→              {
+   501→                label: 'Strat FAZA 16',
+   502→                value: config.enabled ? 'ACTIV' : 'DEZACTIVAT',
+   503→                sub: config.enabled ? 'rate-limit + cooldown + anti-spam' : 'doar coada FAZA 15 rămâne',
+   504→              },
+   505→            ].map((c) => (
+   506→              <Card key={c.label} className="border-white/10 bg-white/[0.03]">
+   507→                <CardContent className="p-4">
+   508→                  <p className="text-lg font-black leading-tight text-white">{c.value}</p>
+   509→                  <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-widest text-zinc-500">{c.label}</p>
+   510→                  <p className="mt-1 text-[11px] leading-snug text-zinc-600">{c.sub}</p>
+   511→                </CardContent>
+   512→              </Card>
+   513→            ))}
+   514→          </div>
+   515→        </section>
+   516→      ) : null}
+   517→
+   518→      {/* Chart: arrivals + blocked over the rolling history */}
+   519→      <section aria-label="Istoricul ritmului de căutare">
+   520→        <Card className="border-white/10 bg-white/[0.03]">
+   521→          <CardHeader className="pb-2">
+   522→            <CardTitle className="flex items-center gap-2 text-base">
+   523→              <LineChart className="h-4 w-4 text-rose-400" aria-hidden />
+   524→              Sosiri &amp; respingeri (ultimele 3 minute)
+   525→            </CardTitle>
+   526→            <CardDescription>
+   527→              180 eșantioane de 1 s — sosiri căutări (emerald) și cereri respinse explicit (rose).
+   528→            </CardDescription>
+   529→          </CardHeader>
+   530→          <CardContent>
+   531→            {loadingFirst ? (
+   532→              <Skeleton className="h-56 w-full rounded-xl sm:h-64" />
+   533→            ) : chartData.length === 0 ? (
+   534→              <EmptyState
+   535→                title="Fără activitate încă"
+   536→                message="Istoricul se populează odată cu primele căutări trecute prin stratul de ritm."
+   537→              />
+   538→            ) : (
+   539→              <ChartContainer config={RATE_CHART_CONFIG} className="h-56 w-full sm:h-64">
+   540→                <AreaChart data={chartData} margin={{ left: 4, right: 8, top: 8, bottom: 0 }}>
+   541→                  <defs>
+   542→                    <linearGradient id="fillRateArrivals" x1="0" y1="0" x2="0" y2="1">
+   543→                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.45} />
+   544→                      <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+   545→                    </linearGradient>
+   546→                    <linearGradient id="fillRateBlocked" x1="0" y1="0" x2="0" y2="1">
+   547→                      <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.45} />
+   548→                      <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.02} />
+   549→                    </linearGradient>
+   550→                  </defs>
+   551→                  <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.08)" />
+   552→                  <XAxis
+   553→                    dataKey="clock"
+   554→                    tickLine={false}
+   555→                    axisLine={false}
+   556→                    minTickGap={32}
+   557→                    tick={{ fill: '#71717a', fontSize: 11 }}
+   558→                  />
+   559→                  <YAxis
+   560→                    allowDecimals={false}
+   561→                    tickLine={false}
+   562→                    axisLine={false}
+   563→                    width={30}
+   564→                    tick={{ fill: '#71717a', fontSize: 11 }}
+   565→                  />
+   566→                  <ChartTooltip
+   567→                    cursor={{ stroke: 'rgba(16,185,129,0.35)' }}
+   568→                    content={
+   569→                      <ChartTooltipContent
+   570→                        className="border-white/10 bg-[#1a1a24] text-zinc-200"
+   571→                        indicator="line"
+   572→                      />
+   573→                    }
+   574→                  />
+   575→                  <Area
+   576→                    dataKey="sosiri"
+   577→                    type="monotone"
+   578→                    stroke="#10b981"
+   579→                    strokeWidth={2}
+   580→                    fill="url(#fillRateArrivals)"
+   581→                    dot={false}
+   582→                    activeDot={{ r: 4, fill: '#10b981' }}
+   583→                  />
+   584→                  <Area
+   585→                    dataKey="blocate"
+   586→                    type="monotone"
+   587→                    stroke="#f43f5e"
+   588→                    strokeWidth={2}
+   589→                    fill="url(#fillRateBlocked)"
+   590→                    dot={false}
+   591→                    activeDot={{ r: 4, fill: '#f43f5e' }}
+   592→                  />
+   593→                </AreaChart>
+   594→              </ChartContainer>
+   595→            )}
+   596→          </CardContent>
+   597→        </Card>
+   598→      </section>
+   599→
+   600→      {/* Per-shard attribution */}
+   601→      {loadingFirst ? (
+   602→        <div className="space-y-2">
+   603→          {Array.from({ length: 4 }).map((_, i) => (
+   604→            <Skeleton key={i} className="h-12 w-full rounded-xl" />
+   605→          ))}
+   606→        </div>
+   607→      ) : rate.error && !data ? (
+   608→        <ErrorState message={rate.error} onRetry={rate.refetch} compact />
+   609→      ) : shards.length === 0 ? (
+   610→        <EmptyState
+   611→          title="Fără sharduri"
+   612→          message="Backend-ul nu a raportat încă atribuiri per-shard pentru ritmul de căutare."
+   613→        />
+   614→      ) : (
+   615→        <section aria-label="Atribuirea ritmului de căutare pe sharduri" className="space-y-3">
+   616→          <div className="flex flex-wrap items-center justify-between gap-3">
+   617→            <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+   618→              <Network className="h-4 w-4 text-rose-400" aria-hidden />
+   619→              Atribuire pe sharduri ({shards.length})
+   620→            </h3>
+   621→            <span className="font-mono text-[11px] text-zinc-600">
+   622→              rândurile cu activitate sunt evidențiate în amber · respingerile în roșu
+   623→            </span>
+   624→          </div>
+   625→          <div className="custom-scrollbar max-h-[32rem] overflow-y-auto rounded-xl border border-white/10">
+   626→            <Table aria-label="Atribuirea ritmului de căutare pe sharduri — un rând per shard logic">
+   627→              <TableHeader>
+   628→                <TableRow className="hover:bg-transparent">
+   629→                  <TableHead scope="col">Shard</TableHead>
+   630→                  <TableHead scope="col">Admise</TableHead>
+   631→                  <TableHead scope="col">Rate-limit</TableHead>
+   632→                  <TableHead scope="col">Cooldown</TableHead>
+   633→                  <TableHead scope="col">Spam</TableHead>
+   634→                </TableRow>
+   635→              </TableHeader>
+   636→              <TableBody>
+   637→                {shards.map((row) => {
+   638→                  const blocked = row.rateLimited + row.cooldownActive + row.spamBlocked;
+   639→                  const active = row.admitted > 0 || blocked > 0;
+   640→                  return (
+   641→                    <TableRow
+   642→                      key={row.shardid}
+   643→                      className={cn(
+   644→                        'hover:bg-white/[0.03]',
+   645→                        active && blocked === 0 && 'bg-amber-500/[0.06]',
+   646→                        blocked > 0 && 'bg-red-500/[0.07]',
+   647→                      )}
+   648→                    >
+   649→                      <TableCell>
+   650→                        <div className="flex items-center gap-2">
+   651→                          <Server className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+   652→                          <p className="font-mono text-sm font-medium text-zinc-100">#{row.shardid}</p>
+   653→                        </div>
+   654→                      </TableCell>
+   655→                      <TableCell className="font-mono text-xs text-zinc-300">{fmtRoNum(row.admitted)}</TableCell>
+   656→                      <TableCell
+   657→                        className={cn('font-mono text-xs', row.rateLimited > 0 ? 'text-red-300' : 'text-zinc-600')}
+   658→                      >
+   659→                        {fmtRoNum(row.rateLimited)}
+   660→                      </TableCell>
+   661→                      <TableCell
+   662→                        className={cn('font-mono text-xs', row.cooldownActive > 0 ? 'text-red-300' : 'text-zinc-600')}
+   663→                      >
+   664→                        {fmtRoNum(row.cooldownActive)}
+   665→                      </TableCell>
+   666→                      <TableCell
+   667→                        className={cn('font-mono text-xs', row.spamBlocked > 0 ? 'text-red-300' : 'text-zinc-600')}
+   668→                      >
+   669→                        {fmtRoNum(row.spamBlocked)}
+   670→                      </TableCell>
+   671→                    </TableRow>
+   672→                  );
+   673→                })}
+   674→              </TableBody>
+   675→            </Table>
+   676→          </div>
+   677→        </section>
+   678→      )}
+   679→
+   680→      {/* Settings (admin only) */}
+   681→      {config ? (
+   682→        <RateSettingsCard
+   683→          config={config}
+   684→          isAdmin={!initializing && isAdmin}
+   685→          onSaved={() => void rate.refetch()}
+   686→        />
+   687→      ) : loadingFirst ? (
+   688→        <Skeleton className="h-56 w-full rounded-xl" />
+   689→      ) : null}
+   690→    </div>
+   691→  );
+   692→}
+   693→

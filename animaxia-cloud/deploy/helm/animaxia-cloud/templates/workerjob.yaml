@@ -1,0 +1,62 @@
+{{/* =============================================================================
+On-demand worker Job — enqueues ONE batch job into the durable queue:
+
+    POST <queueServiceUrl>/api/queue/jobs  {"type": workerJob.jobType, "payload": ...}
+
+Disabled by default; arm it for a single release:
+    helm upgrade animaxia . --reuse-values --set workerJob.enabled=true
+(or set workerJob.jobType to analytics.batch / providers.refresh / etc.)
+NOTE: a k8s Job runs once per name — delete it before re-running:
+    kubectl -n animaxia delete job <fullname>-worker-once
+============================================================================= */}}
+{{- if .Values.workerJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "animaxia.fullname" . }}-worker-once
+  namespace: {{ include "animaxia.namespace" . }}
+  labels:
+    {{- include "animaxia.labels" (dict "root" . "component" "maintenance") | nindent 4 }}
+spec:
+  activeDeadlineSeconds: {{ .Values.workerJob.activeDeadlineSeconds | default 300 }}
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "animaxia.name" . }}-worker-job
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: animaxia-cloud
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: enqueue
+          image: {{ .Values.workerJob.curlImage | default "curlimages/curl:8.10.1" }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - curl
+            - -fsS
+            - --max-time
+            - "60"
+            - -X
+            - POST
+            - -H
+            - "Content-Type: application/json"
+            - -d
+            - {{ printf "{\"type\":%s,\"payload\":%s}" (.Values.workerJob.jobType | toJson) (.Values.workerJob.payload | default dict | toJson) | quote }}
+            - {{ printf "%s/api/queue/jobs" (.Values.workerJob.queueServiceUrl | default "http://queue-service:4009") }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+{{- end }}

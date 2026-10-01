@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "Animaxia",
+    "slug": "animaxia-mobile",
+    "version": "2.0.0",
+    "scheme": "animaxia",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0a0a10",
+    "platforms": ["android", "ios"],
+    "icon": "./app/assets/icon.png",
+    "splash": {
+      "image": "./app/assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0a0a10"
+    },
+    "assetBundlePatterns": ["app/assets/*"],
+    "ios": {
+      "bundleIdentifier": "com.animaxia.mobile",
+      "supportsTablet": false,
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"]
+      }
+    },
+    "android": {
+      "package": "com.animaxia.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./app/assets/adaptive-icon.png",
+        "backgroundColor": "#0a0a10"
+      },
+      "permissions": ["INTERNET", "VIBRATE", "POST_NOTIFICATIONS"]
+    },
+    "plugins": [
+      "expo-av",
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        { "mediaTypes": ["images"] }
+      ],
+      [
+        "expo-notifications",
+        { "color": "#f43f5e" }
+      ]
+    ],
+    "extra": {
+      "comment": "EXPO_PUBLIC_API_URL (from .env or EAS build env) is the single source for the API base URL — see app/api/config.ts",
+      "eas": {
+        "projectId": ""
+      }
+    }
+  }
+}

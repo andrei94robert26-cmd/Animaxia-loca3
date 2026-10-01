@@ -190,7 +190,7 @@ export async function auditLog({ userid = null, action, ip = null, meta = {} } =
   if (!action) return;
   try {
     await rows(
-      `INSERT INTO auditlogs (userid, action, ip, meta) VALUES ($1, $2, $3, $4::jsonb)`,
+      `INSERT INTO auditlogs (userid, action, ip, meta) VALUES ($1, $2, $3, $4)`,
       [userid, String(action).slice(0, 120), ip ? String(ip).slice(0, 64) : null, jsonb(meta)],
     );
   } catch (err) {
@@ -203,7 +203,7 @@ export async function auditLog({ userid = null, action, ip = null, meta = {} } =
 export const securityRouter = express.Router();
 
 securityRouter.get('/status', async (req, res) => {
-  const total = await one(`SELECT COUNT(*)::int AS count FROM auditlogs`);
+  const total = await one(`SELECT COUNT(*) AS count FROM auditlogs`);
   res.json({
     bruteForce: bruteForce.stats(),
     buckets: rateLimitBucketsStats(),
@@ -227,8 +227,8 @@ securityRouter.get('/audit', async (req, res) => {
   );
   const totalRow = await one(
     action
-      ? `SELECT COUNT(*)::int AS count FROM auditlogs WHERE action = $1`
-      : `SELECT COUNT(*)::int AS count FROM auditlogs`,
+      ? `SELECT COUNT(*) AS count FROM auditlogs WHERE action = $1`
+      : `SELECT COUNT(*) AS count FROM auditlogs`,
     action ? [action] : [],
   );
   res.json({

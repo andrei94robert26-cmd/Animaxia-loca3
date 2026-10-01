@@ -1,0 +1,12 @@
+{
+  "name": "animaxia-sharding",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FAZA 13 — Animaxia Sharding & Multi-Node: shard model (FNV-1a hash + 1B-id catalog ranges), per-shard Neon branch pool registry, search + vector clusters, shard-aware edge gateway, per-shard ops and the live sharding smoke suite.",
+  "type": "module",
+  "scripts": {
+    "test": "bun tests/smoke-sharding.mjs",
+    "test:edge": "cd ../animaxia-edge && bun run test",
+    "test:ops": "cd ../animaxia-ops && bun run ops:synthetics"
+  }
+}

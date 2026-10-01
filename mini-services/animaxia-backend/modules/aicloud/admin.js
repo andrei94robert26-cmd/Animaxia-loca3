@@ -20,7 +20,7 @@ import { rows } from '../platform/sql.js';
 /** Total persisted aiusagelogs rows (Neon) — null on the local driver. */
 async function persistedCount() {
   try {
-    const result = await rows(`SELECT COUNT(*)::int AS count FROM aiusagelogs`);
+    const result = await rows(`SELECT COUNT(*) AS count FROM aiusagelogs`);
     return result[0]?.count ?? null;
   } catch {
     return null;

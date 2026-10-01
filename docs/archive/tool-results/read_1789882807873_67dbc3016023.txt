@@ -1,0 +1,804 @@
+     1→/**
+     2→ * miner.js — Full metadata/stream miner: fetches a URL (SSRF-safe, redirect-aware,
+     3→ * byte-capped, streamed), extracts title/description/thumbnail plus playable sources
+     4→ * (mp4 / m3u8 / iframe / youtube) via regex + JSON-LD, then UPSERTs into the DB
+     5→ * with merge semantics. Also short-circuits direct .mp4/.m3u8 media URLs.
+     6→ */
+     7→
+     8→import dns from 'node:dns/promises';
+     9→import http2 from 'node:http2';
+    10→import net from 'node:net';
+    11→import zlib from 'node:zlib';
+    12→import { db } from './db.js';
+    13→import { logger } from './utils/logger.js';
+    14→
+    15→const MINER_TIMEOUT_MS = parseInt(process.env.MINERTIMEOUTMS || '15000', 10);
+    16→const MINER_MAX_HTML_BYTES = parseInt(process.env.MINERMAXHTML_BYTES || '5000000', 10);
+    17→const ALLOW_PRIVATE_NETWORK = process.env.MINERALLOWPRIVATE_NETWORK === 'true';
+    18→const MAX_REDIRECTS = 4;
+    19→const ALLOWED_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'application/json', 'text/plain'];
+    20→// Lowercase keys so the same header set works for both fetch() and node:http2.
+    21→const MINER_HEADERS = {
+    22→  'user-agent':
+    23→    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 AnimaxiaMiner/1.0',
+    24→  accept: 'text/html,application/xhtml+xml,application/json',
+    25→  'accept-language': 'en-US,en;q=0.9',
+    26→};
+    27→const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+    28→const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    29→
+    30→/** Miner failure with an HTTP-ish status for the API layer. */
+    31→export class MinerError extends Error {
+    32→  constructor(message, status = 502) {
+    33→    super(message);
+    34→    this.name = 'MinerError';
+    35→    this.status = status;
+    36→  }
+    37→}
+    38→
+    39→/* ----------------------------- text helpers ----------------------------- */
+    40→
+    41→const NAMED_ENTITIES = {
+    42→  amp: '&',
+    43→  quot: '"',
+    44→  apos: "'",
+    45→  lt: '<',
+    46→  gt: '>',
+    47→  nbsp: ' ',
+    48→  '#39': "'",
+    49→  '#x27': "'",
+    50→};
+    51→
+    52→function safeCodePoint(code) {
+    53→  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return '';
+    54→  try {
+    55→    return String.fromCodePoint(code);
+    56→  } catch {
+    57→    return '';
+    58→  }
+    59→}
+    60→
+    61→function decodeEntities(str) {
+    62→  if (!str) return '';
+    63→  return String(str)
+    64→    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeCodePoint(parseInt(hex, 16)))
+    65→    .replace(/&#(\d+);/g, (_, dec) => safeCodePoint(parseInt(dec, 10)))
+    66→    .replace(/&([a-z#0-9]+);/gi, (m, name) => NAMED_ENTITIES[name.toLowerCase()] ?? m);
+    67→}
+    68→
+    69→function stripTags(str) {
+    70→  if (!str) return '';
+    71→  return decodeEntities(String(str).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+    72→}
+    73→
+    74→function clamp(str, max) {
+    75→  const s = String(str ?? '');
+    76→  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+    77→}
+    78→
+    79→function escapeRegex(str) {
+    80→  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    81→}
+    82→
+    83→function toAbsolute(url, base) {
+    84→  if (!url) return '';
+    85→  try {
+    86→    if (url.startsWith('//')) return `https:${url}`;
+    87→    return new URL(url, base).toString();
+    88→  } catch {
+    89→    return url;
+    90→  }
+    91→}
+    92→
+    93→function dedupeCap(items, cap) {
+    94→  const seen = new Set();
+    95→  const out = [];
+    96→  for (const item of items) {
+    97→    if (!item) continue;
+    98→    if (seen.has(item)) continue;
+    99→    seen.add(item);
+   100→    out.push(item);
+   101→    if (out.length >= cap) break;
+   102→  }
+   103→  return out;
+   104→}
+   105→
+   106→/* ------------------------------ SSRF guards ----------------------------- */
+   107→
+   108→function ipv4IsPrivate(ip) {
+   109→  const parts = ip.split('.').map((p) => parseInt(p, 10));
+   110→  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
+   111→  const [a, b] = parts;
+   112→  if (a === 0) return true; // 0.0.0.0/8
+   113→  if (a === 10) return true; // 10.0.0.0/8
+   114→  if (a === 127) return true; // 127.0.0.0/8 (loopback)
+   115→  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local + cloud metadata
+   116→  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+   117→  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+   118→  return false;
+   119→}
+   120→
+   121→function ipv6IsPrivate(ip) {
+   122→  let addr = String(ip).toLowerCase();
+   123→  if (addr.includes('%')) addr = addr.split('%')[0];
+   124→  const v4mapped = addr.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+   125→  if (v4mapped) return ipv4IsPrivate(v4mapped[1]);
+   126→  const sections = addr.split('::');
+   127→  if (sections.length > 2) return true;
+   128→  const head = sections[0] ? sections[0].split(':').filter(Boolean) : [];
+   129→  const tail = sections.length === 2 && sections[1] ? sections[1].split(':').filter(Boolean) : [];
+   130→  const groups = [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail].map((g) =>
+   131→    parseInt(g, 16) || 0,
+   132→  );
+   133→  if (groups.length !== 8) return true;
+   134→  const allZero = groups.every((g) => g === 0);
+   135→  if (allZero) return true; // ::
+   136→  const onlyLast = groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0);
+   137→  if (onlyLast) return true; // ::1 loopback
+   138→  if ((groups[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+   139→  if ((groups[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+   140→  return false;
+   141→}
+   142→
+   143→function ipIsPrivate(ip) {
+   144→  const version = net.isIP(ip);
+   145→  if (version === 4) return ipv4IsPrivate(ip);
+   146→  if (version === 6) return ipv6IsPrivate(ip);
+   147→  return true;
+   148→}
+   149→
+   150→function assertHttpUrl(rawUrl) {
+   151→  let parsed;
+   152→  try {
+   153→    parsed = new URL(String(rawUrl));
+   154→  } catch {
+   155→    throw new MinerError(`Invalid URL: ${rawUrl}`, 400);
+   156→  }
+   157→  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+   158→    throw new MinerError(`Unsupported protocol: ${parsed.protocol} (only http/https allowed)`, 400);
+   159→  }
+   160→  return parsed;
+   161→}
+   162→
+   163→async function assertPublicHost(hostname) {
+   164→  const host = String(hostname).toLowerCase().replace(/^\[|\]$/g, '');
+   165→  if (host === 'localhost' || host.endsWith('.localhost')) {
+   166→    throw new MinerError(`Blocked hostname for security reasons: ${host}`, 403);
+   167→  }
+   168→  if (net.isIP(host)) {
+   169→    if (ipIsPrivate(host)) {
+   170→      throw new MinerError(`Blocked private/link-local IP for security reasons: ${host}`, 403);
+   171→    }
+   172→    return;
+   173→  }
+   174→  let addresses;
+   175→  try {
+   176→    addresses = await dns.lookup(host, { all: true });
+   177→  } catch (err) {
+   178→    throw new MinerError(`DNS lookup failed for ${host}: ${err.message}`, 502);
+   179→  }
+   180→  if (!addresses.length) {
+   181→    throw new MinerError(`DNS returned no addresses for ${host}`, 502);
+   182→  }
+   183→  for (const { address } of addresses) {
+   184→    if (ipIsPrivate(address)) {
+   185→      throw new MinerError(`Blocked private DNS resolution for ${host} (${address})`, 403);
+   186→    }
+   187→  }
+   188→}
+   189→
+   190→async function assertSafeUrl(rawUrl) {
+   191→  const parsed = assertHttpUrl(rawUrl);
+   192→  if (!ALLOW_PRIVATE_NETWORK) {
+   193→    await assertPublicHost(parsed.hostname);
+   194→  }
+   195→  return parsed;
+   196→}
+   197→
+   198→/* ------------------------------ HTML fetch ------------------------------ */
+   199→
+   200→/**
+   201→ * HTTP/2 GET via node:http2 — needed because some CDNs (e.g. Wikimedia)
+   202→ * reject HTTP/1.1 traffic from datacenter IPs while serving HTTP/2 fine.
+   203→ * Works in both Node and Bun. Resolves { status, headers, body, bytes }.
+   204→ */
+   205→function http2Get(urlString, headers, { timeoutMs, maxBytes }) {
+   206→  return new Promise((resolve, reject) => {
+   207→    let settled = false;
+   208→    let session = null;
+   209→    let req = null;
+   210→    let timer = null;
+   211→
+   212→    const finish = (fn) => {
+   213→      if (settled) return;
+   214→      settled = true;
+   215→      if (timer) clearTimeout(timer);
+   216→      try {
+   217→        if (req) req.close(http2.constants.NGHTTP2_CANCEL);
+   218→      } catch {
+   219→        /* ignore */
+   220→      }
+   221→      try {
+   222→        if (session) session.destroy();
+   223→      } catch {
+   224→        /* ignore */
+   225→      }
+   226→      fn();
+   227→    };
+   228→
+   229→    let target;
+   230→    try {
+   231→      target = new URL(urlString);
+   232→    } catch (err) {
+   233→      reject(new MinerError(`Invalid URL: ${urlString}`, 400));
+   234→      return;
+   235→    }
+   236→
+   237→    try {
+   238→      session = http2.connect(target.origin);
+   239→    } catch (err) {
+   240→      reject(err);
+   241→      return;
+   242→    }
+   243→
+   244→    timer = setTimeout(
+   245→      () => finish(() => reject(new MinerError(`Request timed out after ${timeoutMs}ms`, 504))),
+   246→      timeoutMs,
+   247→    );
+   248→    if (typeof timer.unref === 'function') timer.unref();
+   249→
+   250→    session.on('error', (err) => finish(() => reject(err)));
+   251→
+   252→    try {
+   253→      req = session.request({
+   254→        ':method': 'GET',
+   255→        ':path': `${target.pathname}${target.search}`,
+   256→        ...headers,
+   257→      });
+   258→    } catch (err) {
+   259→      finish(() => reject(err));
+   260→      return;
+   261→    }
+   262→
+   263→    req.on('error', (err) => finish(() => reject(err)));
+   264→
+   265→    let responseHeaders = null;
+   266→    const rawChunks = [];
+   267→    let rawReceived = 0;
+   268→
+   269→    req.on('response', (h) => {
+   270→      responseHeaders = h;
+   271→    });
+   272→
+   273→    req.on('data', (chunk) => {
+   274→      if (settled) return;
+   275→      rawReceived += chunk.length;
+   276→      if (rawReceived > maxBytes * 5) {
+   277→        finish(() => reject(new MinerError(`Response exceeds maximum size of ${maxBytes} bytes`, 413)));
+   278→      } else {
+   279→        rawChunks.push(chunk);
+   280→      }
+   281→    });
+   282→
+   283→    req.on('end', () => {
+   284→      if (settled) return;
+   285→      const encoding = String(responseHeaders?.['content-encoding'] || '').toLowerCase();
+   286→      let body;
+   287→      try {
+   288→        const raw = Buffer.concat(rawChunks);
+   289→        if (encoding.includes('br')) body = zlib.brotliDecompressSync(raw);
+   290→        else if (encoding.includes('gzip')) body = zlib.gunzipSync(raw);
+   291→        else if (encoding.includes('deflate')) body = zlib.inflateSync(raw);
+   292→        else body = raw;
+   293→      } catch (err) {
+   294→        finish(() => reject(new MinerError(`Failed to decompress response (${encoding}): ${err.message}`, 502)));
+   295→        return;
+   296→      }
+   297→      if (body.length > maxBytes) {
+   298→        finish(() => reject(new MinerError(`Response exceeds maximum size of ${maxBytes} bytes`, 413)));
+   299→        return;
+   300→      }
+   301→      const flatHeaders = {};
+   302→      for (const [key, value] of Object.entries(responseHeaders || {})) {
+   303→        if (!key.startsWith(':')) flatHeaders[key] = Array.isArray(value) ? value.join(', ') : String(value);
+   304→      }
+   305→      const status = Number(responseHeaders?.[':status']) || 0;
+   306→      finish(() => resolve({ status, headers: flatHeaders, body, bytes: body.length }));
+   307→    });
+   308→
+   309→    req.end();
+   310→  });
+   311→}
+   312→
+   313→/** HTTP/1.1 GET via fetch() with a streamed byte cap. Resolves { status, headers, body, bytes }. */
+   314→async function fetchHop(urlString) {
+   315→  let res;
+   316→  try {
+   317→    res = await fetch(urlString, {
+   318→      redirect: 'manual',
+   319→      headers: MINER_HEADERS,
+   320→      signal: AbortSignal.timeout(MINER_TIMEOUT_MS),
+   321→    });
+   322→  } catch (err) {
+   323→    throw new MinerError(`Fetch failed for ${urlString}: ${err.message || err.name}`, 502);
+   324→  }
+   325→
+   326→  const headers = {};
+   327→  res.headers.forEach((value, key) => {
+   328→    headers[key] = value;
+   329→  });
+   330→
+   331→  if (REDIRECT_STATUSES.includes(res.status) || !res.ok) {
+   332→    try {
+   333→      await res.body?.cancel();
+   334→    } catch {
+   335→      /* ignore */
+   336→    }
+   337→    return { status: res.status, headers, body: Buffer.alloc(0), bytes: 0 };
+   338→  }
+   339→
+   340→  const reader = res.body.getReader();
+   341→  const chunks = [];
+   342→  let received = 0;
+   343→  for (;;) {
+   344→    const { done, value } = await reader.read();
+   345→    if (done) break;
+   346→    received += value.byteLength;
+   347→    if (received > MINER_MAX_HTML_BYTES) {
+   348→      await reader.cancel().catch(() => {});
+   349→      throw new MinerError(`Response exceeds maximum size of ${MINER_MAX_HTML_BYTES} bytes`, 413);
+   350→    }
+   351→    chunks.push(Buffer.from(value));
+   352→  }
+   353→  return { status: res.status, headers, body: Buffer.concat(chunks), bytes: received };
+   354→}
+   355→
+   356→/** One request hop: HTTP/2 first for https (with HTTP/1.1 fallback), fetch for http. */
+   357→async function requestHop(urlString) {
+   358→  if (urlString.startsWith('https:')) {
+   359→    try {
+   360→      return await http2Get(urlString, MINER_HEADERS, {
+   361→        timeoutMs: MINER_TIMEOUT_MS,
+   362→        maxBytes: MINER_MAX_HTML_BYTES,
+   363→      });
+   364→    } catch (err) {
+   365→      if (err instanceof MinerError) throw err;
+   366→      logger.debug(`[miner] HTTP/2 hop failed for ${urlString} (${err.message}) — falling back to HTTP/1.1`);
+   367→    }
+   368→  }
+   369→  return fetchHop(urlString);
+   370→}
+   371→
+   372→/** Fetch a URL following up to 4 redirects, re-validating SSRF on every hop. */
+   373→async function fetchWithRedirects(startUrl) {
+   374→  let current = startUrl;
+   375→  for (let hopIndex = 0; hopIndex <= MAX_REDIRECTS; hopIndex += 1) {
+   376→    await assertSafeUrl(current);
+   377→    let hop = await requestHop(current);
+   378→    // One retry on transient upstream throttling (observed on YouTube from datacenter IPs).
+   379→    if (hop.status === 429 || hop.status >= 502) {
+   380→      await sleep(800);
+   381→      hop = await requestHop(current);
+   382→    }
+   383→    const { status, headers, body, bytes } = hop;
+   384→
+   385→    if (REDIRECT_STATUSES.includes(status)) {
+   386→      const location = headers.location;
+   387→      if (!location) throw new MinerError(`Redirect without Location header from ${current}`, 502);
+   388→      if (hopIndex === MAX_REDIRECTS) throw new MinerError('Too many redirects (max 4)', 502);
+   389→      current = new URL(location, current).toString();
+   390→      continue;
+   391→    }
+   392→
+   393→    if (status >= 400) {
+   394→      throw new MinerError(
+   395→        `Upstream responded ${status}`,
+   396→        status >= 400 ? status : 502,
+   397→      );
+   398→    }
+   399→
+   400→    const contentType = String(headers['content-type'] || '').toLowerCase();
+   401→    if (!ALLOWED_CONTENT_TYPES.some((t) => contentType.includes(t))) {
+   402→      throw new MinerError(`Unsupported content type: ${contentType || 'unknown'}`, 415);
+   403→    }
+   404→
+   405→    return { body: body.toString('utf8'), finalUrl: current, contentType, bytesRead: bytes };
+   406→  }
+   407→  throw new MinerError('Too many redirects (max 4)', 502);
+   408→}
+   409→
+   410→/* ------------------------------ extraction ------------------------------ */
+   411→
+   412→function metaContent(html, keys) {
+   413→  for (const key of keys) {
+   414→    const re = new RegExp(
+   415→      `<meta[^>]*?(?:property|name|itemprop)\\s*=\\s*["']${escapeRegex(key)}["'][^>]*?>`,
+   416→      'gi',
+   417→    );
+   418→    let m;
+   419→    while ((m = re.exec(html)) !== null) {
+   420→      const tag = m[0];
+   421→      const c = tag.match(/\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+   422→      const value = c ? (c[1] ?? c[2] ?? '') : '';
+   423→      if (value && value.trim()) return decodeEntities(value).trim();
+   424→    }
+   425→  }
+   426→  return '';
+   427→}
+   428→
+   429→function linkHref(html, rels) {
+   430→  for (const rel of rels) {
+   431→    const re = new RegExp(`<link[^>]*?rel\\s*=\\s*["']${escapeRegex(rel)}["'][^>]*?>`, 'gi');
+   432→    let m;
+   433→    while ((m = re.exec(html)) !== null) {
+   434→      const href = m[0].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+   435→      const value = href ? (href[1] ?? href[2] ?? '') : '';
+   436→      if (value && value.trim()) return decodeEntities(value).trim();
+   437→    }
+   438→  }
+   439→  return '';
+   440→}
+   441→
+   442→function extractJsonLdBlocks(html) {
+   443→  const blocks = [];
+   444→  const re = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+   445→  let m;
+   446→  while ((m = re.exec(html)) !== null) {
+   447→    try {
+   448→      blocks.push(JSON.parse(m[1].trim()));
+   449→    } catch {
+   450→      /* malformed JSON-LD — skip */
+   451→    }
+   452→  }
+   453→  return blocks;
+   454→}
+   455→
+   456→function deepFindKey(node, key) {
+   457→  if (node === null || typeof node !== 'object') return null;
+   458→  if (Array.isArray(node)) {
+   459→    for (const item of node) {
+   460→      const found = deepFindKey(item, key);
+   461→      if (found) return found;
+   462→    }
+   463→    return null;
+   464→  }
+   465→  if (typeof node[key] === 'string' && node[key].trim()) return node[key];
+   466→  for (const value of Object.values(node)) {
+   467→    if (value && typeof value === 'object') {
+   468→      const found = deepFindKey(value, key);
+   469→      if (found) return found;
+   470→    }
+   471→  }
+   472→  return null;
+   473→}
+   474→
+   475→function jsonLdValue(html, key) {
+   476→  for (const block of extractJsonLdBlocks(html)) {
+   477→    const found = deepFindKey(block, key);
+   478→    if (found) return found;
+   479→  }
+   480→  return '';
+   481→}
+   482→
+   483→function collectMediaUrls(html, ext) {
+   484→  const urls = [];
+   485→
+   486→  // <video src> / <source src> values ending in .{ext}
+   487→  const srcRe = new RegExp(`<(?:video|source|audio)[^>]*\\bsrc\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'gi');
+   488→  let m;
+   489→  while ((m = srcRe.exec(html)) !== null) {
+   490→    const value = decodeEntities(m[1] ?? m[2] ?? '');
+   491→    if (value.toLowerCase().includes(`.${ext}`)) urls.push(value);
+   492→  }
+   493→
+   494→  // Absolute + protocol-relative URLs anywhere in the document
+   495→  const absRe = new RegExp(`(?:https?:)?\\/\\/[^\\s"'<>\\\\]+\\.${ext}(?:\\?[^\\s"'<>\\\\]*)?`, 'gi');
+   496→  while ((m = absRe.exec(html)) !== null) {
+   497→    const value = m[0];
+   498→    urls.push(value.startsWith('//') ? `https:${value}` : value);
+   499→  }
+   500→
+   501→  // JSON-ish patterns: "file":"https://….{ext}"
+   502→  const jsonRe = new RegExp(`"(?:file|src|url|source|stream)"\\s*:\\s*"([^"]*\\.${ext}[^"]*)"`, 'gi');
+   503→  while ((m = jsonRe.exec(html)) !== null) {
+   504→    urls.push(m[1].replace(/\\\//g, '/').replace(/\\u002F/gi, '/'));
+   505→  }
+   506→
+   507→  return urls;
+   508→}
+   509→
+   510→function collectIframes(html) {
+   511→  const urls = [];
+   512→  const re = /<iframe[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')/gi;
+   513→  let m;
+   514→  while ((m = re.exec(html)) !== null) {
+   515→    const value = decodeEntities(m[1] ?? m[2] ?? '');
+   516→    if (/^(https?:)?\/\//i.test(value)) urls.push(value);
+   517→  }
+   518→  return urls;
+   519→}
+   520→
+   521→const YOUTUBE_ID_PATTERNS = [
+   522→  /youtube\.com\/embed\/([A-Za-z0-9_-]{6,15})/gi,
+   523→  /youtube\.com\/watch\?v=([A-Za-z0-9_-]{6,15})/gi,
+   524→  /youtu\.be\/([A-Za-z0-9_-]{6,15})/gi,
+   525→  /youtube\.com\/shorts\/([A-Za-z0-9_-]{6,15})/gi,
+   526→  /youtube-nocookie\.com\/embed\/([A-Za-z0-9_-]{6,15})/gi,
+   527→];
+   528→
+   529→function collectYouTubeIds(...texts) {
+   530→  const ids = [];
+   531→  const haystack = texts.filter(Boolean).join('\n');
+   532→  for (const pattern of YOUTUBE_ID_PATTERNS) {
+   533→    pattern.lastIndex = 0;
+   534→    let m;
+   535→    while ((m = pattern.exec(haystack)) !== null) {
+   536→      if (!ids.includes(m[1])) ids.push(m[1]);
+   537→      if (ids.length >= 5) break;
+   538→    }
+   539→  }
+   540→  return ids;
+   541→}
+   542→
+   543→function filenameToTitle(pathname) {
+   544→  const base = pathname.split('/').filter(Boolean).pop() || 'untitled';
+   545→  let name = base;
+   546→  try {
+   547→    name = decodeURIComponent(base);
+   548→  } catch {
+   549→    /* keep raw */
+   550→  }
+   551→  return name.replace(/\.(mp4|m3u8)$/i, '') || 'untitled';
+   552→}
+   553→
+   554→function extractFromHtml(html, finalUrl, sourceUrl, contentType, bytesRead, startedAt) {
+   555→  const youtubeIds = collectYouTubeIds(html, sourceUrl, finalUrl);
+   556→
+   557→  let title = metaContent(html, ['og:title', 'twitter:title']);
+   558→  if (!title) {
+   559→    const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+   560→    if (t) title = stripTags(t[1]);
+   561→  }
+   562→  if (!title) {
+   563→    const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+   564→    if (h1) title = stripTags(h1[1]);
+   565→  }
+   566→  if (!title) title = stripTags(jsonLdValue(html, 'name'));
+   567→  if (youtubeIds.length > 0 && (!title || /^[\s|–—-]*(?:YouTube)?[\s|–—-]*$/i.test(title))) {
+   568→    // Degenerate title (e.g. consent-gated page showing “- YouTube”) — use the video id.
+   569→    title = `YouTube video ${youtubeIds[0]}`;
+   570→  }
+   571→  let hostname = 'untitled';
+   572→  try {
+   573→    hostname = new URL(finalUrl).hostname.replace(/^www\./, '');
+   574→  } catch {
+   575→    /* keep fallback */
+   576→  }
+   577→  if (!title) title = hostname;
+   578→
+   579→  let description = metaContent(html, ['og:description', 'description', 'twitter:description']);
+   580→  if (!description) description = jsonLdValue(html, 'description');
+   581→  description = clamp(stripTags(description), 2000);
+   582→
+   583→  let thumbnail = metaContent(html, ['og:image', 'og:image:secure_url', 'twitter:image']);
+   584→  if (!thumbnail) thumbnail = linkHref(html, ['image_src']);
+   585→  if (!thumbnail) {
+   586→    const img = html.match(/<img[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')/i);
+   587→    if (img) thumbnail = decodeEntities(img[1] ?? img[2] ?? '');
+   588→  }
+   589→  if (!thumbnail && youtubeIds.length > 0) {
+   590→    thumbnail = `https://i.ytimg.com/vi/${youtubeIds[0]}/hqdefault.jpg`;
+   591→  }
+   592→  thumbnail = toAbsolute(thumbnail, finalUrl);
+   593→
+   594→  const siteName = metaContent(html, ['og:site_name']);
+   595→
+   596→  const mp4 = dedupeCap(
+   597→    collectMediaUrls(html, 'mp4').map((u) => toAbsolute(u, finalUrl)),
+   598→    12,
+   599→  );
+   600→  const m3u8 = dedupeCap(
+   601→    collectMediaUrls(html, 'm3u8').map((u) => toAbsolute(u, finalUrl)),
+   602→    12,
+   603→  );
+   604→  const iframe = dedupeCap(
+   605→    collectIframes(html).map((u) => toAbsolute(u, finalUrl)),
+   606→    8,
+   607→  );
+   608→  const youtube = youtubeIds.slice(0, 5).map((id) => `https://www.youtube.com/embed/${id}`);
+   609→
+   610→  return {
+   611→    title,
+   612→    description,
+   613→    thumbnail,
+   614→    siteName: siteName || hostname,
+   615→    mp4,
+   616→    m3u8,
+   617→    iframe,
+   618→    youtube,
+   619→    contentType,
+   620→    finalUrl,
+   621→    bytesRead,
+   622→    elapsedMs: Date.now() - startedAt,
+   623→  };
+   624→}
+   625→
+   626→/* ------------------------------ upsert/merge ----------------------------- */
+   627→
+   628→function buildSources(extraction) {
+   629→  return [
+   630→    ...extraction.mp4.map((url) => ({ type: 'mp4', url, label: 'MP4' })),
+   631→    ...extraction.m3u8.map((url) => ({ type: 'm3u8', url, label: 'HLS' })),
+   632→    ...extraction.iframe.map((url) => ({ type: 'iframe', url, label: 'Embed' })),
+   633→    ...extraction.youtube.map((url) => ({ type: 'youtube', url, label: 'YouTube' })),
+   634→  ];
+   635→}
+   636→
+   637→const YOUTUBE_HOSTS = new Set([
+   638→  'youtube.com',
+   639→  'www.youtube.com',
+   640→  'm.youtube.com',
+   641→  'music.youtube.com',
+   642→  'youtu.be',
+   643→  'www.youtu.be',
+   644→  'youtube-nocookie.com',
+   645→  'www.youtube-nocookie.com',
+   646→]);
+   647→
+   648→/** Return the YouTube video id when the given URL itself points at a YouTube host. */
+   649→function youtubeIdFromUrl(urlString) {
+   650→  try {
+   651→    const u = new URL(String(urlString));
+   652→    if (!YOUTUBE_HOSTS.has(u.hostname.toLowerCase())) return null;
+   653→  } catch {
+   654→    return null;
+   655→  }
+   656→  return collectYouTubeIds(urlString)[0] || null;
+   657→}
+   658→
+   659→/** URL-based extraction for throttled YouTube pages, enriched via oEmbed. */
+   660→async function degradedYouTubeExtraction(rawUrl, id, startedAt) {
+   661→  const watchUrl = `https://www.youtube.com/watch?v=${id}`;
+   662→  let title = `YouTube video ${id}`;
+   663→  let thumbnail = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+   664→  let authorName = '';
+   665→  try {
+   666→    const res = await fetch(
+   667→      `https://www.youtube.com/oembed?url=${encodeURIComponent(watchUrl)}&format=json`,
+   668→      {
+   669→        headers: { 'user-agent': MINER_HEADERS['user-agent'], accept: 'application/json' },
+   670→        signal: AbortSignal.timeout(6000),
+   671→      },
+   672→    );
+   673→    if (res.ok) {
+   674→      const data = await res.json();
+   675→      if (data.title) title = data.title;
+   676→      if (data.thumbnail_url) thumbnail = data.thumbnail_url;
+   677→      if (data.author_name) authorName = data.author_name;
+   678→    }
+   679→  } catch {
+   680→    /* keep defaults */
+   681→  }
+   682→  return {
+   683→    title,
+   684→    description: authorName ? `YouTube channel: ${authorName}` : '',
+   685→    thumbnail,
+   686→    siteName: 'youtube.com',
+   687→    mp4: [],
+   688→    m3u8: [],
+   689→    iframe: [],
+   690→    youtube: [`https://www.youtube.com/embed/${id}`],
+   691→    contentType: 'youtube-url',
+   692→    finalUrl: watchUrl,
+   693→    bytesRead: 0,
+   694→    elapsedMs: Date.now() - startedAt,
+   695→  };
+   696→}
+   697→
+   698→/**
+   699→ * Mine a URL for metadata + playable sources and UPSERT the result into the DB.
+   700→ * @param {string} rawUrl - the URL to mine (http/https).
+   701→ * @param {{ type?: string, externalId?: string }} [options]
+   702→ * @returns {Promise<{ extraction: object, record: object }>}
+   703→ */
+   704→export async function mineUrl(rawUrl, { type, externalId } = {}) {
+   705→  if (!rawUrl || typeof rawUrl !== 'string') {
+   706→    throw new MinerError('A url is required', 400);
+   707→  }
+   708→  const startedAt = Date.now();
+   709→  const parsed = await assertSafeUrl(rawUrl);
+   710→
+   711→  const pathname = parsed.pathname.toLowerCase();
+   712→  let extraction;
+   713→
+   714→  if (pathname.endsWith('.mp4') || pathname.endsWith('.m3u8')) {
+   715→    // Direct media shortcut — no HTML fetch needed.
+   716→    const isMp4 = pathname.endsWith('.mp4');
+   717→    extraction = {
+   718→      title: filenameToTitle(parsed.pathname),
+   719→      description: '',
+   720→      thumbnail: '',
+   721→      siteName: parsed.hostname.replace(/^www\./, ''),
+   722→      mp4: isMp4 ? [parsed.toString()] : [],
+   723→      m3u8: isMp4 ? [] : [parsed.toString()],
+   724→      iframe: [],
+   725→      youtube: [],
+   726→      contentType: 'direct-media',
+   727→      finalUrl: parsed.toString(),
+   728→      bytesRead: 0,
+   729→      elapsedMs: Date.now() - startedAt,
+   730→    };
+   731→  } else {
+   732→    try {
+   733→      const { body, finalUrl, contentType, bytesRead } = await fetchWithRedirects(parsed.toString());
+   734→      extraction = extractFromHtml(body, finalUrl, rawUrl, contentType, bytesRead, startedAt);
+   735→    } catch (err) {
+   736→      // YouTube watch pages are frequently throttled (429) from datacenter IPs.
+   737→      // The video id is in the source URL itself, so fall back to a URL-based
+   738→      // extraction enriched via the oEmbed endpoint instead of failing outright.
+   739→      const ytId = youtubeIdFromUrl(rawUrl);
+   740→      if (!ytId) throw err;
+   741→      logger.warn(`[miner] HTML fetch failed for ${rawUrl} (${err.message}) — using YouTube URL-based fallback`);
+   742→      extraction = await degradedYouTubeExtraction(rawUrl, ytId, startedAt);
+   743→    }
+   744→  }
+   745→
+   746→  const builtSources = buildSources(extraction);
+   747→  const externalid = externalId || extraction.finalUrl || rawUrl;
+   748→  const existing = await db.getContentByExternalId(externalid);
+   749→
+   750→  let record;
+   751→  if (existing) {
+   752→    const newMetadata = {};
+   753→    if (extraction.description) {
+   754→      newMetadata.description = extraction.description;
+   755→      newMetadata.overview = extraction.description;
+   756→    }
+   757→    const mergedMetadata = {
+   758→      ...existing.metadata,
+   759→      ...newMetadata,
+   760→      mined: {
+   761→        at: new Date().toISOString(),
+   762→        url: extraction.finalUrl,
+   763→        siteName: extraction.siteName,
+   764→        mp4: extraction.mp4,
+   765→        m3u8: extraction.m3u8,
+   766→        iframe: extraction.iframe,
+   767→        youtube: extraction.youtube,
+   768→      },
+   769→      player: {
+   770→        sources: builtSources.length > 0 ? builtSources : existing.metadata?.player?.sources || [],
+   771→      },
+   772→    };
+   773→    const upserted = await db.upsertContent({
+   774→      externalid,
+   775→      type: type || existing.type,
+   776→      title: extraction.title || existing.title,
+   777→      thumbnail: extraction.thumbnail || existing.thumbnail,
+   778→      metadata: mergedMetadata,
+   779→    });
+   780→    record = upserted.record;
+   781→  } else {
+   782→    const metadata = {
+   783→      description: extraction.description,
+   784→      overview: extraction.description,
+   785→      siteName: extraction.siteName,
+   786→      player: { sources: builtSources },
+   787→    };
+   788→    const upserted = await db.upsertContent({
+   789→      externalid,
+   790→      type: type || 'mined',
+   791→      title: extraction.title,
+   792→      thumbnail: extraction.thumbnail,
+   793→      metadata,
+   794→    });
+   795→    record = upserted.record;
+   796→  }
+   797→
+   798→  logger.info(
+   799→    `[miner] Mined ${extraction.finalUrl} → "${extraction.title}" (mp4:${extraction.mp4.length} m3u8:${extraction.m3u8.length} iframe:${extraction.iframe.length} youtube:${extraction.youtube.length}) in ${extraction.elapsedMs}ms`,
+   800→  );
+   801→
+   802→  return { extraction, record };
+   803→}
+   804→

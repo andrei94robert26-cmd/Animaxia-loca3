@@ -1,0 +1,159 @@
+/* FeedList.module.css — scoped styles for the global social activity feed. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ------------------------------ activity rows ------------------------------- */
+
+.item {
+  background: var(--card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  animation: feed-in 0.18s ease;
+}
+
+@keyframes feed-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.topRow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.topText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.headLine {
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.username {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.verb {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.contentInline {
+  color: var(--rose-soft);
+  font-weight: 700;
+}
+
+.time {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.typeIcon {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+/* content reference chip */
+.contentChip {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  align-self: flex-start;
+  max-width: 100%;
+  background: var(--card-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 7px 12px 7px 7px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  font-family: var(--font);
+  transition: border-color 0.15s ease;
+}
+
+.contentChip:hover {
+  border-color: var(--rose-line);
+}
+
+.contentThumb {
+  width: 64px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--skeleton);
+}
+
+.contentThumbFallback {
+  width: 64px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: var(--rose-tint);
+  border: 1px solid var(--rose-line);
+  color: var(--rose-soft);
+}
+
+.contentChipText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.contentChipTitle {
+  font-size: 12.5px;
+  font-weight: 700;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contentChipType {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.preview {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* ------------------------------- list footer -------------------------------- */
+
+.endNote {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}

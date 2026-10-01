@@ -1,0 +1,947 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * party-room.tsx — Watch party room (#/social/party/:id). Synchronized player
+     5→ * (host drives playback via realtime `party:control`, members follow with a
+     6→ * 1.5s drift tolerance), live chat with typing indicators, member presence
+     7→ * and a REST fallback for chat when the socket is down. Reuses the
+     8→ * player-view rendering approach (mp4 / m3u8 via hls.js, embeds without sync).
+     9→ */
+    10→
+    11→import { useEffect, useRef, useState } from 'react';
+    12→import {
+    13→  ArrowLeft,
+    14→  Check,
+    15→  Copy,
+    16→  Crown,
+    17→  Loader2,
+    18→  LogIn,
+    19→  LogOut,
+    20→  MonitorPlay,
+    21→  RefreshCw,
+    22→  Send,
+    23→  Users,
+    24→  WifiOff,
+    25→} from 'lucide-react';
+    26→import { toast } from 'sonner';
+    27→import { api } from '@/lib/animaxia/api';
+    28→import {
+    29→  createSocialSocket,
+    30→  social,
+    31→  type ChatMessage,
+    32→  type PartyState,
+    33→  type SocketMemberRow,
+    34→} from '@/lib/animaxia/social';
+    35→import { useApi } from '@/lib/animaxia/hooks';
+    36→import { navigate } from '@/lib/animaxia/router';
+    37→import type { PlayerSource } from '@/lib/animaxia/types';
+    38→import { useAuth } from '@/components/animaxia/auth-provider';
+    39→import { Button } from '@/components/ui/button';
+    40→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    41→import { Input } from '@/components/ui/input';
+    42→import { Skeleton } from '@/components/ui/skeleton';
+    43→import { cn } from '@/lib/utils';
+    44→import { Container } from '../section';
+    45→import { EmptyState, ErrorState, TypeBadge } from '../states';
+    46→import { UserAvatar, timeAgo } from './social-ui';
+    47→import type { Socket } from 'socket.io-client';
+    48→
+    49→/* --------------------------------- helpers --------------------------------- */
+    50→
+    51→interface PartyStateEvent {
+    52→  partyId: number;
+    53→  title: string;
+    54→  hostid: number;
+    55→  state: PartyState;
+    56→  members: SocketMemberRow[];
+    57→  degraded: boolean;
+    58→}
+    59→
+    60→interface PartyControlEvent {
+    61→  partyId: number;
+    62→  action: 'play' | 'pause' | 'seek' | 'rate' | 'source';
+    63→  by: number;
+    64→  state: PartyState;
+    65→}
+    66→
+    67→interface PartyChatEvent {
+    68→  partyId: number;
+    69→  message: ChatMessage;
+    70→  persisted?: boolean;
+    71→}
+    72→
+    73→function isNotFound(message?: string | null): boolean {
+    74→  return Boolean(message && message.toLowerCase().includes('not found'));
+    75→}
+    76→
+    77→function formatCode(code: string | undefined, masked: boolean): string {
+    78→  if (!code) return '······';
+    79→  return masked ? '••••••' : code.toUpperCase();
+    80→}
+    81→
+    82→/* ---------------------------------- room ---------------------------------- */
+    83→
+    84→export function PartyRoom({ partyId }: { partyId: number }) {
+    85→  const { user } = useAuth();
+    86→  const validId = Number.isInteger(partyId) && partyId > 0;
+    87→
+    88→  const detail = useApi(`social-party-${partyId}`, () => social.partyDetail(partyId), { enabled: validId });
+    89→  const current = detail.data && detail.data.party.id === partyId ? detail.data : null;
+    90→
+    91→  const [ended, setEnded] = useState(false);
+    92→  const [members, setMembers] = useState<SocketMemberRow[]>([]);
+    93→  const [messages, setMessages] = useState<ChatMessage[]>([]);
+    94→  const [typingUser, setTypingUser] = useState<string | null>(null);
+    95→  const [socketConnected, setSocketConnected] = useState(false);
+    96→  const [lastPersisted, setLastPersisted] = useState<boolean | null>(null);
+    97→  const [leaving, setLeaving] = useState(false);
+    98→  const [copied, setCopied] = useState(false);
+    99→  const [chatInput, setChatInput] = useState('');
+   100→  const [lastState, setLastState] = useState<PartyState | null>(null);
+   101→
+   102→  const socketRef = useRef<Socket | null>(null);
+   103→  const videoRef = useRef<HTMLVideoElement>(null);
+   104→  const chatScrollRef = useRef<HTMLDivElement>(null);
+   105→  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   106→  const lastTypingEmitRef = useRef(0);
+   107→  const lastStateRef = useRef<PartyState | null>(null);
+   108→  const seededRef = useRef(false);
+   109→  const isHostRef = useRef(false);
+   110→
+   111→  const party = current?.party ?? null;
+   112→  const isHost = Boolean(user && party && party.host.id === user.id);
+   113→  const partyActive = Boolean(party && party.status === 'active') && !ended;
+   114→
+   115→  /* Player sources — same client and rendering rules as player-view (with a
+   116→     source switcher: the host's switch broadcasts a `source` control). */
+   117→  const contentId = party?.content.id ?? 0;
+   118→  const player = useApi(`party-player-${contentId}`, () => api.player(contentId), { enabled: contentId > 0 });
+   119→  const playerData = player.data && player.data.content.id === contentId ? player.data : null;
+   120→  const [sourceIndex, setSourceIndex] = useState(0);
+   121→  const sources = playerData?.sources ?? [];
+   122→  const source: PlayerSource | null =
+   123→    sources.length > 0 ? sources[Math.min(sourceIndex, sources.length - 1)] : null;
+   124→
+   125→  /* Reset the picked source when the underlying player payload changes. */
+   126→  useEffect(() => {
+   127→    setSourceIndex(0);
+   128→  }, [playerData]);
+   129→
+   130→  /* Sync isHost into a ref so socket handlers (registered once) stay fresh. */
+   131→  useEffect(() => {
+   132→    isHostRef.current = isHost;
+   133→  }, [isHost]);
+   134→
+   135→  /* Seed local state from the REST detail (members / messages / state). */
+   136→  useEffect(() => {
+   137→    if (!current) return;
+   138→    setMembers(current.members.map((m) => ({ userid: m.userid, username: m.username, avatar: m.avatar, online: false })));
+   139→    setMessages(current.messages ?? []);
+   140→    setLastState(current.state);
+   141→    lastStateRef.current = current.state;
+   142→    seededRef.current = false;
+   143→  }, [current]);
+   144→
+   145→  /* Apply a party state to the <video> element (seek + pause/play + rate). */
+   146→  function applyStateToVideo(state: PartyState): void {
+   147→    const v = videoRef.current;
+   148→    if (!v || !Number.isFinite(state.positionSec) || state.positionSec < 0) return;
+   149→    try {
+   150→      if (Math.abs(v.currentTime - state.positionSec) > 0.3 || v.readyState < 1) {
+   151→        v.currentTime = state.positionSec;
+   152→      }
+   153→    } catch {
+   154→      /* seeking before metadata is loaded — the loadedmetadata seed retries */
+   155→      return;
+   156→    }
+   157→    if (Number.isFinite(state.playbackRate) && state.playbackRate > 0) v.playbackRate = state.playbackRate;
+   158→    if (state.isPaused) v.pause();
+   159→    else v.play().catch(() => {});
+   160→  }
+   161→
+   162→  /* Seed the video position once the join ack (or REST state) arrives. */
+   163→  function seedFromState(state: PartyState): void {
+   164→    lastStateRef.current = state;
+   165→    setLastState(state);
+   166→    if (seededRef.current) return;
+   167→    seededRef.current = true;
+   168→    if (state.positionSec <= 0.5 && state.isPaused) return; // nothing to seed
+   169→    applyStateToVideo(state);
+   170→  }
+   171→
+   172→  /* Realtime socket — created for signed-in users while the party is active. */
+   173→  useEffect(() => {
+   174→    if (!user || !partyActive || !validId) return;
+   175→
+   176→    /* Idempotent REST join (also keeps membership when the socket degrades). */
+   177→    social.partyJoin(partyId).catch(() => {
+   178→      /* silent — the socket join below retries membership too */
+   179→    });
+   180→
+   181→    const socket = createSocialSocket();
+   182→    socketRef.current = socket;
+   183→
+   184→    /* The realtime service finishes its per-connection bootstrap (an async
+   185→       profile fetch) before it registers the `party:join` handler — a join
+   186→       emitted the instant `connect` fires can land too early and be dropped.
+   187→       Join is idempotent server-side, so: emit immediately, re-emit on `hello`
+   188→       (server sends it right after bootstrap) and retry until the join ack
+   189→       (`party:state`) arrives. */
+   190→    let joinTimer: ReturnType<typeof setTimeout> | null = null;
+   191→    let joinAttempts = 0;
+   192→    let stateAcked = false;
+   193→    const emitJoin = (): void => {
+   194→      socket.emit('party:join', { partyId });
+   195→      joinAttempts += 1;
+   196→      if (!stateAcked && joinAttempts < 6 && !joinTimer) {
+   197→        joinTimer = setTimeout(() => {
+   198→          joinTimer = null;
+   199→          if (!stateAcked) emitJoin();
+   200→        }, 1500);
+   201→      }
+   202→    };
+   203→
+   204→    socket.on('connect', () => {
+   205→      setSocketConnected(true);
+   206→      stateAcked = false;
+   207→      if (joinTimer) {
+   208→        clearTimeout(joinTimer);
+   209→        joinTimer = null;
+   210→      }
+   211→      joinAttempts = 0;
+   212→      emitJoin();
+   213→    });
+   214→    /* `hello` arrives after the server registered its handlers — a join sent
+   215→       here always reaches the listener (covers both first connect and any
+   216→       reconnect). */
+   217→    socket.on('hello', () => {
+   218→      if (!stateAcked) emitJoin();
+   219→    });
+   220→    socket.on('disconnect', () => setSocketConnected(false));
+   221→    socket.on('connect_error', () => setSocketConnected(false));
+   222→
+   223→    socket.on('party:state', (d: PartyStateEvent) => {
+   224→      if (d.partyId !== partyId) return;
+   225→      stateAcked = true;
+   226→      if (joinTimer) {
+   227→        clearTimeout(joinTimer);
+   228→        joinTimer = null;
+   229→      }
+   230→      setMembers(d.members ?? []);
+   231→      seedFromState(d.state);
+   232→      if (d.degraded) toast('Realtime service is in offline mode — messages may not be saved');
+   233→    });
+   234→
+   235→    socket.on('party:member-joined', (d: { partyId: number; user: SocketMemberRow }) => {
+   236→      if (d.partyId !== partyId) return;
+   237→      setMembers((prev) =>
+   238→        prev.some((m) => m.userid === d.user.userid)
+   239→          ? prev.map((m) => (m.userid === d.user.userid ? { ...m, online: true } : m))
+   240→          : [...prev, { ...d.user, online: true }],
+   241→      );
+   242→    });
+   243→
+   244→    socket.on('party:member-left', (d: { partyId: number; user: { userid: number } }) => {
+   245→      if (d.partyId !== partyId) return;
+   246→      setMembers((prev) => prev.filter((m) => m.userid !== d.user.userid));
+   247→    });
+   248→
+   249→    socket.on('party:control', (d: PartyControlEvent) => {
+   250→      if (d.partyId !== partyId) return;
+   251→      lastStateRef.current = d.state;
+   252→      setLastState(d.state);
+   253→      if (isHostRef.current) return; // the host drives — never loop back
+   254→      if (d.action === 'source' && Number.isInteger(d.state.sourceIndex) && d.state.sourceIndex >= 0) {
+   255→        setSourceIndex(d.state.sourceIndex);
+   256→      }
+   257→      const v = videoRef.current;
+   258→      if (!v) return;
+   259→      const drift = Number.isFinite(d.state.positionSec) ? Math.abs(v.currentTime - d.state.positionSec) : 0;
+   260→      if (d.action === 'seek' || d.action === 'source' || drift > 1.5) {
+   261→        try {
+   262→          v.currentTime = d.state.positionSec;
+   263→        } catch {
+   264→          /* not seekable yet */
+   265→        }
+   266→      }
+   267→      if (Number.isFinite(d.state.playbackRate) && d.state.playbackRate > 0 && d.state.playbackRate !== v.playbackRate) {
+   268→        v.playbackRate = d.state.playbackRate;
+   269→      }
+   270→      if (d.state.isPaused && !v.paused) v.pause();
+   271→      else if (!d.state.isPaused && v.paused) v.play().catch(() => {});
+   272→    });
+   273→
+   274→    socket.on('party:chat', (d: PartyChatEvent) => {
+   275→      if (d.partyId !== partyId) return;
+   276→      setLastPersisted(d.persisted !== false);
+   277→      setTypingUser((current) => (current === d.message.user.username ? null : current));
+   278→      setMessages((prev) => {
+   279→        if (d.message.id != null && prev.some((m) => m.id === d.message.id)) return prev;
+   280→        const next = [...prev, d.message];
+   281→        return next.length > 200 ? next.slice(next.length - 200) : next;
+   282→      });
+   283→    });
+   284→
+   285→    socket.on('party:typing', (d: { partyId: number; user: { userid: number; username: string } }) => {
+   286→      if (d.partyId !== partyId || !d.user) return;
+   287→      if (user && d.user.userid === user.id) return;
+   288→      setTypingUser(d.user.username);
+   289→      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+   290→      typingTimerRef.current = setTimeout(() => setTypingUser(null), 3000);
+   291→    });
+   292→
+   293→    socket.on('party:error', (d: { code: string; message: string }) => {
+   294→      if (d.code === 'ended') {
+   295→        setEnded(true);
+   296→        toast('This watch party has ended');
+   297→        return;
+   298→      }
+   299→      if (d.code === 'auth') return; // anon flow is handled by the sign-in prompt
+   300→      toast.error(d.message || 'Watch party error');
+   301→    });
+   302→
+   303→    return () => {
+   304→      if (joinTimer) clearTimeout(joinTimer);
+   305→      socket.removeAllListeners();
+   306→      socket.disconnect();
+   307→      socketRef.current = null;
+   308→      setSocketConnected(false);
+   309→    };
+   310→  }, [user?.id, partyId, partyActive, validId, user]);
+   311→  /* NOTE: `user` is listed for identity freshness (same id, refreshed profile);
+   312→     the effect only ever creates one socket at a time. */
+   313→
+   314→  /* Host: periodic state snapshot to the monolith (fire-and-forget, 10s). */
+   315→  useEffect(() => {
+   316→    if (!isHost || !partyActive) return;
+   317→    const timer = setInterval(() => {
+   318→      const v = videoRef.current;
+   319→      if (!v) return;
+   320→      social
+   321→        .partySync(partyId, {
+   322→          positionSec: v.currentTime,
+   323→          isPaused: v.paused,
+   324→          playbackRate: Number.isFinite(v.playbackRate) && v.playbackRate > 0 ? v.playbackRate : 1,
+   325→          sourceIndex,
+   326→          updatedAt: new Date().toISOString(),
+   327→        })
+   328→        .then((res) => {
+   329→          lastStateRef.current = res.state;
+   330→        })
+   331→        .catch(() => {});
+   332→    }, 10_000);
+   333→    return () => clearInterval(timer);
+   334→  }, [isHost, partyActive, partyId, sourceIndex]);
+   335→
+   336→  /* HLS (m3u8) sources — identical to player-view's dynamic hls.js attach. */
+   337→  useEffect(() => {
+   338→    const url = source?.url;
+   339→    const el = videoRef.current;
+   340→    if (source?.type !== 'm3u8' || !url || !el) return;
+   341→    let hls: { destroy: () => void } | null = null;
+   342→    let cancelled = false;
+   343→    (async () => {
+   344→      try {
+   345→        const mod = await import('hls.js');
+   346→        const Hls = mod.default;
+   347→        if (cancelled) return;
+   348→        if (Hls.isSupported()) {
+   349→          const instance = new Hls({ enableWorker: true });
+   350→          instance.loadSource(url);
+   351→          instance.attachMedia(el);
+   352→          hls = instance;
+   353→        } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+   354→          el.src = url;
+   355→        }
+   356→      } catch {
+   357→        /* hls failed to init */
+   358→      }
+   359→    })();
+   360→    return () => {
+   361→      cancelled = true;
+   362→      hls?.destroy();
+   363→    };
+   364→  }, [source?.type, source?.url]);
+   365→
+   366→  /* Auto-scroll chat to the newest message. */
+   367→  useEffect(() => {
+   368→    const el = chatScrollRef.current;
+   369→    if (el) el.scrollTop = el.scrollHeight;
+   370→  }, [messages.length, typingUser]);
+   371→
+   372→  /* Clear the typing timer on unmount. */
+   373→  useEffect(() => {
+   374→    return () => {
+   375→      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+   376→    };
+   377→  }, []);
+   378→
+   379→  /* ------------------------------ host controls ----------------------------- */
+   380→
+   381→  function emitControl(action: 'play' | 'pause' | 'seek' | 'rate' | 'source', overrideIndex?: number): void {
+   382→    const socket = socketRef.current;
+   383→    const v = videoRef.current;
+   384→    if (!socket || !isHost) return;
+   385→    socket.emit('party:control', {
+   386→      partyId,
+   387→      action,
+   388→      positionSec: v?.currentTime ?? 0,
+   389→      playbackRate: v?.playbackRate ?? 1,
+   390→      sourceIndex: overrideIndex ?? sourceIndex,
+   391→    });
+   392→  }
+   393→
+   394→  /** Host picks a different stream source — members follow via `source`. */
+   395→  function switchSource(nextIndex: number): void {
+   396→    setSourceIndex(nextIndex);
+   397→    if (isHost) emitControl('source', nextIndex);
+   398→  }
+   399→
+   400→  /* --------------------------------- actions -------------------------------- */
+   401→
+   402→  function sendChat(): void {
+   403→    const body = chatInput.trim();
+   404→    if (!body || !user) return;
+   405→    setChatInput('');
+   406→    const socket = socketRef.current;
+   407→    if (socket && socket.connected) {
+   408→      socket.emit('party:chat', { partyId, body });
+   409→      return;
+   410→    }
+   411→    /* REST fallback (socket down): optimistic append, replaced by the reply. */
+   412→    const temp: ChatMessage = {
+   413→      id: `tmp-${Date.now()}`,
+   414→      body,
+   415→      createdat: new Date().toISOString(),
+   416→      user: { id: user.id, username: user.username, avatar: user.avatar },
+   417→    };
+   418→    setMessages((prev) => [...prev, temp]);
+   419→    social
+   420→      .partySendMessage(partyId, body)
+   421→      .then((res) => {
+   422→        setLastPersisted(true);
+   423→        setMessages((prev) => prev.map((m) => (m.id === temp.id ? res.message : m)));
+   424→      })
+   425→      .catch((err) => {
+   426→        setMessages((prev) => prev.filter((m) => m.id !== temp.id));
+   427→        toast.error(err instanceof Error ? err.message : 'Could not send the message');
+   428→      });
+   429→  }
+   430→
+   431→  function handleChatInputChange(value: string): void {
+   432→    setChatInput(value);
+   433→    const socket = socketRef.current;
+   434→    const now = Date.now();
+   435→    if (socket && socket.connected && now - lastTypingEmitRef.current > 2000) {
+   436→      lastTypingEmitRef.current = now;
+   437→      socket.emit('party:typing', { partyId });
+   438→    }
+   439→  }
+   440→
+   441→  async function copyInviteCode(): Promise<void> {
+   442→    if (!party?.code) return;
+   443→    try {
+   444→      await navigator.clipboard.writeText(party.code);
+   445→      setCopied(true);
+   446→      toast.success('Invite code copied');
+   447→      setTimeout(() => setCopied(false), 1500);
+   448→    } catch {
+   449→      toast.error('Clipboard is not available in this browser');
+   450→    }
+   451→  }
+   452→
+   453→  async function leaveParty(): Promise<void> {
+   454→    if (leaving) return;
+   455→    setLeaving(true);
+   456→    try {
+   457→      socketRef.current?.emit('party:leave', { partyId });
+   458→      await social.partyLeave(partyId);
+   459→      if (isHost) toast('Watch party ended');
+   460→      else toast('Left the watch party');
+   461→    } catch (err) {
+   462→      toast.error(err instanceof Error ? err.message : 'Could not leave the party');
+   463→    } finally {
+   464→      navigate('/social');
+   465→    }
+   466→  }
+   467→
+   468→  /* -------------------------------- rendering ------------------------------- */
+   469→
+   470→  if (!validId) {
+   471→    return (
+   472→      <Container className="py-20">
+   473→        <EmptyState
+   474→          title="Watch party not found"
+   475→          message="The URL is missing a valid party id."
+   476→          action={
+   477→            <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/social')}>
+   478→              Back to Social
+   479→            </Button>
+   480→          }
+   481→        />
+   482→      </Container>
+   483→    );
+   484→  }
+   485→
+   486→  if (detail.loading && !current) {
+   487→    return (
+   488→      <Container className="py-8 sm:py-10">
+   489→        <div className="mx-auto w-full max-w-6xl space-y-5">
+   490→          <div className="flex items-center gap-3">
+   491→            <Skeleton className="h-9 w-9 rounded-lg" />
+   492→            <div className="flex-1 space-y-2">
+   493→              <Skeleton className="h-6 w-72 max-w-full" />
+   494→              <Skeleton className="h-4 w-44" />
+   495→            </div>
+   496→            <Skeleton className="h-9 w-24 rounded-lg" />
+   497→          </div>
+   498→          <Skeleton className="aspect-video w-full rounded-2xl" />
+   499→          <div className="grid gap-5 lg:grid-cols-3">
+   500→            <Skeleton className="h-40 rounded-2xl lg:col-span-2" />
+   501→            <Skeleton className="h-64 rounded-2xl" />
+   502→          </div>
+   503→        </div>
+   504→      </Container>
+   505→    );
+   506→  }
+   507→
+   508→  if (detail.error && !current) {
+   509→    if (isNotFound(detail.error)) {
+   510→      return (
+   511→        <Container className="py-20">
+   512→          <EmptyState
+   513→            title="Party ended or not found"
+   514→            message="This watch party is no longer active."
+   515→            action={
+   516→              <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/social')}>
+   517→                <ArrowLeft aria-hidden /> Back to Social
+   518→              </Button>
+   519→            }
+   520→          />
+   521→        </Container>
+   522→      );
+   523→    }
+   524→    return (
+   525→      <Container className="py-20">
+   526→        <ErrorState message={detail.error} onRetry={detail.refetch} />
+   527→      </Container>
+   528→    );
+   529→  }
+   530→
+   531→  if (!party) return null;
+   532→
+   533→  if (ended || party.status !== 'active') {
+   534→    return (
+   535→      <Container className="py-20">
+   536→        <EmptyState
+   537→          icon={<Users className="h-6 w-6" aria-hidden />}
+   538→          title="Party ended or not found"
+   539→          message="This watch party has ended. Start a new one from the Social hub — or join another live party."
+   540→          action={
+   541→            <div className="flex flex-wrap justify-center gap-2">
+   542→              <Button className="bg-rose-600 font-bold hover:bg-rose-500" onClick={() => navigate('/social')}>
+   543→                <ArrowLeft aria-hidden /> Back to Social
+   544→              </Button>
+   545→              <Button variant="outline" className="border-white/15 bg-white/5 hover:bg-white/10" onClick={() => navigate(`/content/${party.content.id}`)}>
+   546→                Open {party.content.title}
+   547→              </Button>
+   548→            </div>
+   549→          }
+   550→        />
+   551→      </Container>
+   552→    );
+   553→  }
+   554→
+   555→  const embedSource = source && (source.type === 'youtube' || source.type === 'iframe') ? source : null;
+   556→
+   557→  return (
+   558→    <Container className="space-y-5 py-6 sm:py-8">
+   559→      {/* Header */}
+   560→      <header className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 sm:p-5">
+   561→        <div className="flex flex-wrap items-start justify-between gap-3">
+   562→          <div className="flex min-w-0 items-start gap-3">
+   563→            <Button
+   564→              variant="outline"
+   565→              size="icon"
+   566→              aria-label="Back to Social"
+   567→              onClick={() => navigate('/social')}
+   568→              className="shrink-0 border-white/15 bg-white/5 hover:bg-white/10"
+   569→            >
+   570→              <ArrowLeft aria-hidden />
+   571→            </Button>
+   572→            <div className="min-w-0">
+   573→              <div className="flex flex-wrap items-center gap-2">
+   574→                <h1 className="min-w-0 truncate text-lg font-black tracking-tight text-white sm:text-xl">{party.title}</h1>
+   575→                <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-bold text-rose-300">
+   576→                  <span className="relative flex h-1.5 w-1.5">
+   577→                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
+   578→                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-rose-400" />
+   579→                  </span>
+   580→                  Live
+   581→                </span>
+   582→              </div>
+   583→              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+   584→                <span className="inline-flex items-center gap-1.5">
+   585→                  <Crown className="h-3.5 w-3.5 text-amber-400" aria-hidden />
+   586→                  Host <span className="font-semibold text-zinc-200">{party.host.username}</span>
+   587→                </span>
+   588→                <button
+   589→                  type="button"
+   590→                  onClick={() => navigate(`/content/${party.content.id}`)}
+   591→                  className="font-semibold text-rose-300 underline decoration-rose-500/40 underline-offset-2 transition hover:text-rose-200"
+   592→                >
+   593→                  {party.content.title}
+   594→                </button>
+   595→                <TypeBadge type={party.content.type} />
+   596→                <span className="inline-flex items-center gap-1">
+   597→                  <Users className="h-3.5 w-3.5" aria-hidden /> {Math.max(members.length, party.members)}{' '}
+   598→                  {members.length === 1 ? 'member' : 'members'}
+   599→                </span>
+   600→              </div>
+   601→            </div>
+   602→          </div>
+   603→
+   604→          <div className="flex flex-wrap items-center gap-2">
+   605→            {/* Invite code: full for the host, masked for members */}
+   606→            <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-3 py-1.5" title="Invite code">
+   607→              <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Code</span>
+   608→              <span className="font-mono text-sm font-bold tracking-[0.2em] text-zinc-100">
+   609→                {formatCode(party.code, !isHost)}
+   610→              </span>
+   611→            </div>
+   612→            {isHost && (
+   613→              <Button
+   614→                variant="outline"
+   615→                size="sm"
+   616→                onClick={() => void copyInviteCode()}
+   617→                className="border-white/15 bg-white/5 font-semibold hover:bg-white/10"
+   618→              >
+   619→                {copied ? <Check className="text-emerald-400" aria-hidden /> : <Copy aria-hidden />}
+   620→                Copy invite code
+   621→              </Button>
+   622→            )}
+   623→            {user && (
+   624→              <Button
+   625→                variant="outline"
+   626→                size="sm"
+   627→                onClick={() => void leaveParty()}
+   628→                disabled={leaving}
+   629→                className="border-rose-500/40 bg-rose-500/10 font-semibold text-rose-300 hover:bg-rose-500/20 hover:text-rose-200"
+   630→              >
+   631→                {leaving ? <Loader2 className="animate-spin" aria-hidden /> : <LogOut aria-hidden />}
+   632→                Leave
+   633→              </Button>
+   634→            )}
+   635→          </div>
+   636→        </div>
+   637→      </header>
+   638→
+   639→      <div className="grid items-start gap-5 lg:grid-cols-3">
+   640→        {/* Player + sync + members */}
+   641→        <div className="space-y-4 lg:col-span-2">
+   642→          {player.loading && !playerData ? (
+   643→            <Skeleton className="aspect-video w-full rounded-2xl" aria-busy="true" />
+   644→          ) : !source ? (
+   645→            <EmptyState
+   646→              icon={<MonitorPlay className="h-6 w-6" aria-hidden />}
+   647→              title="No stream sources available"
+   648→              message="This title has no playable stream yet — open its page to mine a source, then come back."
+   649→              action={
+   650→                <Button
+   651→                  variant="outline"
+   652→                  className="border-white/15 bg-white/5 hover:bg-white/10"
+   653→                  onClick={() => navigate(`/content/${party.content.id}`)}
+   654→                >
+   655→                  Open title page
+   656→                </Button>
+   657→              }
+   658→            />
+   659→          ) : (
+   660→            <div className="space-y-3">
+   661→              <div className="aspect-video w-full overflow-hidden rounded-2xl border border-white/10 bg-black">
+   662→                {source.type === 'mp4' && (
+   663→                  <video
+   664→                    ref={videoRef}
+   665→                    key={source.url}
+   666→                    controls
+   667→                    playsInline
+   668→                    className="h-full w-full"
+   669→                    src={source.url}
+   670→                    onPlay={() => emitControl('play')}
+   671→                    onPause={() => emitControl('pause')}
+   672→                    onSeeked={() => emitControl('seek')}
+   673→                    onRateChange={() => emitControl('rate')}
+   674→                    onLoadedMetadata={() => {
+   675→                      const st = lastStateRef.current;
+   676→                      if (!seededRef.current && st) {
+   677→                        seedFromState(st);
+   678→                      } else if (st && st.positionSec > 0.3) {
+   679→                        /* source switch: restore the party position */
+   680→                        try {
+   681→                          if (videoRef.current) videoRef.current.currentTime = st.positionSec;
+   682→                        } catch {
+   683→                          /* not seekable yet */
+   684→                        }
+   685→                      }
+   686→                    }}
+   687→                  />
+   688→                )}
+   689→                {source.type === 'm3u8' && (
+   690→                  <video
+   691→                    ref={videoRef}
+   692→                    controls
+   693→                    playsInline
+   694→                    className="h-full w-full"
+   695→                    onPlay={() => emitControl('play')}
+   696→                    onPause={() => emitControl('pause')}
+   697→                    onSeeked={() => emitControl('seek')}
+   698→                    onRateChange={() => emitControl('rate')}
+   699→                    onLoadedMetadata={() => {
+   700→                      const st = lastStateRef.current;
+   701→                      if (!seededRef.current && st) {
+   702→                        seedFromState(st);
+   703→                      } else if (st && st.positionSec > 0.3) {
+   704→                        /* source switch: restore the party position */
+   705→                        try {
+   706→                          if (videoRef.current) videoRef.current.currentTime = st.positionSec;
+   707→                        } catch {
+   708→                          /* not seekable yet */
+   709→                        }
+   710→                      }
+   711→                    }}
+   712→                  />
+   713→                )}
+   714→                {source.type === 'youtube' && (
+   715→                  <iframe
+   716→                    key={source.url}
+   717→                    src={`${source.url}${source.url.includes('?') ? '&' : '?'}rel=0`}
+   718→                    title={party.content.title}
+   719→                    className="h-full w-full"
+   720→                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+   721→                    allowFullScreen
+   722→                  />
+   723→                )}
+   724→                {source.type === 'iframe' && (
+   725→                  <iframe
+   726→                    key={source.url}
+   727→                    src={source.url}
+   728→                    title="Embedded player"
+   729→                    className="h-full w-full"
+   730→                    sandbox="allow-scripts; allow-same-origin; allow-presentation; allow-popups; allow-forms"
+   731→                    allowFullScreen
+   732→                    referrerPolicy="no-referrer"
+   733→                  />
+   734→                )}
+   735→              </div>
+   736→
+   737→              {embedSource && (
+   738→                <p className="rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-200/90">
+   739→                  Embedded streams cannot be synchronized — the host announces playback in chat.
+   740→                </p>
+   741→              )}
+   742→
+   743→              {/* Source switcher — the host's pick broadcasts to the room */}
+   744→              {sources.length > 1 && (
+   745→                <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Stream sources">
+   746→                  {sources.map((s, i) => {
+   747→                    const isActive = source?.url === s.url && source?.type === s.type;
+   748→                    return (
+   749→                      <button
+   750→                        key={`${s.type}-${i}-${s.url}`}
+   751→                        type="button"
+   752→                        onClick={() => switchSource(i)}
+   753→                        aria-pressed={isActive}
+   754→                        className={cn(
+   755→                          'rounded-full border px-3 py-1.5 text-xs font-semibold transition',
+   756→                          isActive
+   757→                            ? 'border-rose-500/60 bg-rose-600 text-white shadow-lg shadow-rose-900/30'
+   758→                            : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:bg-white/10',
+   759→                        )}
+   760→                      >
+   761→                        {s.label || `${s.type} ${i + 1}`}
+   762→                      </button>
+   763→                    );
+   764→                  })}
+   765→                </div>
+   766→              )}
+   767→
+   768→              {/* Sync bar */}
+   769→              <div className="flex flex-wrap items-center gap-2">
+   770→                {isHost ? (
+   771→                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-300">
+   772→                    <Crown className="h-3.5 w-3.5" aria-hidden />
+   773→                    You&apos;re the host — playback syncs everyone
+   774→                  </span>
+   775→                ) : (
+   776→                  <>
+   777→                    <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+   778→                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+   779→                      Synced to host
+   780→                    </span>
+   781→                    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-zinc-400">
+   782→                      Host: <span className="font-semibold text-zinc-200">{party.host.username}</span>
+   783→                    </span>
+   784→                    <Button
+   785→                      variant="outline"
+   786→                      size="sm"
+   787→                      onClick={() => lastStateRef.current && applyStateToVideo(lastStateRef.current)}
+   788→                      disabled={!lastState}
+   789→                      className="h-7 border-white/15 bg-white/5 px-2.5 text-[11px] font-semibold hover:bg-white/10"
+   790→                    >
+   791→                      <RefreshCw aria-hidden /> Re-sync now
+   792→                    </Button>
+   793→                  </>
+   794→                )}
+   795→                {user && !socketConnected && (
+   796→                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-300">
+   797→                    <WifiOff className="h-3.5 w-3.5" aria-hidden /> Reconnecting…
+   798→                  </span>
+   799→                )}
+   800→              </div>
+   801→            </div>
+   802→          )}
+   803→
+   804→          {/* Members */}
+   805→          <Card className="border-white/10 bg-white/[0.03]">
+   806→            <CardHeader className="pb-3">
+   807→              <CardTitle className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-zinc-400">
+   808→                <Users className="h-4 w-4 text-rose-400" aria-hidden />
+   809→                Members ({Math.max(members.length, party.members)})
+   810→              </CardTitle>
+   811→            </CardHeader>
+   812→            <CardContent>
+   813→              {members.length === 0 ? (
+   814→                <p className="text-sm text-zinc-500">Members appear here as they connect.</p>
+   815→              ) : (
+   816→                <ul className="grid gap-2 sm:grid-cols-2" aria-label="Party members">
+   817→                  {[...members]
+   818→                    .sort((a, b) => (a.userid === party.host.id ? -1 : b.userid === party.host.id ? 1 : a.username.localeCompare(b.username)))
+   819→                    .map((m) => (
+   820→                      <li
+   821→                        key={m.userid}
+   822→                        className="flex items-center gap-2.5 rounded-lg border border-white/10 bg-black/20 px-3 py-2"
+   823→                      >
+   824→                        <span className="relative shrink-0">
+   825→                          <UserAvatar username={m.username} avatar={m.avatar} className="h-8 w-8" />
+   826→                          {m.online && (
+   827→                            <span
+   828→                              className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#0a0a10] bg-emerald-400"
+   829→                              title="Online"
+   830→                            />
+   831→                          )}
+   832→                        </span>
+   833→                        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">{m.username}</span>
+   834→                        {m.userid === party.host.id && (
+   835→                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+   836→                            <Crown className="h-3 w-3" aria-hidden /> Host
+   837→                          </span>
+   838→                        )}
+   839→                      </li>
+   840→                    ))}
+   841→                </ul>
+   842→              )}
+   843→            </CardContent>
+   844→          </Card>
+   845→        </div>
+   846→
+   847→        {/* Chat */}
+   848→        <Card className="flex h-[480px] flex-col border-white/10 bg-white/[0.03] lg:h-[calc(100vh-16rem)] lg:min-h-[560px]">
+   849→          <CardHeader className="shrink-0 border-b border-white/10 pb-3">
+   850→            <CardTitle className="text-xs font-bold uppercase tracking-widest text-zinc-400">Party chat</CardTitle>
+   851→          </CardHeader>
+   852→          <CardContent className="flex min-h-0 flex-1 flex-col gap-2 pt-3">
+   853→            <div
+   854→              ref={chatScrollRef}
+   855→              className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto pr-1"
+   856→              role="log"
+   857→              aria-label="Party chat messages"
+   858→            >
+   859→              {messages.length === 0 ? (
+   860→                <p className="py-6 text-center text-sm text-zinc-500">No messages yet — say hi to the room.</p>
+   861→              ) : (
+   862→                messages.map((m, i) => {
+   863→                  const own = Boolean(user && m.user.id === user.id);
+   864→                  return (
+   865→                    <div key={m.id != null ? `m-${m.id}` : `i-${i}`} className={cn('flex flex-col', own ? 'items-end' : 'items-start')}>
+   866→                      <div className={cn('flex max-w-[85%] items-start gap-2', own && 'flex-row-reverse')}>
+   867→                        {!own && <UserAvatar username={m.user.username} avatar={m.user.avatar} className="h-7 w-7" />}
+   868→                        <div
+   869→                          className={cn(
+   870→                            'rounded-xl px-3 py-2 text-sm leading-relaxed break-words',
+   871→                            own ? 'bg-rose-600 text-white' : 'border border-white/10 bg-white/[0.05] text-zinc-200',
+   872→                          )}
+   873→                        >
+   874→                          {!own && <span className="mb-0.5 block text-[11px] font-bold text-zinc-400">{m.user.username}</span>}
+   875→                          {m.body}
+   876→                        </div>
+   877→                      </div>
+   878→                      <time className="mt-0.5 px-1 text-[10px] text-zinc-500" dateTime={m.createdat}>
+   879→                        {timeAgo(m.createdat)}
+   880→                      </time>
+   881→                    </div>
+   882→                  );
+   883→                })
+   884→              )}
+   885→              {typingUser && (
+   886→                <p className="px-1 text-xs italic text-zinc-500" aria-live="polite">
+   887→                  {typingUser} is typing…
+   888→                </p>
+   889→              )}
+   890→            </div>
+   891→
+   892→            {user && lastPersisted === false && (
+   893→              <p className="shrink-0 rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-2.5 py-1.5 text-[11px] text-amber-200/90">
+   894→                Offline mode — message not saved
+   895→              </p>
+   896→            )}
+   897→
+   898→            {user ? (
+   899→              <form
+   900→                className="flex shrink-0 items-center gap-2 pt-1"
+   901→                onSubmit={(e) => {
+   902→                  e.preventDefault();
+   903→                  sendChat();
+   904→                }}
+   905→              >
+   906→                <label htmlFor="party-chat-input" className="sr-only">
+   907→                  Message the party
+   908→                </label>
+   909→                <Input
+   910→                  id="party-chat-input"
+   911→                  value={chatInput}
+   912→                  onChange={(e) => handleChatInputChange(e.target.value)}
+   913→                  placeholder={socketConnected ? 'Message the party…' : 'Chat (offline — sends via server)'}
+   914→                  maxLength={500}
+   915→                  autoComplete="off"
+   916→                  className="border-white/10 bg-black/40 text-sm text-zinc-100 placeholder:text-zinc-500"
+   917→                />
+   918→                <Button
+   919→                  type="submit"
+   920→                  size="icon"
+   921→                  aria-label="Send message"
+   922→                  disabled={!chatInput.trim()}
+   923→                  className="shrink-0 bg-rose-600 font-bold text-white hover:bg-rose-500"
+   924→                >
+   925→                  <Send className="h-4 w-4" aria-hidden />
+   926→                </Button>
+   927→              </form>
+   928→            ) : (
+   929→              <div className="flex shrink-0 flex-col items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-center">
+   930→                <p className="text-sm text-zinc-400">Sign in to join the party and chat.</p>
+   931→                <Button
+   932→                  type="button"
+   933→                  size="sm"
+   934→                  className="bg-rose-600 font-bold text-white hover:bg-rose-500"
+   935→                  onClick={() => navigate('/auth')}
+   936→                >
+   937→                  <LogIn aria-hidden /> Sign in
+   938→                </Button>
+   939→              </div>
+   940→            )}
+   941→          </CardContent>
+   942→        </Card>
+   943→      </div>
+   944→    </Container>
+   945→  );
+   946→}
+   947→

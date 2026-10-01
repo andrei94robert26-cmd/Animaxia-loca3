@@ -1,0 +1,723 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * category-view.tsx — Browse by category. DB-backed categories render a live
+     5→ * provider strip plus a paginated library grid; the news category is a live
+     6→ * multi-source browser; the sports category is a football + Formula 1 hub.
+     7→ * Sidebar categories added by the platform menu (Copii & Desene, Muzică,
+     8→ * Universuri, Canale Kids, TV & Show-biz, Lumea…) are virtual views filtered
+     9→ * client-side over the Neon library, plus dedicated panels for Lista Mea,
+    10→ * Colecțiile Mele, Gestionare & Duplicate and Emisiuni TV.
+    11→ */
+    12→
+    13→import { useMemo, useRef, useState } from 'react';
+    14→import { Pickaxe, Plus, Zap } from 'lucide-react';
+    15→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+    16→import { Button } from '@/components/ui/button';
+    17→import { Skeleton } from '@/components/ui/skeleton';
+    18→import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+    19→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    20→import { api, animeToItem, dbToItem, mediaToItem, newsToItem } from '@/lib/animaxia/api';
+    21→import { useApi, type UseApiResult } from '@/lib/animaxia/hooks';
+    22→import { SPECIAL_CATEGORIES, VIRTUAL_CATEGORIES } from '@/lib/animaxia/menu';
+    23→import { RadioPanel } from '../radio-panel';
+    24→import { navigate, type AppRoute } from '@/lib/animaxia/router';
+    25→import type {
+    26→  FootballMatch,
+    27→  FootballTableEntry,
+    28→  F1Race,
+    29→  F1Standing,
+    30→  NewsItem,
+    31→  NormalizedItem,
+    32→} from '@/lib/animaxia/types';
+    33→import { cn } from '@/lib/utils';
+    34→import { CollectionsPanel, ManagePanel, MyListPanel, TvShowsPanel } from '../category-panels';
+    35→import { ContentGrid } from '../content-grid';
+    36→import { ContentRow } from '../content-row';
+    37→import { AddContentDialog } from '../home-panels';
+    38→import { Pagination } from '../pagination';
+    39→import { Container, PageHeader, Section } from '../section';
+    40→import { EmptyState, ErrorState } from '../states';
+    41→
+    42→/* ------------------------------- constants ------------------------------- */
+    43→
+    44→const CATEGORY_META: Record<string, { title: string; subtitle: string }> = {
+    45→  all: { title: 'Toate titlurile', subtitle: 'Tot ce există în biblioteca ta Animaxia — filme, seriale, anime și multe altele.' },
+    46→  movie: { title: 'Filme', subtitle: 'Filmele din colecția ta, plus ce e în tendințe pe TMDB chiar acum.' },
+    47→  tv: { title: 'Seriale', subtitle: 'Serialele din colecția ta, plus producții populare de pe TMDB.' },
+    48→  anime: { title: 'Anime', subtitle: 'Colecția ta de anime, plus ce se difuzează în sezonul acesta.' },
+    49→  news: { title: 'Știri', subtitle: 'Ultimele titluri, live de la BBC, CNN, NHK și Al Jazeera.' },
+    50→  sports: { title: 'Sport', subtitle: 'Clasamente și meciuri de fotbal, plus sezonul de Formula 1 dintr-o privire.' },
+    51→  mined: { title: 'Minate', subtitle: 'Tot ce a extras Minerul Animaxia din URL-uri de stream.' },
+    52→  featured: { title: 'Recomandate', subtitle: 'Repere alese de echipa Animaxia.' },
+    53→  'my-list': { title: 'Lista Mea', subtitle: 'Favoritele tale, salvate în Neon și sincronizate pe toate dispozitivele.' },
+    54→  'my-collections': { title: 'Colecțiile Mele', subtitle: 'Organizează-ți biblioteca în colecții tematice — maratoane gata de pornit.' },
+    55→  manage: { title: 'Gestionare & Duplicate', subtitle: 'Panoul de administrare a bibliotecii — detectare duplicate și curățare.' },
+    56→  tvshows: { title: 'Emisiuni TV', subtitle: 'Programul TV de astăzi — emisiuni în difuzare, live din TVmaze.' },
+    57→};
+    58→
+    59→const NEWS_SOURCES: { value: string; label: string }[] = [
+    60→  { value: 'all', label: 'Toate' },
+    61→  { value: 'bbc', label: 'BBC' },
+    62→  { value: 'cnn', label: 'CNN' },
+    63→  { value: 'nhk', label: 'NHK' },
+    64→  { value: 'aljazeera', label: 'Al Jazeera' },
+    65→];
+    66→
+    67→const COMPETITIONS: { code: string; name: string }[] = [
+    68→  { code: 'PL', name: 'Premier League' },
+    69→  { code: 'BL1', name: 'Bundesliga' },
+    70→  { code: 'PD', name: 'La Liga' },
+    71→  { code: 'SA', name: 'Serie A' },
+    72→  { code: 'FL1', name: 'Ligue 1' },
+    73→  { code: 'CL', name: 'Champions League' },
+    74→  { code: 'WC', name: 'World Cup' },
+    75→];
+    76→
+    77→const MATCH_STATUS: Record<string, { label: string; className: string }> = {
+    78→  FINISHED: { label: 'Finalizat', className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' },
+    79→  IN_PLAY: { label: 'Live', className: 'border-rose-500/40 bg-rose-500/15 text-rose-300' },
+    80→  PAUSED: { label: 'Live', className: 'border-rose-500/40 bg-rose-500/15 text-rose-300' },
+    81→  TIMED: { label: 'Programat', className: 'border-white/10 bg-white/5 text-zinc-400' },
+    82→  SCHEDULED: { label: 'Programat', className: 'border-white/10 bg-white/5 text-zinc-400' },
+    83→  POSTPONED: { label: 'Amânat', className: 'border-amber-500/30 bg-amber-500/10 text-amber-300' },
+    84→  SUSPENDED: { label: 'Suspendat', className: 'border-amber-500/30 bg-amber-500/10 text-amber-300' },
+    85→  CANCELLED: { label: 'Anulat', className: 'border-white/10 bg-white/5 text-zinc-400' },
+    86→};
+    87→
+    88→function capitalize(raw: string): string {
+    89→  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : 'Categorie';
+    90→}
+    91→
+    92→/* --------------------------------- view ---------------------------------- */
+    93→
+    94→export function CategoryView({ route }: { route: AppRoute }) {
+    95→  const type = route.params[0] || 'all';
+    96→
+    97→  /* Reset pagination whenever the category changes (adjust during render). */
+    98→  const [page, setPage] = useState(1);
+    99→  const [lastType, setLastType] = useState(type);
+   100→  if (lastType !== type) {
+   101→    setLastType(type);
+   102→    setPage(1);
+   103→  }
+   104→
+   105→  const [newsSource, setNewsSource] = useState('all');
+   106→  const [sportTab, setSportTab] = useState<'football' | 'f1'>('football');
+   107→  const [competition, setCompetition] = useState('PL');
+   108→  const [addOpen, setAddOpen] = useState(false);
+   109→
+   110→  const isNews = type === 'news';
+   111→  const isSports = type === 'sports';
+   112→  const isSpecial = SPECIAL_CATEGORIES.has(type);
+   113→  const virtual = VIRTUAL_CATEGORIES[type];
+   114→  const isLive = Boolean(virtual?.live) && !isSpecial;
+   115→  const isVirtual = Boolean(virtual) && !isSpecial;
+   116→  const isGrid = !isNews && !isSports && !isSpecial && !isVirtual;
+   117→  const hasStrip = type === 'movie' || type === 'tv' || type === 'anime';
+   118→
+   119→  const meta =
+   120→    CATEGORY_META[type] ??
+   121→    (virtual
+   122→      ? { title: virtual.title, subtitle: virtual.subtitle }
+   123→      : {
+   124→          title: capitalize(type),
+   125→          subtitle: 'Răsfoiește toate titlurile pe care Animaxia le-a clasat în această categorie.',
+   126→        });
+   127→
+   128→  const listRes = useApi(
+   129→    `cat-${type}-${page}`,
+   130→    () => api.all({ type: type === 'all' ? undefined : type, page, limit: 24 }),
+   131→    { enabled: isGrid },
+   132→  );
+   133→
+   134→  /* Virtual sidebar categories: one full-catalog fetch + client-side filter. */
+   135→  const virtualRes = useApi(`cat-virtual-${type}`, () => api.all({ limit: 100 }), { enabled: isVirtual });
+   136→  const virtualItems = useMemo<NormalizedItem[]>(() => {
+   137→    if (!virtual || !virtualRes.data) return [];
+   138→    const rows = virtualRes.data.data.filter(virtual.filter);
+   139→    const sorted = virtual.sort ? [...rows].sort(virtual.sort) : rows;
+   140→    return sorted.map(dbToItem);
+   141→  }, [virtual, virtualRes.data]);
+   142→
+   143→  /* FAZA 14: live category feeds (real TMDB discover) for every sidebar menu. */
+   144→  const liveRes = useApi(`cat-live-${type}-${page}`, () => api.discover(type, page), { enabled: isLive });
+   145→  const liveItems = useMemo<NormalizedItem[]>(() => {
+   146→    if (!liveRes.data) return [];
+   147→    return liveRes.data.data.map(mediaToItem);
+   148→  }, [liveRes.data]);
+   149→
+   150→  const stripRes = useApi(
+   151→    `cat-strip-${type}`,
+   152→    async (): Promise<NormalizedItem[]> => {
+   153→      if (type === 'movie') return (await api.moviesTrending('day')).data.map(mediaToItem);
+   154→      if (type === 'tv') return (await api.tvPopular()).data.map(mediaToItem);
+   155→      return (await api.animeSeason()).data.map(animeToItem);
+   156→    },
+   157→    { enabled: hasStrip },
+   158→  );
+   159→
+   160→  const newsRes = useApi(`cat-news-${newsSource}`, () => api.news(newsSource, 24), { enabled: isNews });
+   161→
+   162→  const standingsRes = useApi(`fb-standings-${competition}`, () => api.footballStandings(competition), {
+   163→    enabled: isSports,
+   164→  });
+   165→  const matchesRes = useApi(`fb-matches-${competition}`, () => api.footballMatches(competition, 10), {
+   166→    enabled: isSports,
+   167→  });
+   168→  const f1StandingsRes = useApi('f1-standings', () => api.f1Standings(), {
+   169→    enabled: isSports && sportTab === 'f1',
+   170→  });
+   171→  const f1ScheduleRes = useApi('f1-schedule', () => api.f1Schedule(), {
+   172→    enabled: isSports && sportTab === 'f1',
+   173→  });
+   174→
+   175→  const items = useMemo(() => (listRes.data?.data ?? []).map(dbToItem), [listRes.data]);
+   176→  const gridRef = useRef<HTMLDivElement>(null);
+   177→
+   178→  const stripMeta =
+   179→    type === 'movie'
+   180→      ? { title: 'În tendințe pe TMDB', subtitle: 'Cele mai vizionate filme de azi, la nivel mondial' }
+   181→      : type === 'tv'
+   182→        ? { title: 'Populare pe TMDB', subtitle: 'Serialele pe care lumea nu se poate opri să le vizioneze' }
+   183→        : { title: 'În difuzare acest sezon', subtitle: 'Difuzate curent în Japonia' };
+   184→
+   185→  const goToPage = (next: number) => {
+   186→    setPage(next);
+   187→    gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+   188→  };
+   189→
+   190→  return (
+   191→    <Container className="space-y-8 py-8 sm:py-10">
+   192→      <PageHeader title={meta.title} subtitle={meta.subtitle}>
+   193→        {isGrid && !listRes.loading && listRes.data && (
+   194→          <p className="text-sm font-medium text-zinc-500">
+   195→            Afișez {listRes.data.data.length} din {listRes.data.total}{' '}
+   196→            {listRes.data.total === 1 ? 'titlu' : 'titluri'}
+   197→          </p>
+   198→        )}
+   199→        {isLive && virtual?.liveSource && (
+   200→          <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-600/10 px-3 py-1 text-xs font-bold text-rose-200">
+   201→            <Zap className="h-3 w-3" aria-hidden />
+   202→            LIVE · {virtual.liveSource}
+   203→          </span>
+   204→        )}
+   205→      </PageHeader>
+   206→
+   207→      {isGrid && (
+   208→        <>
+   209→          {type === 'mined' && (
+   210→            <Alert className="border-rose-500/20 bg-rose-500/5">
+   211→              <Pickaxe className="h-4 w-4 text-rose-400" aria-hidden />
+   212→              <AlertTitle className="text-zinc-100">Extraase de Minerul Animaxia</AlertTitle>
+   213→              <AlertDescription className="text-zinc-400">
+   214→                <span>
+   215→                  Titlurile minate sunt extrase de Minerul Animaxia din orice URL — deschide panoul
+   216→                  de administrare pentru a extrage un stream nou.
+   217→                </span>
+   218→                <Button
+   219→                  size="sm"
+   220→                  onClick={() => navigate('/admin')}
+   221→                  className="mt-2 bg-rose-600 font-semibold text-white hover:bg-rose-500"
+   222→                >
+   223→                  Deschide panoul Admin
+   224→                </Button>
+   225→              </AlertDescription>
+   226→            </Alert>
+   227→          )}
+   228→
+   229→          {hasStrip &&
+   230→            (stripRes.error && !stripRes.loading && !stripRes.data ? (
+   231→              <ErrorState message={stripRes.error} onRetry={stripRes.refetch} compact />
+   232→            ) : (
+   233→              <ContentRow
+   234→                title={stripMeta.title}
+   235→                subtitle={stripMeta.subtitle}
+   236→                items={stripRes.data ?? []}
+   237→                loading={stripRes.loading}
+   238→                emptyMessage="Datele furnizorului live sunt momentan indisponibile."
+   239→              />
+   240→            ))}
+   241→
+   242→          <div ref={gridRef} className="scroll-mt-24 space-y-6">
+   243→            {listRes.error && !listRes.loading && !listRes.data ? (
+   244→              <ErrorState message={listRes.error} onRetry={listRes.refetch} />
+   245→            ) : (
+   246→              <ContentGrid
+   247→                items={items}
+   248→                loading={listRes.loading}
+   249→                skeletonCount={12}
+   250→                emptyTitle={type === 'all' ? 'Biblioteca ta e goală' : `Încă nimic în ${meta.title}`}
+   251→                emptyMessage="Nimic nu a fost adăugat încă în această categorie — adaugă titluri din orice pagină de detalii."
+   252→              />
+   253→            )}
+   254→            <Pagination page={page} totalPages={listRes.data?.totalPages ?? 1} onPage={goToPage} />
+   255→          </div>
+   256→        </>
+   257→      )}
+   258→
+   259→      {isSpecial && (
+   260→        <>
+   261→          {type === 'my-list' && <MyListPanel />}
+   262→          {type === 'my-collections' && <CollectionsPanel />}
+   263→          {type === 'manage' && <ManagePanel />}
+   264→          {type === 'tvshows' && <TvShowsPanel />}
+   265→          {type === 'radio' && <RadioPanel />}
+   266→        </>
+   267→      )}
+   268→
+   269→      {isVirtual && !isLive && (
+   270→        <>
+   271→          {virtualRes.error && !virtualRes.loading && !virtualRes.data ? (
+   272→            <ErrorState message={virtualRes.error} onRetry={virtualRes.refetch} />
+   273→          ) : (
+   274→            <ContentGrid
+   275→              items={virtualItems}
+   276→              loading={virtualRes.loading}
+   277→              skeletonCount={9}
+   278→              emptyTitle={`Încă nimic în ${meta.title}`}
+   279→              emptyMessage={
+   280→                virtual?.emptyHint ??
+   281→                'Această categorie se umple automat cu tot ce încarci tu — adaugă conținut din orice sursă.'
+   282→              }
+   283→              emptyAction={
+   284→                <Button onClick={() => setAddOpen(true)} className="mt-4 bg-rose-600 font-bold hover:bg-rose-500">
+   285→                  <Plus className="mr-1.5 h-4 w-4" aria-hidden />
+   286→                  Adaugă conținut
+   287→                </Button>
+   288→              }
+   289→            />
+   290→          )}
+   291→          {!virtualRes.loading && virtualItems.length > 0 && (
+   292→            <p className="text-sm font-medium text-zinc-500">
+   293→              {virtualItems.length} {virtualItems.length === 1 ? 'titlu' : 'titluri'} în {meta.title}
+   294→            </p>
+   295→          )}
+   296→        </>
+   297→      )}
+   298→
+   299→      {isLive && (
+   300→        <>
+   301→          {/* Titles already in the Neon library that match this category */}
+   302→          {!virtualRes.loading && virtualItems.length > 0 && (
+   303→            <ContentRow
+   304→              title="În biblioteca ta"
+   305→              subtitle={`${virtualItems.length} ${virtualItems.length === 1 ? 'titlu' : 'titluri'} salvate în Neon apar și aici`}
+   306→              items={virtualItems}
+   307→              emptyMessage=""
+   308→            />
+   309→          )}
+   310→
+   311→          {/* Live TMDB feed */}
+   312→          <div ref={gridRef} className="scroll-mt-24 space-y-6">
+   313→            {liveRes.error && !liveRes.loading && !liveRes.data ? (
+   314→              <ErrorState message={liveRes.error} onRetry={liveRes.refetch} />
+   315→            ) : (
+   316→              <ContentGrid
+   317→                items={liveItems}
+   318→                loading={liveRes.loading && !liveRes.data}
+   319→                skeletonCount={12}
+   320→                emptyTitle="Feed-ul live nu a returnat nimic"
+   321→                emptyMessage="Sursa live este momentan indisponibilă — încearcă din nou sau adaugă conținut propriu."
+   322→                emptyAction={
+   323→                  <Button onClick={() => setAddOpen(true)} className="mt-4 bg-rose-600 font-bold hover:bg-rose-500">
+   324→                    <Plus className="mr-1.5 h-4 w-4" aria-hidden />
+   325→                    Adaugă conținut
+   326→                  </Button>
+   327→                }
+   328→              />
+   329→            )}
+   330→            <div className="flex items-center justify-between gap-4">
+   331→              {liveRes.data && liveRes.data.total > 0 && (
+   332→                <p className="text-sm font-medium text-zinc-500">
+   333→                  {liveRes.data.total.toLocaleString('ro-RO')}{' '}
+   334→                  {liveRes.data.total === 1 ? 'titlu' : 'titluri'} în feed-ul live
+   335→                  {liveRes.data.legsOk < liveRes.data.legs && (
+   336→                    <span className="text-amber-400"> · {liveRes.data.legsOk}/{liveRes.data.legs} surse active</span>
+   337→                  )}
+   338→                </p>
+   339→              )}
+   340→            </div>
+   341→            <Pagination page={page} totalPages={Math.min(liveRes.data?.totalPages ?? 1, 50)} onPage={goToPage} />
+   342→          </div>
+   343→        </>
+   344→      )}
+   345→
+   346→      <AddContentDialog open={addOpen} onOpenChange={setAddOpen} />
+   347→
+   348→      {isNews && <NewsPanel source={newsSource} onSource={setNewsSource} res={newsRes} />}
+   349→
+   350→      {isSports && (
+   351→        <Tabs defaultValue="football" onValueChange={(value) => setSportTab(value as 'football' | 'f1')}>
+   352→          <TabsList className="h-10 w-full justify-start gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1 sm:w-auto">
+   353→            <TabsTrigger
+   354→              value="football"
+   355→              className="px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white data-[state=active]:shadow-rose-900/40 sm:px-5"
+   356→            >
+   357→              Fotbal
+   358→            </TabsTrigger>
+   359→            <TabsTrigger
+   360→              value="f1"
+   361→              className="px-4 text-zinc-400 hover:text-zinc-100 data-[state=active]:bg-rose-600 data-[state=active]:text-white data-[state=active]:shadow-rose-900/40 sm:px-5"
+   362→            >
+   363→              Formula 1
+   364→            </TabsTrigger>
+   365→          </TabsList>
+   366→          <TabsContent value="football" className="pt-6">
+   367→            <FootballPanel
+   368→              competition={competition}
+   369→              onCompetition={setCompetition}
+   370→              standingsRes={standingsRes}
+   371→              matchesRes={matchesRes}
+   372→            />
+   373→          </TabsContent>
+   374→          <TabsContent value="f1" className="pt-6">
+   375→            <F1Panel standingsRes={f1StandingsRes} scheduleRes={f1ScheduleRes} />
+   376→          </TabsContent>
+   377→        </Tabs>
+   378→      )}
+   379→    </Container>
+   380→  );
+   381→}
+   382→
+   383→/* ------------------------------ news panel ------------------------------- */
+   384→
+   385→function NewsPanel({
+   386→  source,
+   387→  onSource,
+   388→  res,
+   389→}: {
+   390→  source: string;
+   391→  onSource: (value: string) => void;
+   392→  res: UseApiResult<{ data: NewsItem[] }>;
+   393→}) {
+   394→  const items = useMemo(() => (res.data?.data ?? []).map(newsToItem), [res.data]);
+   395→  return (
+   396→    <div className="space-y-6">
+   397→      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtru sursă de știri">
+   398→        {NEWS_SOURCES.map((s) => (
+   399→          <FilterChip key={s.value} active={source === s.value} onClick={() => onSource(s.value)}>
+   400→            {s.label}
+   401→          </FilterChip>
+   402→        ))}
+   403→      </div>
+   404→      {res.error && !res.loading && !res.data ? (
+   405→        <ErrorState message={res.error} onRetry={res.refetch} />
+   406→      ) : (
+   407→        <ContentGrid
+   408→          items={items}
+   409→          loading={res.loading}
+   410→          skeletonCount={12}
+   411→          emptyTitle="Niciun titlu de știri acum"
+   412→          emptyMessage="Acest flux nu a returnat articole recente — încearcă altă sursă."
+   413→        />
+   414→      )}
+   415→    </div>
+   416→  );
+   417→}
+   418→
+   419→/* ---------------------------- football panel ----------------------------- */
+   420→
+   421→function FootballPanel({
+   422→  competition,
+   423→  onCompetition,
+   424→  standingsRes,
+   425→  matchesRes,
+   426→}: {
+   427→  competition: string;
+   428→  onCompetition: (code: string) => void;
+   429→  standingsRes: UseApiResult<{ data: { competition: string; table: FootballTableEntry[] } }>;
+   430→  matchesRes: UseApiResult<{ data: FootballMatch[] }>;
+   431→}) {
+   432→  const competitionName = COMPETITIONS.find((c) => c.code === competition)?.name ?? competition;
+   433→  return (
+   434→    <div className="space-y-8">
+   435→      <div className="space-y-3">
+   436→        <h2 className="text-lg font-bold text-zinc-100">Competiție</h2>
+   437→        <div className="flex flex-wrap gap-2" role="group" aria-label="Filtru competiție">
+   438→          {COMPETITIONS.map((c) => (
+   439→            <FilterChip key={c.code} active={competition === c.code} onClick={() => onCompetition(c.code)}>
+   440→              {c.name}
+   441→            </FilterChip>
+   442→          ))}
+   443→        </div>
+   444→      </div>
+   445→
+   446→      <Section title="Clasament" subtitle={`Clasamentul curent — ${competitionName}`}>
+   447→        {standingsRes.loading ? (
+   448→          <Skeleton className="h-80 w-full rounded-xl" />
+   449→        ) : standingsRes.error ? (
+   450→          <ErrorState message={standingsRes.error} onRetry={standingsRes.refetch} compact />
+   451→        ) : !standingsRes.data || standingsRes.data.data.table.length === 0 ? (
+   452→          <EmptyState title="Clasament indisponibil" message="Această competiție nu are momentan date de clasament." />
+   453→        ) : (
+   454→          <StandingsTable entries={standingsRes.data.data.table} />
+   455→        )}
+   456→      </Section>
+   457→
+   458→      <Section title="Meciuri & rezultate" subtitle="Meciuri viitoare și scoruri recente">
+   459→        {matchesRes.loading ? (
+   460→          <Skeleton className="h-72 w-full rounded-xl" />
+   461→        ) : matchesRes.error ? (
+   462→          <ErrorState message={matchesRes.error} onRetry={matchesRes.refetch} compact />
+   463→        ) : !matchesRes.data || matchesRes.data.data.length === 0 ? (
+   464→          <EmptyState title="Niciun meci programat" message="Nu există meciuri viitoare pentru această competiție." />
+   465→        ) : (
+   466→          <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.02]">
+   467→            <div className="divide-y divide-white/5">
+   468→              {matchesRes.data.data.map((match) => (
+   469→                <MatchRow key={match.id} match={match} />
+   470→              ))}
+   471→            </div>
+   472→          </div>
+   473→        )}
+   474→      </Section>
+   475→    </div>
+   476→  );
+   477→}
+   478→
+   479→function StandingsTable({ entries }: { entries: FootballTableEntry[] }) {
+   480→  return (
+   481→    <div className="custom-scrollbar overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02]">
+   482→      <Table className="min-w-[620px]">
+   483→        <TableHeader>
+   484→          <TableRow className="border-white/10 hover:bg-transparent">
+   485→            <TableHead className="w-12 text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">#</TableHead>
+   486→            <TableHead className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Echipă</TableHead>
+   487→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">J</TableHead>
+   488→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">V</TableHead>
+   489→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">E</TableHead>
+   490→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Î</TableHead>
+   491→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">±</TableHead>
+   492→            <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Pct</TableHead>
+   493→          </TableRow>
+   494→        </TableHeader>
+   495→        <TableBody>
+   496→          {entries.map((entry) => (
+   497→            <TableRow key={entry.team} className="border-white/5 hover:bg-white/5">
+   498→              <TableCell
+   499→                className={cn(
+   500→                  'text-center font-bold tabular-nums',
+   501→                  entry.rank <= 4 ? 'text-emerald-400' : 'text-zinc-500',
+   502→                )}
+   503→              >
+   504→                {entry.rank}
+   505→              </TableCell>
+   506→              <TableCell className="font-medium text-zinc-100">
+   507→                <span className="flex items-center gap-2.5">
+   508→                  {entry.teamCrest ? (
+   509→                    <img
+   510→                      src={entry.teamCrest}
+   511→                      alt=""
+   512→                      aria-hidden
+   513→                      loading="lazy"
+   514→                      className="h-5 w-5 shrink-0 object-contain"
+   515→                    />
+   516→                  ) : null}
+   517→                  <span className="truncate">{entry.team}</span>
+   518→                </span>
+   519→              </TableCell>
+   520→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.played}</TableCell>
+   521→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.won}</TableCell>
+   522→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.draw}</TableCell>
+   523→              <TableCell className="text-center tabular-nums text-zinc-300">{entry.lost}</TableCell>
+   524→              <TableCell className="text-center tabular-nums text-zinc-400">
+   525→                {entry.goalDifference > 0 ? `+${entry.goalDifference}` : entry.goalDifference}
+   526→              </TableCell>
+   527→              <TableCell className="text-center font-bold tabular-nums text-white">{entry.points}</TableCell>
+   528→            </TableRow>
+   529→          ))}
+   530→        </TableBody>
+   531→      </Table>
+   532→    </div>
+   533→  );
+   534→}
+   535→
+   536→function MatchRow({ match }: { match: FootballMatch }) {
+   537→  const finished =
+   538→    match.status === 'FINISHED' && match.score.home != null && match.score.away != null;
+   539→  const date = new Date(match.utcDate);
+   540→  const dateLabel = date.toLocaleDateString('ro-RO', {
+   541→    weekday: 'short',
+   542→    month: 'short',
+   543→    day: 'numeric',
+   544→    timeZone: 'UTC',
+   545→  });
+   546→  const timeLabel = date.toLocaleTimeString('ro-RO', {
+   547→    hour: '2-digit',
+   548→    minute: '2-digit',
+   549→    hour12: false,
+   550→    timeZone: 'UTC',
+   551→  });
+   552→  return (
+   553→    <div className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+   554→      <div className="grid min-w-0 flex-1 grid-cols-[1fr_auto_1fr] items-center gap-3">
+   555→        <div className="flex min-w-0 items-center justify-end gap-2">
+   556→          <span className="truncate text-right text-sm font-medium text-zinc-200">{match.home}</span>
+   557→          {match.homeCrest ? (
+   558→            <img src={match.homeCrest} alt="" aria-hidden loading="lazy" className="h-6 w-6 shrink-0 object-contain" />
+   559→          ) : null}
+   560→        </div>
+   561→        <div className="w-14 text-center text-sm font-bold">
+   562→          {finished ? (
+   563→            <span className="text-emerald-400">
+   564→              {match.score.home} – {match.score.away}
+   565→            </span>
+   566→          ) : (
+   567→            <span className="text-zinc-500">vs</span>
+   568→          )}
+   569→        </div>
+   570→        <div className="flex min-w-0 items-center gap-2">
+   571→          {match.awayCrest ? (
+   572→            <img src={match.awayCrest} alt="" aria-hidden loading="lazy" className="h-6 w-6 shrink-0 object-contain" />
+   573→          ) : null}
+   574→          <span className="truncate text-sm font-medium text-zinc-200">{match.away}</span>
+   575→        </div>
+   576→      </div>
+   577→      <div className="flex items-center gap-3 sm:flex-col sm:items-end sm:gap-1">
+   578→        <span className="text-xs text-zinc-500">
+   579→          {dateLabel} · {timeLabel} UTC
+   580→        </span>
+   581→        <StatusBadge status={match.status} />
+   582→      </div>
+   583→    </div>
+   584→  );
+   585→}
+   586→
+   587→function StatusBadge({ status }: { status: string }) {
+   588→  const meta = MATCH_STATUS[status] ?? { label: status, className: 'border-white/10 bg-white/5 text-zinc-400' };
+   589→  return (
+   590→    <span
+   591→      className={cn(
+   592→        'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider',
+   593→        meta.className,
+   594→      )}
+   595→    >
+   596→      {meta.label}
+   597→    </span>
+   598→  );
+   599→}
+   600→
+   601→/* ------------------------------- F1 panel -------------------------------- */
+   602→
+   603→function F1Panel({
+   604→  standingsRes,
+   605→  scheduleRes,
+   606→}: {
+   607→  standingsRes: UseApiResult<{ data: F1Standing[] }>;
+   608→  scheduleRes: UseApiResult<{ data: F1Race[] }>;
+   609→}) {
+   610→  return (
+   611→    <div className="space-y-8">
+   612→      <Section title="Clasament piloți" subtitle="Bătălia curentă pentru titlu">
+   613→        {standingsRes.loading ? (
+   614→          <Skeleton className="h-80 w-full rounded-xl" />
+   615→        ) : standingsRes.error ? (
+   616→          <ErrorState message={standingsRes.error} onRetry={standingsRes.refetch} compact />
+   617→        ) : !standingsRes.data || standingsRes.data.data.length === 0 ? (
+   618→          <EmptyState title="Clasament indisponibil" message="Clasamentul piloților nu este disponibil momentan." />
+   619→        ) : (
+   620→          <div className="custom-scrollbar overflow-x-auto rounded-xl border border-white/10 bg-white/[0.02]">
+   621→            <Table className="min-w-[480px]">
+   622→              <TableHeader>
+   623→                <TableRow className="border-white/10 hover:bg-transparent">
+   624→                  <TableHead className="w-12 text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">#</TableHead>
+   625→                  <TableHead className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Pilot</TableHead>
+   626→                  <TableHead className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Echipă</TableHead>
+   627→                  <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Victorii</TableHead>
+   628→                  <TableHead className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">Pct</TableHead>
+   629→                </TableRow>
+   630→              </TableHeader>
+   631→              <TableBody>
+   632→                {standingsRes.data.data.map((row) => (
+   633→                  <TableRow key={row.driver} className="border-white/5 hover:bg-white/5">
+   634→                    <TableCell className="text-center font-bold tabular-nums text-zinc-500">{row.position}</TableCell>
+   635→                    <TableCell className="font-medium text-zinc-100">{row.driver}</TableCell>
+   636→                    <TableCell className="text-zinc-400">{row.team}</TableCell>
+   637→                    <TableCell className="text-center tabular-nums text-zinc-300">{row.wins}</TableCell>
+   638→                    <TableCell className="text-center font-bold tabular-nums text-white">{row.points}</TableCell>
+   639→                  </TableRow>
+   640→                ))}
+   641→              </TableBody>
+   642→            </Table>
+   643→          </div>
+   644→        )}
+   645→      </Section>
+   646→
+   647→      <Section title="Calendar curse" subtitle="Toate rundele sezonului">
+   648→        {scheduleRes.loading ? (
+   649→          <Skeleton className="h-72 w-full rounded-xl" />
+   650→        ) : scheduleRes.error ? (
+   651→          <ErrorState message={scheduleRes.error} onRetry={scheduleRes.refetch} compact />
+   652→        ) : !scheduleRes.data || scheduleRes.data.data.length === 0 ? (
+   653→          <EmptyState title="Nicio cursă programată" message="Calendarul curselor nu este încă disponibil." />
+   654→        ) : (
+   655→          <div className="grid gap-3 md:grid-cols-2">
+   656→            {scheduleRes.data.data.map((race) => (
+   657→              <RaceCard key={`${race.round}-${race.race}`} race={race} />
+   658→            ))}
+   659→          </div>
+   660→        )}
+   661→      </Section>
+   662→    </div>
+   663→  );
+   664→}
+   665→
+   666→function RaceCard({ race }: { race: F1Race }) {
+   667→  const date = new Date(race.date);
+   668→  const dateLabel = date.toLocaleDateString('ro-RO', {
+   669→    weekday: 'short',
+   670→    month: 'short',
+   671→    day: 'numeric',
+   672→    timeZone: 'UTC',
+   673→  });
+   674→  return (
+   675→    <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[0.03] p-4 transition hover:border-rose-500/30">
+   676→      <span
+   677→        aria-label={`Runda ${race.round}`}
+   678→        className="grid h-11 w-11 shrink-0 place-items-center rounded-lg border border-rose-500/30 bg-rose-500/15 text-base font-black text-rose-300"
+   679→      >
+   680→        {race.round}
+   681→      </span>
+   682→      <div className="min-w-0 flex-1">
+   683→        <p className="truncate font-semibold text-zinc-100">{race.race}</p>
+   684→        <p className="mt-0.5 truncate text-xs text-zinc-500">
+   685→          {[race.circuit, race.locality, race.country].filter(Boolean).join(' — ')}
+   686→        </p>
+   687→      </div>
+   688→      <div className="shrink-0 text-right">
+   689→        <p className="text-sm font-medium text-zinc-300">{dateLabel}</p>
+   690→        {race.time ? <p className="text-xs text-zinc-500">{race.time.slice(0, 5)} UTC</p> : null}
+   691→      </div>
+   692→    </div>
+   693→  );
+   694→}
+   695→
+   696→/* ------------------------------ shared bits ------------------------------ */
+   697→
+   698→function FilterChip({
+   699→  active,
+   700→  onClick,
+   701→  children,
+   702→}: {
+   703→  active: boolean;
+   704→  onClick: () => void;
+   705→  children: React.ReactNode;
+   706→}) {
+   707→  return (
+   708→    <button
+   709→      type="button"
+   710→      onClick={onClick}
+   711→      aria-pressed={active}
+   712→      className={cn(
+   713→        'rounded-full border px-4 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60',
+   714→        active
+   715→          ? 'border-rose-500/60 bg-rose-500/15 text-rose-300'
+   716→          : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/25 hover:text-white',
+   717→      )}
+   718→    >
+   719→      {children}
+   720→    </button>
+   721→  );
+   722→}
+   723→

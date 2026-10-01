@@ -1,0 +1,208 @@
+$ bun --hot index.js
+[2026-09-18T07:24:23.239Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:24:23.239Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth MISSING (party rooms disabled) | internal token required
+[2026-09-18T07:24:24.552Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:26:07.559Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:26:07.559Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth MISSING (party rooms disabled) | internal token required
+[2026-09-18T07:26:07.581Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:26:07.581Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth MISSING (party rooms disabled) | internal token required
+[2026-09-18T07:26:08.786Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:26:08.796Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:26:33.995Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:26:33.995Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth MISSING (party rooms disabled) | internal token required
+[2026-09-18T07:26:34.173Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:26:34.333Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:26:34.333Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth MISSING (party rooms disabled) | internal token required
+[2026-09-18T07:26:34.507Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:26:37.191Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:26:37.191Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth MISSING (party rooms disabled) | internal token required
+[2026-09-18T07:26:37.365Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:26:46.709Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T07:26:46.709Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth derived (sha256 animaxia-auth:DATABASEURL parity) | internal token required
+[2026-09-18T07:26:46.884Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-18T07:27:34.010Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T07:27:34.578Z] [INFO] [realtime] socket connected user=40 (rt1_1789716448748)
+[2026-09-18T07:27:36.432Z] [INFO] [realtime] user=40 joined party=3 (members=1)
+[2026-09-18T07:27:37.005Z] [INFO] [realtime] socket connected user=41 (rt2_1789716448748)
+[2026-09-18T07:27:39.041Z] [INFO] [realtime] user=41 joined party=3 (members=2)
+[2026-09-18T07:27:40.357Z] [INFO] [realtime] socket disconnected user=41
+[2026-09-18T07:27:41.363Z] [INFO] [realtime] socket disconnected user=40
+[2026-09-18T07:27:41.364Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T07:28:58.942Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T07:29:01.916Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T07:33:56.348Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:33:59.388Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:34:32.037Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:34:36.495Z] [INFO] [realtime] user=43 joined party=4 (members=1)
+[2026-09-18T07:34:38.032Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:34:45.131Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:34:47.436Z] [INFO] [realtime] user=43 joined party=4 (members=1)
+[2026-09-18T07:34:48.546Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:36:34.402Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T07:36:38.444Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T07:36:46.285Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T07:36:46.845Z] [INFO] [realtime] socket connected user=45 (rt1_1789717002629)
+[2026-09-18T07:36:48.697Z] [INFO] [realtime] user=45 joined party=5 (members=1)
+[2026-09-18T07:36:49.255Z] [INFO] [realtime] socket connected user=46 (rt2_1789717002629)
+[2026-09-18T07:36:51.291Z] [INFO] [realtime] user=46 joined party=5 (members=2)
+[2026-09-18T07:36:52.592Z] [INFO] [realtime] socket disconnected user=46
+[2026-09-18T07:36:53.595Z] [INFO] [realtime] socket disconnected user=45
+[2026-09-18T07:36:53.596Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T07:50:36.938Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T07:51:04.363Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T07:51:15.295Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:53:26.297Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:53:27.130Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:53:30.091Z] [INFO] [realtime] user=43 joined party=6 (members=1)
+[2026-09-18T07:53:54.241Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:54:52.910Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:55:27.463Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:55:27.515Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:55:30.446Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:55:31.401Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:56:17.857Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:56:19.599Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:56:20.643Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:56:21.566Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:56:36.461Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:56:43.766Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:56:45.668Z] [INFO] [realtime] user=43 joined party=7 (members=1)
+[2026-09-18T07:58:10.783Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:58:11.783Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:58:14.007Z] [INFO] [realtime] user=43 joined party=7 (members=1)
+[2026-09-18T07:58:26.006Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:58:26.234Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:58:28.502Z] [INFO] [realtime] user=43 joined party=7 (members=1)
+[2026-09-18T07:58:46.972Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:58:47.255Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:58:49.394Z] [INFO] [realtime] user=43 joined party=7 (members=1)
+[2026-09-18T07:58:51.676Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T07:58:51.843Z] [INFO] [realtime] socket connected user=43 (ui10tester5)
+[2026-09-18T07:58:52.963Z] [INFO] [realtime] user=43 joined party=7 (members=1)
+[2026-09-18T07:59:07.988Z] [INFO] [realtime] socket disconnected user=43
+[2026-09-18T08:06:46.717Z] [INFO] [realtime] GC empty party room=3
+[2026-09-18T08:06:46.717Z] [INFO] [realtime] GC empty party room=4
+[2026-09-18T08:08:44.642Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:09:12.660Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:09:15.436Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:09:18.425Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:09:19.540Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:16:46.719Z] [INFO] [realtime] GC empty party room=5
+[2026-09-18T08:22:49.220Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:25:10.930Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:25:12.050Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:25:19.929Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:25:39.575Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:25:40.694Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:25:48.247Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:25:51.034Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:25:53.251Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:25:59.570Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:26:46.720Z] [INFO] [realtime] GC empty party room=6
+[2026-09-18T08:26:46.720Z] [INFO] [realtime] GC empty party room=7
+[2026-09-18T08:27:55.170Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:28:53.772Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:30:29.633Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:30:31.681Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:30:32.800Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:32:08.801Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:32:08.862Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:32:10.894Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:32:10.902Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:32:11.545Z] [INFO] [realtime] user=49 joined party=8 (members=1)
+[2026-09-18T08:41:00.878Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:48:27.139Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T08:48:27.446Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T08:49:40.693Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T08:49:40.701Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T08:52:01.639Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:52:09.795Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:52:09.893Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:52:52.396Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:52:55.049Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:53:39.375Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:53:40.182Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:53:43.113Z] [INFO] [realtime] user=49 joined party=7 (members=1)
+[2026-09-18T08:53:43.241Z] [INFO] [realtime] user=49 joined party=7 (members=1)
+[2026-09-18T08:53:43.530Z] [INFO] [realtime] user=49 joined party=7 (members=1)
+[2026-09-18T08:54:22.838Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:54:22.860Z] [INFO] [realtime] socket connected user=49 (ui10testerb)
+[2026-09-18T08:54:30.041Z] [INFO] [realtime] socket disconnected user=49
+[2026-09-18T08:54:30.874Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T08:55:39.253Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T08:55:42.698Z] [INFO] [realtime] socket connected user=50 (t10fiveqa)
+[2026-09-18T08:56:16.915Z] [INFO] [realtime] socket disconnected user=50
+[2026-09-18T08:56:17.701Z] [INFO] [realtime] socket connected user=50 (t10fiveqa)
+[2026-09-18T08:56:19.930Z] [INFO] [realtime] user=50 joined party=7 (members=1)
+[2026-09-18T08:56:19.931Z] [INFO] [realtime] user=50 joined party=7 (members=1)
+[2026-09-18T08:56:20.334Z] [INFO] [realtime] user=50 joined party=7 (members=1)
+[2026-09-18T08:56:21.531Z] [INFO] [realtime] socket disconnected user=50
+[2026-09-18T08:56:21.550Z] [INFO] [realtime] socket connected user=50 (t10fiveqa)
+[2026-09-18T08:57:44.738Z] [INFO] [realtime] socket disconnected user=50
+[2026-09-18T09:02:13.342Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:02:13.903Z] [INFO] [realtime] socket connected user=51 (s10a_1789722085215)
+[2026-09-18T09:02:15.758Z] [INFO] [realtime] user=51 joined party=12 (members=1)
+[2026-09-18T09:02:16.317Z] [INFO] [realtime] socket connected user=52 (s10b_1789722085215)
+[2026-09-18T09:02:17.498Z] [INFO] [realtime] user=52 joined party=12 (members=2)
+[2026-09-18T09:02:18.801Z] [INFO] [realtime] socket disconnected user=52
+[2026-09-18T09:02:19.803Z] [INFO] [realtime] socket disconnected user=51
+[2026-09-18T09:02:19.804Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:02:19.805Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:02:21.404Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:03:46.474Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:03:46.998Z] [INFO] [realtime] socket connected user=53 (s10a_1789722180440)
+[2026-09-18T09:03:48.728Z] [INFO] [realtime] user=53 joined party=15 (members=1)
+[2026-09-18T09:03:49.249Z] [INFO] [realtime] socket connected user=54 (s10b_1789722180440)
+[2026-09-18T09:03:50.286Z] [INFO] [realtime] user=54 joined party=15 (members=2)
+[2026-09-18T09:03:51.501Z] [INFO] [realtime] socket disconnected user=54
+[2026-09-18T09:03:52.504Z] [INFO] [realtime] socket disconnected user=53
+[2026-09-18T09:03:52.504Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:03:52.506Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:03:53.890Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:04:55.152Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:05:03.041Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:05:17.875Z] [INFO] [realtime] socket connected user=1 (admin)
+[2026-09-18T09:05:58.170Z] [INFO] [realtime] socket disconnected user=1
+[2026-09-18T09:05:58.977Z] [INFO] [realtime] socket connected user=1 (admin)
+[2026-09-18T09:06:01.941Z] [INFO] [realtime] user=1 joined party=17 (members=1)
+[2026-09-18T09:06:01.956Z] [INFO] [realtime] user=1 joined party=17 (members=1)
+[2026-09-18T09:06:02.331Z] [INFO] [realtime] user=1 joined party=17 (members=1)
+[2026-09-18T09:06:39.249Z] [INFO] [realtime] socket connected user=55 (qa_member_1789722389)
+[2026-09-18T09:06:46.729Z] [INFO] [realtime] GC empty party room=8
+[2026-09-18T09:06:47.507Z] [INFO] [realtime] socket disconnected user=55
+[2026-09-18T09:07:17.732Z] [INFO] [realtime] socket connected user=55 (qa_member_1789722389)
+[2026-09-18T09:07:19.965Z] [INFO] [realtime] user=55 joined party=17 (members=2)
+[2026-09-18T09:07:19.974Z] [INFO] [realtime] user=55 joined party=17 (members=2)
+[2026-09-18T09:07:20.344Z] [INFO] [realtime] user=55 joined party=17 (members=2)
+[2026-09-18T09:07:34.701Z] [INFO] [realtime] socket disconnected user=1
+[2026-09-18T09:08:54.648Z] [INFO] [realtime] socket disconnected user=55
+[2026-09-18T09:10:08.229Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:10:08.805Z] [INFO] [realtime] socket connected user=56 (s10a_1789722559997)
+[2026-09-18T09:10:10.651Z] [INFO] [realtime] user=56 joined party=19 (members=1)
+[2026-09-18T09:10:11.208Z] [INFO] [realtime] socket connected user=57 (s10b_1789722559997)
+[2026-09-18T09:10:12.315Z] [INFO] [realtime] user=57 joined party=19 (members=2)
+[2026-09-18T09:10:13.616Z] [INFO] [realtime] socket disconnected user=57
+[2026-09-18T09:10:14.619Z] [INFO] [realtime] socket disconnected user=56
+[2026-09-18T09:10:14.619Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:10:14.620Z] [INFO] [realtime] socket connected (guest)
+[2026-09-18T09:10:16.098Z] [INFO] [realtime] socket disconnected (guest)
+[2026-09-18T09:26:46.737Z] [INFO] [realtime] GC empty party room=7
+[2026-09-18T09:36:46.737Z] [INFO] [realtime] GC empty party room=12
+[2026-09-18T09:36:46.737Z] [INFO] [realtime] GC empty party room=15
+[2026-09-18T09:36:46.737Z] [INFO] [realtime] GC empty party room=17
+$ bun --hot index.js
+[2026-09-18T22:27:38.617Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-18T22:27:38.617Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth derived (sha256 animaxia-auth:DATABASEURL parity) | internal token required
+[2026-09-18T22:27:39.931Z] [INFO] [realtime] upstream monolith /api/health → ok
+$ bun --hot index.js
+[2026-09-20T20:16:14.323Z] [INFO] [realtime] animaxia-realtime v1.0.0 listening on :4010 (socket.io path "/")
+[2026-09-20T20:16:14.323Z] [INFO] [realtime] monolith bridge → http://127.0.0.1:4000 | auth derived (sha256 animaxia-auth:DATABASEURL parity) | internal token required
+[2026-09-20T20:16:15.639Z] [INFO] [realtime] upstream monolith /api/health → ok
+[2026-09-20T20:58:54.200Z] [INFO] [realtime] socket connected user=1 (admin)
+[2026-09-20T20:58:55.927Z] [INFO] [realtime] user=1 joined party=36 (members=1)
+[2026-09-20T20:58:56.678Z] [INFO] [realtime] user=1 joined party=36 (members=1)
+[2026-09-20T21:01:38.114Z] [INFO] [realtime] socket disconnected user=1
+[2026-09-20T21:01:40.598Z] [INFO] [realtime] socket connected user=1 (admin)
+[2026-09-20T21:01:42.652Z] [INFO] [realtime] user=1 joined party=36 (members=1)
+[2026-09-20T21:01:42.708Z] [INFO] [realtime] user=1 joined party=36 (members=1)
+[2026-09-20T21:01:43.248Z] [INFO] [realtime] user=1 joined party=36 (members=1)
