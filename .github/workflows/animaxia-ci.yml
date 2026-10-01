@@ -87,6 +87,12 @@ jobs:
           echo "=== BACKEND LOG ==="
           tail -n 150 ../../reports/backend.log
 
+      - name: Ingest YouTube canonical test record
+        run: |
+          BASE="http:""//127.0.0.1:4000"
+          curl -fsS -X POST "$BASE/api/miner"             -H "content-type: application/json"             -d '{"url":"https://youtu.be/BjwZQBT0qKs"}'
+          echo
+
       - name: Minimal search 8 providers + year + dedup
         run: |
           set -o pipefail
