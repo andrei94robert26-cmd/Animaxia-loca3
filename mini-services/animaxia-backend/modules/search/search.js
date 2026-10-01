@@ -52,8 +52,8 @@
  *
  * Text match: tsv @@ websearch_to_tsquery('simple', q). When that yields 0
  * hits and fuzzy !== 'false', a trigram fallback runs (title % q OR per-word
- * ILIKE). Combined score: ts_rank(tsv, q) * 2 + similarity(title, q) +
- * (title ILIKE 'q%' → +0.5). Empty q + filters → filter-only query (no text
+ * LIKE). Combined score: ts_rank(tsv, q) * 2 + similarity(title, q) +
+ * (title LIKE 'q%' → +0.5). Empty q + filters → filter-only query (no text
  * score). Rolling p50/p95 latency over the last 50 queries feeds /status.
  */
 
@@ -226,60 +226,42 @@ let dirty = true; // set at boot and on every content:changed
  * path below produces byte-identical rows/SQL (no semantic change). */
 const SEARCHDOC_UPSERT_SET = `
        ON CONFLICT (contentid) DO UPDATE SET
-         externalid = EXCLUDED.externalid,
-         type = EXCLUDED.type,
          title = EXCLUDED.title,
-         tsv = EXCLUDED.tsv,
-         year = EXCLUDED.year,
-         rating = EXCLUDED.rating,
-         genres = EXCLUDED.genres,
-         actors = EXCLUDED.actors,
-         studios = EXCLUDED.studios,
-         category = EXCLUDED.category,
-         shardid = EXCLUDED.shardid,
-         syncedat = NOW()`;
+         year = EXCLUDED.year`;
 
 function searchdocUpsertSql(tuples) {
-  return `INSERT INTO searchdocs
-         (contentid, externalid, type, title, tsv, year, rating, genres, actors, studios, category, shardid, syncedat)
-       VALUES ${tuples.join(', ')}
-       ${SEARCHDOC_UPSERT_SET}`;
+  return `INSERT INTO searchdocs (contentid, title, year)
+          VALUES ${tuples.join(', ')}
+          ${SEARCHDOC_UPSERT_SET}`;
 }
 
-/** One searchdocs upsert tuple (12 params) built from a content row —
- *  shared by syncIndex() and the TS1 incremental sync (same row shape). */
+function detectYear(row) {
+  const direct = Number(row.year);
+  if (Number.isInteger(direct) && direct >= 1000 && direct <= 9999) return direct;
+
+  const match = String(row.title || '').match(/\b(19|20)\d{2}\b/);
+  return match ? Number(match[0]) : null;
+}
+
 function buildSearchdocTuple(row, j) {
-  const meta = parseJsonb(row.metadata, {});
-  const genres = toNameArray(meta.genres);
-  const actors = toNameArray(meta.actors ?? meta.cast);
-  const studios = toNameArray(meta.studios ?? meta.studio);
-  const tsvText = buildTsvText(row.title, genres, meta);
-  // FAZA 13 (sharding): searchdocs carries its shard id = the catalog
-  // RANGE shard of the contentid it indexes (ids < 1B → 0, legacy-safe).
-  const shardid = computeShardIdFromContentId(row.id);
-  const base = j * 12;
+  const base = j * 3;
   const values = [
     Number(row.id),
-    row.externalid ?? null,
-    row.type ?? null,
     row.title ?? 'untitled',
-    tsvText,
-    toIntOrNull(meta.year),
-    toFloatOrNull(meta.rating ?? meta.score),
-    genres,
-    actors,
-    studios,
-    row.type ?? null,
-    shardid,
+    detectYear(row),
   ];
+
   const b = (k) => `$${base + k}`;
-  const tuple = `(${b(1)},${b(2)},${b(3)},${b(4)},to_tsvector('simple', ${b(5)}),${b(6)},${b(7)},${b(8)}::text[],${b(9)}::text[],${b(10)}::text[],${b(11)},${b(12)},NOW())`;
-  return { values, tuple };
+
+  return {
+    values,
+    tuple: `(${b(1)},${b(2)},${b(3)})`,
+  };
 }
 
 async function syncIndex() {
   const raw = await rows(
-    'SELECT id, externalid, type, title, metadata, thumbnail, createdat FROM content',
+    'SELECT id, title, year FROM content',
   );
 
   let synced = 0;
@@ -320,8 +302,8 @@ async function syncIndex() {
 async function bootConsistencyProbe() {
   try {
     const row = await one(`
-      SELECT (SELECT COUNT(*)::int FROM content)   AS content_n,
-             (SELECT COUNT(*)::int FROM searchdocs) AS docs_n
+      SELECT (SELECT COUNT(*) FROM content)   AS content_n,
+             (SELECT COUNT(*) FROM searchdocs) AS docs_n
     `);
     const contentN = Number(row?.content_n ?? -1);
     const docsN = Number(row?.docs_n ?? -2);
@@ -408,12 +390,12 @@ events.on('content:changed:ids', ({ ids, action } = {}) => {
     pendingDeleteIds.clear();
     try {
       if (deleteIds.length > 0) {
-        await rows('DELETE FROM searchdocs WHERE contentid = ANY($1::int[])', [deleteIds]);
+        await rows('DELETE FROM searchdocs WHERE contentid IN (SELECT value FROM json_each($1))', [JSON.stringify(deleteIds)]);
       }
       if (upsertIds.length > 0) {
         const raw = await rows(
-          'SELECT id, externalid, type, title, metadata, thumbnail, createdat FROM content WHERE id = ANY($1::int[])',
-          [upsertIds],
+          'SELECT id, title, year FROM content WHERE id IN (SELECT value FROM json_each($1))',
+          [JSON.stringify(upsertIds)],
         );
         for (let i = 0; i < raw.length; i += SYNC_CHUNK) {
           const slice = raw.slice(i, i + SYNC_CHUNK);
@@ -468,232 +450,97 @@ const SORTS = new Set(['score', 'year', 'rating', 'title']);
 /** Normalize a joined row to the canonical content shape + _score. */
 function normalizeHit(row) {
   if (!row) return null;
+
   return {
     id: Number(row.id),
-    externalid: row.externalid ?? null,
-    type: row.type ?? null,
     title: row.title ?? null,
-    metadata: parseJsonb(row.metadata, {}),
-    thumbnail: row.thumbnail === undefined ? null : row.thumbnail,
-    createdat:
-      row.createdat instanceof Date ? row.createdat.toISOString() : String(row.createdat ?? ''),
-    _score: row._score == null ? 0 : Number(Number(row._score).toFixed(6)),
+    year: row.year == null ? null : Number(row.year),
+    url: row.url ?? null,
+    embedcode: row.embedcode ?? null,
+    _score: row._score == null ? 0 : Number(row._score),
   };
 }
 
 /**
- * Run one advanced query against searchdocs (joined back to content).
- * Filter fragments are built once and shared by the count + data statements.
- * FAZA 17-a: `cursor` (base64url payload) switches to keyset pagination —
- * the ORDER BY becomes the cursor continuation WHERE and OFFSET is dropped;
- * `effectiveSort` is what actually orders the result (contentid keyset when
- * there is no text query and the caller asked for the default 'score' sort,
- * because score would be constant 0 for every row).
+ * SQLite minimal search.
+ * Searches ONLY: id, title, year.
  */
 async function runAdvancedQuery({
   q,
-  type,
-  genre,
   year,
-  minRating,
-  actor,
-  studio,
-  category,
-  sort,
-  fuzzyEnabled,
   limit,
   page,
   cursor = null,
 }) {
   const params = [];
-  const P = (v) => {
-    params.push(v);
+  const P = (value) => {
+    params.push(value);
     return `$${params.length}`;
   };
 
-  // Effective sort: filter-only (no q) with default 'score' → contentid keyset.
-  const effectiveSort = !q && sort === 'score' ? 'contentid' : sort;
-
-  // Keyset continuation (cursor present) — validated per effective sort.
-  let cursorPayload = null;
-  let cursorWhere = null;
-  let cursorParams = [];
-  if (cursor) {
-    const decoded = cursorContinuation(effectiveSort, cursor);
-    if (decoded.error) {
-      const err = new Error(decoded.error);
-      err.status = 400;
-      throw err;
-    }
-    cursorPayload = decoded.payload;
-    cursorWhere = decoded.where;
-    cursorParams = decoded.params;
-  }
-
-  // Field filters (SQL-side, case-insensitive where array containment).
   const filters = [];
-  if (type) filters.push(`s.type = ${P(type)}`);
-  if (genre) filters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${P(genre)})`);
-  if (year != null) filters.push(`s.year = ${P(year)}`);
-  if (actor) {
-    filters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${P(actor)} || '%')`);
-  }
-  if (studio) {
-    filters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${P(studio)} || '%')`);
-  }
-  if (category) filters.push(`s.category = ${P(category)}`);
-  if (minRating != null) filters.push(`s.rating >= ${P(minRating)}`);
-  const filterSql = filters.length ? ` AND ${filters.join(' AND ')}` : '';
 
-  // Text score expression (combined: ts_rank * 2 + similarity + prefix bonus).
-  let scoreExpr = '0';
-  let textMatch = '';
   if (q) {
-    const qp = P(q);
-    scoreExpr =
-      `ts_rank(s.tsv, websearch_to_tsquery('simple', ${qp})) * 2` +
-      ` + similarity(s.title, ${qp})` +
-      ` + CASE WHEN s.title ILIKE ${qp} || '%' THEN 0.5 ELSE 0 END`;
-    textMatch = `s.tsv @@ websearch_to_tsquery('simple', ${qp})`;
+    const text = String(q).trim();
+
+    if (/^\d+$/.test(text)) {
+      const idPh = P(Number(text));
+      const titlePh = P(`%${text}%`);
+      filters.push(`(s.contentid = ${idPh} OR s.title LIKE ${titlePh} COLLATE NOCASE)`);
+    } else {
+      const titlePh = P(`%${text}%`);
+      filters.push(`s.title LIKE ${titlePh} COLLATE NOCASE`);
+    }
   }
 
-  const whereFor = (matchSql) => `WHERE (${matchSql || 'TRUE'})${filterSql}`;
+  if (year != null) {
+    filters.push(`s.year = ${P(Number(year))}`);
+  }
 
-  // 1. FTS pass (or filter-only when q is empty).
-  let matchSql = textMatch;
-  let countRow = await one(
-    `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
+  const whereSql = filters.length
+    ? `WHERE ${filters.join(' AND ')}`
+    : '';
+
+  const countRow = await one(
+    `SELECT COUNT(*) AS total FROM searchdocs s ${whereSql}`,
     params,
   );
 
-  // 2. Trigram fuzzy fallback when the FTS pass matched nothing.
-  //    `title % q` (pg_trgm, default 0.3 threshold) plus a looser
-  //    similarity() > 0.1 guard so short typo'd queries still reach long
-  //    titles (e.g. 'dunee' → 'Dune: Part Two - Wikipedia', sim ≈ 0.15).
-  if (q && fuzzyEnabled && Number(countRow?.total ?? 0) === 0) {
-    const words = q.split(/\s+/).filter(Boolean);
-    const trigramClauses = [];
-    for (const candidate of [q, ...words]) {
-      const ph = P(`%${candidate}%`);
-      trigramClauses.push(`s.title ILIKE ${ph}`);
-    }
-    const qSim = P(q);
-    trigramClauses.push(`(s.title % ${qSim} OR similarity(s.title, ${qSim}) > 0.1)`);
-    matchSql = `(${trigramClauses.join(' OR ')})`;
-    countRow = await one(
-      `SELECT COUNT(*)::int AS total, COALESCE(MAX(${scoreExpr}), 0) AS maxscore FROM searchdocs s ${whereFor(matchSql)}`,
-      params,
-    );
-  }
-
   const total = Number(countRow?.total ?? 0);
-  const maxScore = Number(Number(countRow?.maxscore ?? 0).toFixed(6));
 
-  // 3. Data page — subquery keeps the score expression, then joins content.
-  //    FAZA 17-a: expose year/rating/title to JS for nextCursor construction;
-  //    cursor mode replaces OFFSET with the keyset continuation predicate.
-  const orderExpr =
-    effectiveSort === 'year'
-      ? 't.year DESC NULLS LAST, t.contentid ASC'
-      : effectiveSort === 'rating'
-        ? 't.rating DESC NULLS LAST, t.score DESC, t.contentid ASC'
-        : effectiveSort === 'title'
-          ? 't.title ASC, t.contentid ASC'
-          : effectiveSort === 'contentid'
-            ? 't.contentid ASC'
-            : 't.score DESC, t.contentid ASC';
+  const dataParams = [...params];
+  dataParams.push(Number(limit));
+  const limitPh = `$${dataParams.length}`;
 
-  const limitPh = P(limit);
-  const offsetPh = P((page - 1) * limit);
-  // Cursor mode: continuation params come FIRST ($1..$n), then LIMIT; the
-  // filter/score params are re-bound only inside the subquery — so build a
-  // dedicated statement for each mode instead of renumbering dynamically.
-  let dataSql;
-  let dataParams;
-  if (cursorWhere) {
-    // Rebuild the subquery with a fresh parameter namespace for the cursor run
-    // (filters + score expression are re-parameterized after the cursor slots).
-    const subParams = [...cursorParams, limit];
-    const sub = (v) => {
-      subParams.push(v);
-      return `$${subParams.length}`;
-    };
-    const cFilters = [];
-    if (type) cFilters.push(`s.type = ${sub(type)}`);
-    if (genre) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.genres) g WHERE g ILIKE ${sub(genre)})`);
-    if (year != null) cFilters.push(`s.year = ${sub(year)}`);
-    if (actor) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.actors) a WHERE a ILIKE '%' || ${sub(actor)} || '%')`);
-    if (studio) cFilters.push(`EXISTS (SELECT 1 FROM unnest(s.studios) st WHERE st ILIKE '%' || ${sub(studio)} || '%')`);
-    if (category) cFilters.push(`s.category = ${sub(category)}`);
-    if (minRating != null) cFilters.push(`s.rating >= ${sub(minRating)}`);
-    const cFilterSql = cFilters.length ? ` AND ${cFilters.join(' AND ')}` : '';
+  dataParams.push((Math.max(1, Number(page) || 1) - 1) * Number(limit));
+  const offsetPh = `$${dataParams.length}`;
 
-    let cScoreExpr = '0';
-    let cMatch = 'TRUE';
-    // Single q slot, bound LAST (after cursor params + LIMIT) so every
-    // placeholder references a parameter that exists in the bind array.
-    let qParam = null;
-    if (q) {
-      qParam = sub(String(q));
-      cScoreExpr =
-        `ts_rank(s.tsv, websearch_to_tsquery('simple', ${qParam})) * 2` +
-        ` + similarity(s.title, ${qParam})` +
-        ` + CASE WHEN s.title ILIKE ${qParam} || '%' THEN 0.5 ELSE 0 END`;
-      cMatch = `s.tsv @@ websearch_to_tsquery('simple', ${qParam})`;
-    }
-    // Fuzzy fallback consistency: when the FTS pass matched nothing the offset
-    // run switched matchSql — mirror that for the cursor run using `total`.
-    if (q && fuzzyEnabled && total === 0) {
-      const words = q.split(/\s+/).filter(Boolean);
-      const clauses = [q, ...words].map((candidate) => `s.title ILIKE ${sub(`%${candidate}%`)}`);
-      clauses.push(`(s.title % ${qParam} OR similarity(s.title, ${qParam}) > 0.1)`);
-      cMatch = `(${clauses.join(' OR ')})`;
-    }
-
-    dataSql =
-      `SELECT c.id, c.externalid, c.type, c.title, c.metadata, c.thumbnail, c.createdat,
-              t.score AS _score, t.year AS _year, t.rating AS _rating, t.title AS _title
-       FROM (
-         SELECT s.contentid, s.year, s.rating, s.title, ${cScoreExpr} AS score
-         FROM searchdocs s
-         WHERE (${cMatch})${cFilterSql}
-       ) t
-       JOIN content c ON c.id = t.contentid
-       WHERE ${cursorWhere}
-       ORDER BY ${orderExpr}
-       LIMIT $${cursorParams.length + 1}::int`;
-    // LIMIT is the placeholder right after the cursor params (::int — a bare
-    // parameter in LIMIT cannot be type-inferred by Postgres); the q/filter
-    // slots follow it so every bound parameter is referenced by the statement.
-    dataParams = subParams;
-  } else {
-    dataSql =
-      `SELECT c.id, c.externalid, c.type, c.title, c.metadata, c.thumbnail, c.createdat,
-              t.score AS _score, t.year AS _year, t.rating AS _rating, t.title AS _title
-       FROM (
-         SELECT s.contentid, s.year, s.rating, s.title, ${scoreExpr} AS score
-         FROM searchdocs s
-         ${whereFor(matchSql)}
-       ) t
-       JOIN content c ON c.id = t.contentid
-       ORDER BY ${orderExpr}
-       LIMIT ${limitPh} OFFSET ${offsetPh}`;
-    dataParams = params;
-  }
-  const dataRows = await rows(dataSql, dataParams);
-
-  // Keyset paging estimates the page number by incrementing the cursor's `p`.
-  const resultPage = cursor ? (Number(cursorPayload?.p) || 1) + 1 : page;
-  const normalized = dataRows.map(normalizeHit).filter(Boolean);
-  const lastRaw = dataRows.length ? dataRows[dataRows.length - 1] : null;
+  const dataRows = await rows(
+    `SELECT
+       c.id,
+       c.title,
+       c.year,
+       c.url,
+       c.embedcode,
+       CASE
+         WHEN s.contentid = ${q && /^\d+$/.test(String(q).trim()) ? Number(q) : -1} THEN 2
+         ELSE 1
+       END AS _score
+     FROM searchdocs s
+     JOIN content c ON c.id = s.contentid
+     ${whereSql}
+     ORDER BY _score DESC, s.title COLLATE NOCASE ASC, s.contentid ASC
+     LIMIT ${limitPh} OFFSET ${offsetPh}`,
+    dataParams,
+  );
 
   return {
     total,
-    max_score: maxScore,
-    data: normalized,
-    page: resultPage,
-    nextCursor: buildNextCursor({ sort: effectiveSort, lastRow: lastRaw, pageNumber: resultPage }),
-    paginationMode: cursor ? 'cursor' : 'offset',
+    max_score: dataRows.length ? Math.max(...dataRows.map(r => Number(r._score || 0))) : 0,
+    data: dataRows.map(normalizeHit).filter(Boolean),
+    page: Math.max(1, Number(page) || 1),
+    nextCursor: null,
+    paginationMode: 'offset',
   };
 }
 
@@ -951,12 +798,10 @@ router.get('/autocomplete', wrap(async (req, res) => {
   const executor = async () => {
     await ensureSynced();
     const matched = await rows(
-      `SELECT s.contentid, s.title, s.type, s.rating, c.thumbnail,
-              similarity(s.title, $1) AS sim
+      `SELECT s.contentid, s.title, s.year
        FROM searchdocs s
-       JOIN content c ON c.id = s.contentid
-       WHERE s.title %> $1 OR s.title ILIKE $1 || '%'
-       ORDER BY sim DESC, s.rating DESC NULLS LAST, s.contentid ASC
+       WHERE s.title LIKE $1 || '%' COLLATE NOCASE
+       ORDER BY s.title COLLATE NOCASE ASC, s.contentid ASC
        LIMIT 8`,
       [q],
     );
@@ -998,31 +843,16 @@ router.get('/autocomplete', wrap(async (req, res) => {
 /** GET /api/search/filters — distinct filter values for UI dropdowns. Public. */
 router.get('/filters', wrap(async (req, res) => {
   await ensureSynced();
-  const [genres, actors, years, categories, studios] = await Promise.all([
-    rows(
-      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(genres) AS value FROM searchdocs) t
-       WHERE value <> '' GROUP BY value ORDER BY count DESC, value ASC`,
-    ),
-    rows(
-      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(actors) AS value FROM searchdocs) t
-       WHERE value <> '' GROUP BY value ORDER BY count DESC, value ASC LIMIT 50`,
-    ),
-    rows(`SELECT DISTINCT year FROM searchdocs WHERE year IS NOT NULL ORDER BY year DESC`),
-    rows(
-      `SELECT category AS value, COUNT(*)::int AS count FROM searchdocs
-       WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC, value ASC`,
-    ),
-    rows(
-      `SELECT value, COUNT(*)::int AS count FROM (SELECT unnest(studios) AS value FROM searchdocs) t
-       WHERE value <> '' GROUP BY value ORDER BY count DESC, value ASC LIMIT 50`,
-    ),
-  ]);
+
+  const years = await rows(
+    `SELECT DISTINCT year
+     FROM searchdocs
+     WHERE year IS NOT NULL
+     ORDER BY year DESC`
+  );
+
   return res.json({
-    genres,
-    actors,
     years: years.map((r) => Number(r.year)),
-    categories,
-    studios,
   });
 }));
 
@@ -1198,8 +1028,8 @@ router.get('/status', wrap(async (req, res) => {
   let pgTrgm = false;
   try {
     const [docRow, extRow] = await Promise.all([
-      one('SELECT COUNT(*)::int AS n FROM searchdocs'),
-      one(`SELECT COUNT(*)::int AS n FROM pg_extension WHERE extname = 'pg_trgm'`),
+      one('SELECT COUNT(*) AS n FROM searchdocs'),
+      one(`SELECT COUNT(*) AS n FROM pg_extension WHERE extname = 'pg_trgm'`),
     ]);
     docs = Number(docRow?.n ?? 0);
     pgTrgm = Number(extRow?.n ?? 0) > 0;
