@@ -242,6 +242,12 @@ function authHeaders(): Record<string, string> {
 export const api = {
   /* ------------------------------- core ------------------------------- */
   health: () => request<HealthResponse>(apiUrl('/api/health')),
+  localSync: () =>
+    request<{ ok: true; indexed: number }>(apiUrl('/api/search/index'), {
+      method: 'POST',
+      headers: authHeaders(),
+      body: '{}',
+    }),
   all: (p: { page?: number; limit?: number; type?: string; search?: string; sort?: string } = {}) =>
     request<AllResponse>(apiUrl('/api/all', p)),
   content: (id: number | string) => request<DbContent>(apiUrl(`/api/content/${id}`)),

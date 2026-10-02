@@ -6,7 +6,7 @@
  * TV & Show-biz / Lumea — 196 țări. Desktop renders a sticky sidebar; the
  * mobile Sheet in the navbar renders the same SidebarMenuContent. Footer
  * mirrors the blueprint: "Conectează-te pentru a salva favoritele și progresul"
- * + Adaugă / Neon Sync / Conectare actions.
+ * + Adaugă / Local Sync / Conectare actions.
  *
  * FAZA 15 — the 'ai-metadata' group renders as collapsible submenus whose
  * values come live from the AI metadata extractor (/api/ai/home/metadata).
@@ -53,15 +53,25 @@ export function SidebarMenuContent({
     onNavigate?.();
   };
 
-  const neonSync = async () => {
+  const localSync = async () => {
     setSyncing(true);
     try {
+      const sync = await api.localSync();
       const health = await api.health();
-      toast.success('Neon Sync complet', {
-        description: `${health.db.totalItems.toLocaleString('ro-RO')} titluri în Neon · driver: ${health.db.driver}`,
+
+      window.dispatchEvent(new CustomEvent('animaxia:local-sync', {
+        detail: {
+          driver: health.db.driver,
+          totalItems: health.db.totalItems,
+          indexed: sync.indexed,
+        },
+      }));
+
+      toast.success('Sincronizare locală completă', {
+        description: `${sync.indexed.toLocaleString('ro-RO')} titluri indexate local · driver: ${health.db.driver}`,
       });
     } catch {
-      toast.error('Neon Sync a eșuat', { description: 'Backend-ul nu răspunde — încearcă din nou.' });
+      toast.error('Sincronizarea locală a eșuat', { description: 'Backend-ul nu răspunde — încearcă din nou.' });
     } finally {
       setSyncing(false);
     }
@@ -119,13 +129,13 @@ export function SidebarMenuContent({
               Adaugă
             </Button>
             <Button
-              onClick={neonSync}
+              onClick={localSync}
               disabled={syncing}
               variant="outline"
               className="h-10 flex-1 border-white/15 bg-white/5 text-sm font-semibold text-zinc-200 hover:bg-white/10 hover:text-white"
             >
               <RefreshCw className={cn('mr-1.5 h-4 w-4', syncing && 'animate-spin')} aria-hidden />
-              Neon Sync
+              Local Sync
             </Button>
           </div>
           {user ? (
@@ -537,15 +547,25 @@ function SidebarFooterActions({ route }: { route: AppRoute | null }) {
   const [addOpen, setAddOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  const neonSync = async () => {
+  const localSync = async () => {
     setSyncing(true);
     try {
+      const sync = await api.localSync();
       const health = await api.health();
-      toast.success('Neon Sync complet', {
-        description: `${health.db.totalItems.toLocaleString('ro-RO')} titluri în Neon · driver: ${health.db.driver}`,
+
+      window.dispatchEvent(new CustomEvent('animaxia:local-sync', {
+        detail: {
+          driver: health.db.driver,
+          totalItems: health.db.totalItems,
+          indexed: sync.indexed,
+        },
+      }));
+
+      toast.success('Sincronizare locală completă', {
+        description: `${sync.indexed.toLocaleString('ro-RO')} titluri indexate local · driver: ${health.db.driver}`,
       });
     } catch {
-      toast.error('Neon Sync a eșuat', { description: 'Backend-ul nu răspunde — încearcă din nou.' });
+      toast.error('Sincronizarea locală a eșuat', { description: 'Backend-ul nu răspunde — încearcă din nou.' });
     } finally {
       setSyncing(false);
     }
@@ -562,13 +582,13 @@ function SidebarFooterActions({ route }: { route: AppRoute | null }) {
           Adaugă
         </Button>
         <Button
-          onClick={neonSync}
+          onClick={localSync}
           disabled={syncing}
           variant="outline"
           className="h-10 flex-1 border-white/15 bg-white/5 text-sm font-semibold text-zinc-200 hover:bg-white/10 hover:text-white"
         >
           <RefreshCw className={cn('mr-1.5 h-4 w-4', syncing && 'animate-spin')} aria-hidden />
-          Neon Sync
+          Local Sync
         </Button>
       </div>
       {user ? (
