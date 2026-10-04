@@ -213,7 +213,9 @@ export function SearchView({ route }: { route: AppRoute }) {
 
   /* Keep the box in sync when the URL query changes. */
   useEffect(() => {
-    setInput(q);
+    queueMicrotask(() => {
+      setInput(q);
+    });
   }, [q]);
 
   /* Live search: debounce 400 ms, navigate only when the query really changed. */
@@ -281,9 +283,11 @@ export function SearchView({ route }: { route: AppRoute }) {
   useEffect(() => {
     const query = input.trim();
     if (!acOpen || query.length < 1) {
-      setAcItems([]);
-      setAcLoading(false);
-      setAcHighlight(-1);
+      queueMicrotask(() => {
+        setAcItems([]);
+        setAcLoading(false);
+        setAcHighlight(-1);
+      });
       return;
     }
     setAcLoading(true);
@@ -827,8 +831,18 @@ function LibrarySearchPanel({ q }: { q: string }) {
   useEffect(() => {
     const data = ar10mRes.data;
     if (!data) return;
-    setAr10mItems(data.results);
-    setAr10mCursor(data.nextCursor);
+
+    let cancelled = false;
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setAr10mItems(data.results);
+      setAr10mCursor(data.nextCursor);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [ar10mRes.data]);
 
   const loadMoreAr10m = async () => {

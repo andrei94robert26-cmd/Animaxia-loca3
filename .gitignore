@@ -53,3 +53,7 @@ db/*.db-shm
 # SQLite runtime files
 db/*.db-wal
 db/*.db-shm
+
+# Monitoring runtime state
+mini-services/observability/data/
+mini-services/stability/data/

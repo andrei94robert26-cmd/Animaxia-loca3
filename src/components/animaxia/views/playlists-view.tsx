@@ -250,8 +250,12 @@ function AddItemSection({ playlistId, onAdded }: { playlistId: number; onAdded: 
   useEffect(() => {
     if (!debounced) return undefined;
     let cancelled = false;
-    setSearching(true);
-    setSearchError(null);
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setSearching(true);
+      setSearchError(null);
+    });
     api
       .searchAdvanced({ q: debounced, limit: 8 })
       .then((res) => {

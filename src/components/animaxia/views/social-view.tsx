@@ -230,9 +230,18 @@ function FeedTab({ liveEvents }: { liveEvents: ActivityEvent[] }) {
   const [moreError, setMoreError] = useState<string | null>(null);
 
   useEffect(() => {
-    setMoreItems([]);
-    setMoreCursor(undefined);
-    setMoreError(null);
+    let cancelled = false;
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setMoreItems([]);
+      setMoreCursor(undefined);
+      setMoreError(null);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [feed.data]);
 
   const items = useMemo(() => [...(feed.data?.data ?? []), ...moreItems], [feed.data, moreItems]);
@@ -914,14 +923,15 @@ function PartiesTab() {
 
   /* NEON FREE PLAN: auto-refresh la 5 MIN (fost 30s), doar tab vizibil —
    * lista de vizionări în grup; butonul manual de mai jos forțează update. */
-  const partiesRef = useRef(parties.refetch);
-  partiesRef.current = parties.refetch;
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') partiesRef.current().catch(() => {});
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void parties.refetch().catch(() => {});
+      }
     }, 5 * 60 * 1000);
-    return () => clearInterval(timer);
-  }, []);
+
+    return () => window.clearInterval(timer);
+  }, [parties.refetch]);
 
   /* Join by code. */
   const [code, setCode] = useState('');
@@ -1131,13 +1141,26 @@ function StartPartyDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
 
   useEffect(() => {
     if (!open) return;
+
     let cancelled = false;
+
     if (debouncedQ.length === 0) {
-      setResults([]);
-      return;
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setResults([]);
+        setSearching(false);
+      });
+
+      return () => {
+        cancelled = true;
+      };
     }
-    setSearching(true);
-    api
+
+    queueMicrotask(() => {
+      if (!cancelled) setSearching(true);
+    });
+
+    void api
       .all({ search: debouncedQ, limit: 12 })
       .then((res) => {
         if (!cancelled) setResults(res.data);
@@ -1148,6 +1171,7 @@ function StartPartyDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
       .finally(() => {
         if (!cancelled) setSearching(false);
       });
+
     return () => {
       cancelled = true;
     };

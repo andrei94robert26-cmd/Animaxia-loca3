@@ -580,12 +580,14 @@ export function PlayerView({ route }: { route: AppRoute }) {
   /* Source change → reset bar state honestly: a fresh element starts at
      1× speed, time 0 (the resume seek re-syncs via timeupdate). */
   useEffect(() => {
-    setPlaybackRate(1);
-    setIsPlaying(false);
-    setVideoTime(0);
-    setVideoDuration(0);
-    setProgressDrag(false);
-    setDragPercent(0);
+    queueMicrotask(() => {
+      setPlaybackRate(1);
+      setIsPlaying(false);
+      setVideoTime(0);
+      setVideoDuration(0);
+      setProgressDrag(false);
+      setDragPercent(0);
+    });
     const el = videoRef.current;
     if (el) {
       try {
