@@ -11,7 +11,7 @@ const providers = [
   'Florin Cercel',
   'OK.ru',
   'Vimeo',
-  'TwitchDev',
+  'Twitch',
 ];
 
 async function search(params) {
