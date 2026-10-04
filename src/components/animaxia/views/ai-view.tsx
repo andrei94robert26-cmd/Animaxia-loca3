@@ -752,7 +752,7 @@ function DescribeTab() {
               id="describe-title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Neon Requiem"
+              placeholder="ex. Requiem Digital"
               maxLength={200}
               className="h-11 rounded-xl border-white/10 bg-white/[0.04] text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:border-rose-500/50 focus-visible:ring-rose-500/30"
             />

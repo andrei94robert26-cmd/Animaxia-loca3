@@ -316,7 +316,7 @@ function CollectionCard({ id }: { id: string }) {
 
       {collection.items.length === 0 ? (
         <p className="mt-3 text-xs text-zinc-500">
-          Colecție goală — apasă „Adaugă titluri” și alege din biblioteca Neon.
+          Colecție goală — apasă „Adaugă titluri” și alege din biblioteca locală.
         </p>
       ) : (
         <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6">

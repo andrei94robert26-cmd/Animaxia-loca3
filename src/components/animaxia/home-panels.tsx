@@ -6,8 +6,8 @@
  *  - PlatformHeroPanel      "PLATFORMĂ ALIMENTATĂ DE TINE" + badges (196 țări,
  *                           100% Neon, AI clasificare automată) + CTA
  *  - AddContentForm/Dialog  URL • Embed • iframe • JS ingestion (Animaxia Miner)
- *  - CommunityActivityPanel "Activitatea comunității — live din Neon"
- *  - NeonLibraryPanel       "🧠 Biblioteca ta Neon — redare universală"
+ *  - CommunityActivityPanel "Activitatea comunității — live din SQLite local"
+ *  - NeonLibraryPanel       "🧠 Biblioteca ta locală — redare universală"
  *  - AiAnalysisPanel        "AI Analiză conținut" — LIVE, auto-refresh 60s
  *  - TaxonomyPanel          "Genuri & Categorii create automat de AI"
  *
@@ -96,11 +96,11 @@ export function AddContentForm({
       const res = await api.ingestCheck(trimmed);
       setDupCheck(res);
       if (res.exists) {
-        toast.warning('Acest link există deja în Neon', {
+        toast.warning('Acest link există deja local', {
           description: `${res.source?.kind ?? 'sursă'} · ${res.source?.hits ?? 1} accesări — apasă din nou „Adaugă” dacă vrei să continui oricum.`,
         });
       } else {
-        toast.success('Link nou — nu există duplicat în Neon');
+        toast.success('Link nou — nu există duplicat local');
       }
     } catch {
       toast.error('Verificarea anti-duplicat a eșuat', { description: 'Backend-ul nu răspunde — poți continua oricum.' });
@@ -116,7 +116,7 @@ export function AddContentForm({
     /* Confirmare dublă când linkul e deja înregistrat ca sursă. */
     if (dupCheck?.exists && !forceAdd) {
       setForceAdd(true);
-      toast.warning('Link deja în Neon — confirmă adăugarea', {
+      toast.warning('Link deja în SQLite — confirmă adăugarea', {
         description: 'Apasă din nou „Adaugă” pentru a adăuga totuși acest conținut.',
       });
       return;
@@ -131,8 +131,8 @@ export function AddContentForm({
         result.extraction.youtube.length;
       toast.success(
         found > 0
-          ? `Conținut adăugat — ${found} ${found === 1 ? 'sursă' : 'surse'} salvate în Neon, verificate anti-duplicat`
-          : `Pagina a fost indexată în Neon (verificată anti-duplicat), dar nu am găsit surse video directe`,
+          ? `Conținut adăugat — ${found} ${found === 1 ? 'sursă' : 'surse'} salvate local în SQLite, verificate anti-duplicat`
+          : `Pagina a fost indexată local în SQLite (verificată anti-duplicat), dar nu am găsit surse video directe`,
         { description: result.record.title },
       );
       onUrlChange('');
@@ -185,12 +185,12 @@ export function AddContentForm({
       </div>
       {!compact && (
         <p className="text-xs text-zinc-500 sm:hidden">
-          Playerul universal redă orice sursă; motorul de căutare o indexează instant în Neon.
+          Playerul universal redă orice sursă; motorul de căutare o indexează instant local.
         </p>
       )}
       {dupCheck?.exists ? (
         <p role="status" className="text-xs font-medium text-amber-300 sm:col-span-2">
-          ⚠ Link deja în registrul Neon — {dupCheck.source?.hits ?? 1} accesări · {dupCheck.source?.kind}.{' '}
+          ⚠ Link deja în registrul SQLite — {dupCheck.source?.hits ?? 1} accesări · {dupCheck.source?.kind}.{' '}
           {forceAdd ? 'Apasă „Adaugă” din nou pentru a confirma.' : 'Apasă „Adaugă” o a doua oară ca să continui oricum.'}
         </p>
       ) : null}
@@ -214,7 +214,7 @@ export function AddContentDialog({ open, onOpenChange }: { open: boolean; onOpen
         </DialogHeader>
         <AddContentForm compact onAdded={() => onOpenChange(false)} />
         <p className="text-xs leading-relaxed text-zinc-500">
-          Playerul universal îl redă, motorul de căutare îl indexează instant în Neon, iar AI-ul îl clasifică
+          Playerul universal îl redă, motorul de căutare îl indexează instant local, iar AI-ul îl clasifică
           automat. Arhitectură reală pregătită gradual pentru până la 10.000.000 de conținuturi.
         </p>
       </DialogContent>
@@ -250,7 +250,7 @@ export function PlatformHeroPanel() {
             <strong className="text-zinc-200">iframe</strong>, <strong className="text-zinc-200">cod embed</strong> sau{' '}
             <strong className="text-zinc-200">JavaScript</strong> din YouTube, OK.ru, Vimeo, TikTok, Dailymotion,
             Rumble, Twitch sau <strong className="text-zinc-200">orice altă sursă</strong> — inclusiv surse
-            necunoscute. Playerul universal îl redă, motorul de căutare îl indexează instant în Neon, fără să pice
+            necunoscute. Playerul universal îl redă, motorul de căutare îl indexează instant local, fără să pice
             nimic.
           </p>
         </div>
@@ -259,7 +259,7 @@ export function PlatformHeroPanel() {
             <Globe2 className="mr-1.5 h-3.5 w-3.5 text-rose-300" aria-hidden /> 196 țări
           </Badge>
           <Badge className="border-white/15 bg-white/10 text-zinc-200 hover:bg-white/10">
-            <Database className="mr-1.5 h-3.5 w-3.5 text-rose-300" aria-hidden /> 100% Neon, zero local
+            <Database className="mr-1.5 h-3.5 w-3.5 text-rose-300" aria-hidden /> 100% local, SQLite
           </Badge>
           <Badge className="border-white/15 bg-white/10 text-zinc-200 hover:bg-white/10">
             <Sparkles className="mr-1.5 h-3.5 w-3.5 text-rose-300" aria-hidden /> AI clasificare automată
@@ -310,7 +310,7 @@ export function CommunityActivityPanel() {
   return (
     <Section
       title="Activitatea comunității"
-      subtitle="Live din Neon — comentarii, recenzii și watch parties"
+      subtitle="Live din biblioteca locală — comentarii, recenzii și watch parties"
       action={
         <Button
           variant="outline"
@@ -337,7 +337,7 @@ export function CommunityActivityPanel() {
           <div>
             <p className="text-sm font-semibold text-zinc-200">Încă nimic — comentează sau vizionează ceva</p>
             <p className="mt-0.5 text-xs text-zinc-500">
-              pentru a porni fluxul social. Orice acțiune apare aici în timp real, direct din Neon.
+              pentru a porni fluxul social. Orice acțiune apare aici în timp real, direct din SQLite local.
             </p>
           </div>
         </div>
@@ -379,7 +379,7 @@ export function NeonLibraryPanel({ rows, loading, totalCount }: { rows: DbConten
 
   return (
     <Section
-      title={`🧠 Biblioteca ta Neon — redare universală (${totalCount})`}
+      title={`🧠 Biblioteca ta locală — redare universală (${totalCount})`}
       subtitle="Tot ce încarci tu, jucat de playerul universal și indexat instant"
       action={
         <Button
@@ -728,7 +728,7 @@ export function AiExternalAnalysisPanel() {
             />
             <AnalysisTile
               icon={<Database className="h-5 w-5" aria-hidden />}
-              label="Titluri în Neon"
+              label="Titluri locale"
               value={stats.library.total}
             />
             <AnalysisTile
@@ -830,7 +830,7 @@ export function AiTaxonomyAutoPanel() {
   return (
     <Section
       title="Genuri & Categorii generate automat de AI din posterele externe"
-      subtitle="Taxonomia crește la fiecare încărcare din TMDB, Jikan și biblioteca Neon"
+      subtitle="Taxonomia crește la fiecare încărcare din TMDB, Jikan și biblioteca locală"
       action={
         <Button
           variant="outline"

@@ -79,7 +79,7 @@ export function Navbar({ route }: { route: AppRoute | null }) {
 
   /* TS2b + AR10M: navbar autocomplete — debounce 250ms, ≥2 caractere, max 6
      sugestii. Calea principală: sugestiile reale AR10M (catalog fuzionat);
-     fallback transparent pe autocomplete-ul legacy Neon FTS. */
+     fallback transparent pe autocomplete-ul motorul SQLite FTS. */
   const [acOpen, setAcOpen] = useState(false);
   const [acItems, setAcItems] = useState<NavbarSuggestion[]>([]);
   const [acLoading, setAcLoading] = useState(false);
@@ -126,7 +126,7 @@ export function Navbar({ route }: { route: AppRoute | null }) {
           setAcHighlight(-1);
         }
       } catch {
-        /* Fallback onest: autocomplete legacy Neon FTS. */
+        /* Fallback onest: autocomplete motorul SQLite FTS. */
         try {
           const legacy = await api.searchAutocomplete(q);
           if (!cancelled) {

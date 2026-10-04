@@ -220,7 +220,7 @@ const SECTION_META: Record<
 > = {
   identical: {
     label: '1.000 identice',
-    desc: '1.000 utilizatori, O interogare → exact 1 interogare Neon reală',
+    desc: '1.000 utilizatori, O interogare → exact 1 interogare SQLite reală',
     tone: 'emerald',
   },
   different: {
@@ -261,7 +261,7 @@ function SectionsTable({ sections }: { sections: Record<string, SearchStressSect
             <TableHead className="text-right text-zinc-400">Total</TableHead>
             <TableHead className="text-right text-zinc-400">Ok (200)</TableHead>
             <TableHead className="text-right text-zinc-400">429 onest</TableHead>
-            <TableHead className="text-right text-zinc-400">Neon</TableHead>
+            <TableHead className="text-right text-zinc-400">SQLite</TableHead>
             <TableHead className="text-right text-zinc-400">Batch</TableHead>
             <TableHead className="text-right text-zinc-400">Cache</TableHead>
             <TableHead className="text-right text-zinc-400">p95 așteptare</TableHead>
@@ -374,7 +374,7 @@ const RATE_CHART_CONFIG = {
 
 const OPT_CHART_CONFIG = {
   cereri: { label: 'Cereri / s', color: '#10b981' },
-  neon: { label: 'Interogări Neon / s', color: '#f43f5e' },
+  neon: { label: 'Interogări SQLite / s', color: '#f43f5e' },
 } satisfies ChartConfig;
 
 const SERVINGS_CHART_CONFIG = {
@@ -550,7 +550,7 @@ export function AdminSearchFullTab() {
           />
           <GaugeCard
             icon={<Database className="h-5 w-5" aria-hidden />}
-            label="Interogări Neon reale"
+            label="Interogări SQLite reale"
             value={fmtRoNum(run?.neonFtsQueries ?? 0)}
             tone="red"
             sub={run ? `reducere totală ${fmtFactor(run.reductionFactor)}` : 'doar cele necesare'}
@@ -560,7 +560,7 @@ export function AdminSearchFullTab() {
             label="Reducere run"
             value={fmtFactor(run?.reductionFactor ?? 0)}
             tone="emerald"
-            sub="răspunsuri / interogare Neon reală"
+            sub="răspunsuri / interogare SQLite reală"
           />
           <GaugeCard
             icon={<GaugeIcon className="h-5 w-5" aria-hidden />}
@@ -802,7 +802,7 @@ export function AdminSearchFullTab() {
                     <TableHead className="text-right text-zinc-400">Verdict</TableHead>
                     <TableHead className="text-right text-zinc-400">Cereri</TableHead>
                     <TableHead className="text-right text-zinc-400">Răspunse</TableHead>
-                    <TableHead className="text-right text-zinc-400">Neon</TableHead>
+                    <TableHead className="text-right text-zinc-400">SQLite</TableHead>
                     <TableHead className="text-right text-zinc-400">Reducere</TableHead>
                     <TableHead className="text-right text-zinc-400">Durată</TableHead>
                   </TableRow>
@@ -919,7 +919,7 @@ export function AdminSearchFullTab() {
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-base">
               <Database className="h-4 w-4 text-emerald-400" aria-hidden />
-              Cereri vs Interogări Neon (FAZA 17)
+              Cereri vs Interogări SQLite (FAZA 17)
             </CardTitle>
             <CardDescription>
               Diferența dintre arii = traficul pe care Neon nu-l vede (batch + cache).

@@ -4,7 +4,7 @@
  * admin-search-opt-tab.tsx — FAZA 17 Search Optimization Layer console: live
  * gauges (active batches, batch hits, cache hits/misses, dedup total, REAL
  * Neon FTS queries, the ×N reduction factor), the money chart „Cereri vs
- * Interogări Neon" (recharts via the shadcn chart wrapper — the visual proof
+ * Interogări SQLite" (recharts via the shadcn chart wrapper — the visual proof
  * of the 100×–1000× reduction), the 10-stage pipeline visualization, the
  * active configuration cards (cache TTL 1–5 s, capacity bounds), the live
  * in-flight batch list, the 30-row per-shard attribution table (served /
@@ -206,7 +206,7 @@ function PipelineStrip({ stages }: { stages: string[] }) {
 
 const OPT_CHART_CONFIG = {
   cereri: { label: 'Cereri servite', color: '#10b981' },
-  neon: { label: 'Interogări Neon reale', color: '#f43f5e' },
+  neon: { label: 'Interogări SQLite reale', color: '#f43f5e' },
 } satisfies ChartConfig;
 
 /* ---------------------------- settings form ------------------------------ */
@@ -428,7 +428,7 @@ export function AdminSearchOptTab() {
               <span className="font-semibold text-zinc-200">o singură interogare reală FTS</span> (batch),
               iar repetările în {fmtMs(cache?.ttlMs ?? config?.cacheTtlMs)} sunt servite din micro-cache —
               rezultatul stocat este <span className="font-semibold text-zinc-200">exact obiectul produs de
-              Neon</span> (nimic fabricat, nimic mai vechi de TTL). Reducerea interogărilor Neon:{' '}
+              SQLite</span> (nimic fabricat, nimic mai vechi de TTL). Reducerea interogărilor Neon:{' '}
               <span className="font-mono font-bold text-emerald-300">{fmtFactor(dedup?.reductionFactor)}</span>{' '}
               — 10 milioane de utilizatori pot căuta real fără să supraîncarce baza.
             </p>
@@ -498,7 +498,7 @@ export function AdminSearchOptTab() {
             />
             <GaugeCard
               icon={<Database className="h-5 w-5" aria-hidden />}
-              label="Interogări Neon"
+              label="Interogări SQLite"
               value={fmtRoNum(counters.ftsQueries)}
               tone="red"
               sub={`din ${fmtRoNum(counters.served)} cereri servite`}
@@ -508,7 +508,7 @@ export function AdminSearchOptTab() {
               label="Reducere"
               value={fmtFactor(dedup.reductionFactor)}
               tone="emerald"
-              sub="cereri / interogare Neon reală"
+              sub="cereri / interogare SQLite reală"
             />
             <GaugeCard
               icon={<Gauge className="h-5 w-5" aria-hidden />}
@@ -600,7 +600,7 @@ export function AdminSearchOptTab() {
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-base">
               <LineChart className="h-4 w-4 text-emerald-400" aria-hidden />
-              Cereri vs Interogări Neon (ultimele 3 minute)
+              Cereri vs Interogări SQLite (ultimele 3 minute)
             </CardTitle>
             <CardDescription>
               180 eșantioane de 1 s — cereri servite de strat (emerald) vs interogări FTS reale pornite
@@ -762,7 +762,7 @@ export function AdminSearchOptTab() {
                   <TableHead scope="col">Servite</TableHead>
                   <TableHead scope="col">Cache hits</TableHead>
                   <TableHead scope="col">Batch hits</TableHead>
-                  <TableHead scope="col">Interogări Neon</TableHead>
+                  <TableHead scope="col">Interogări SQLite</TableHead>
                   <TableHead scope="col">Reducere</TableHead>
                 </TableRow>
               </TableHeader>

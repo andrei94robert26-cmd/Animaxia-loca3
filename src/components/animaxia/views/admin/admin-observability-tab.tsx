@@ -788,7 +788,7 @@ function Faza23ObservabilitySection() {
               <CardContent className="space-y-2 p-4">
                 <p className="flex items-center justify-between gap-2 text-[11px] font-bold uppercase tracking-widest text-zinc-500">
                   <span className="flex items-center gap-1.5">
-                    <Database className="h-3.5 w-3.5" aria-hidden /> Neon Postgres
+                    <Database className="h-3.5 w-3.5" aria-hidden /> SQLite local
                   </span>
                   <F23BoolBadge ok={d.neon.connected} okText="conectat" downText="deconectat" />
                 </p>

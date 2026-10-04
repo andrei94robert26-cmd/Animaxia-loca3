@@ -110,7 +110,7 @@ function PageWindowPlaceholder({ from, to, onJump }: { from: number; to: number;
 }
 
 const SOURCE_MODES: Record<string, { label: string; className: string }> = {
-  library: { label: 'Bibliotecă Neon', className: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-300' },
+  library: { label: 'Bibliotecă locală', className: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-300' },
   'library+external': { label: 'Bibliotecă + extern', className: 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300' },
   external: { label: 'Extern live', className: 'border-rose-500/30 bg-rose-500/10 text-rose-300' },
 };

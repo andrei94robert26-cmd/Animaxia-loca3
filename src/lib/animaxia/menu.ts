@@ -332,7 +332,7 @@ export const MENU_GROUPS: MenuGroup[] = [
       },
       {
         id: 'franchises',
-        label: 'Francise',
+        label: 'Francize',
         emoji: '🎬',
         href: '/franchises',
         match: (r) => r?.view === 'franchises',

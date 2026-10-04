@@ -1,0 +1,44 @@
+{
+  "completedCycles": 59,
+  "recoveries": [
+    {
+      "id": "da501b0f-ba5e-4b08-bebc-df0799ea1771",
+      "startedAt": "2026-10-04T01:49:13.966Z",
+      "finishedAt": "2026-10-04T01:49:14.162Z",
+      "success": true,
+      "actions": [
+        {
+          "action": "watchdog-check",
+          "success": true,
+          "error": null
+        },
+        {
+          "action": "observability-probe",
+          "success": true,
+          "error": null
+        }
+      ],
+      "error": null
+    },
+    {
+      "id": "66fc9cf8-d3d0-4808-a5ed-db81ba61695a",
+      "startedAt": "2026-10-04T01:56:36.485Z",
+      "finishedAt": "2026-10-04T01:56:36.716Z",
+      "success": true,
+      "actions": [
+        {
+          "action": "watchdog-check",
+          "success": true,
+          "error": null
+        },
+        {
+          "action": "observability-probe",
+          "success": true,
+          "error": null
+        }
+      ],
+      "error": null
+    }
+  ],
+  "updatedAt": "2026-10-04T02:16:14.039Z"
+}

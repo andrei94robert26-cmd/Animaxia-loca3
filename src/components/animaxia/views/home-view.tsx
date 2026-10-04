@@ -40,7 +40,14 @@ export function HomeView() {
   const libraryRes = useApi('home-library-full', () => api.all({ limit: 100 }));
   const trendingRes = useApi('home-trending', () => api.moviesTrending('day'));
   const tvRes = useApi('home-tv', () => api.tvTrending('day'));
-  const animeRes = useApi('home-anime', () => api.animeTop());
+  const animeRes = useApi('home-anime', async () => {
+    try {
+      return await api.animeTop();
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return api.animeTop();
+    }
+  });
   const healthRes = useApi('home-health', () => api.health());
 
   const trendingItems = useMemo(() => (trendingRes.data?.data ?? []).map(mediaToItem), [trendingRes.data]);
@@ -148,10 +155,10 @@ export function HomeView() {
           emptyMessage="Biblioteca e goală — adaugă titluri din orice pagină de detalii."
         />
 
-        {/* Activitatea comunității — live din Neon */}
+        {/* Activitatea comunității — live din SQLite local */}
         <CommunityActivityPanel />
 
-        {/* 🧠 Biblioteca ta Neon — redare universală */}
+        {/* 🧠 Biblioteca ta locală — redare universală */}
         <NeonLibraryPanel
           rows={libraryRes.data?.data ?? []}
           loading={libraryRes.loading}

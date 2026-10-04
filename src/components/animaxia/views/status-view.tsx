@@ -5,7 +5,7 @@
  * pierdut la restaurarea snapshot-ului FAZA 24. Stare LIVE, reală, a întregii
  * platforme: sonda trei surse independente în paralel —
  *
- *   1. Backend   :4000  /api/health        (Neon, cache, provideri, versiune)
+ *   1. Backend   :4000  /api/health        (SQLite, cache, provideri, versiune)
  *   2. Edge      :8181  /api/edge/status   (6 upstream-uri + Redis PING + TLS)
  *   3. Gateway   :4040  /api/infra/status  (3 regiuni, straturi perimetru)
  *
@@ -69,6 +69,16 @@ interface EdgeStatus {
   redisGlobal: { ok: boolean; latencyMs: number } | null;
 }
 
+interface EdgePublicStatus {
+  ok: boolean;
+  upstream?: {
+    status?: number;
+    healthy?: boolean;
+    service?: string;
+  };
+  latencyMs?: number;
+}
+
 interface GwUpstream {
   url: string;
   healthy: boolean;
@@ -94,6 +104,126 @@ interface GwStatus {
   };
   cache?: { hits: number; misses: number; hitRate: number };
   counters?: { requests?: number; rateLimited?: number; failovers?: number };
+}
+
+interface StabilityIncident {
+  id: string;
+  key: string;
+  service: string;
+  severity: 'critical' | 'warning' | 'info';
+  message: string;
+  active: boolean;
+  intentionalDemo: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+interface StabilityStatus {
+  ok: boolean;
+  service: string;
+  port: number;
+  uptimeSec: number;
+  completedCycles: number;
+  score: number;
+  state: 'stable' | 'degraded' | 'critical';
+  incidents: {
+    active: number;
+    critical: number;
+    warning: number;
+    info: number;
+  };
+  failovers: {
+    active: number;
+    regions: Array<{
+      region: string;
+      label: string;
+      healthy: number;
+      total: number;
+      available: boolean;
+      failoverActive: boolean;
+      intentionalDemo: boolean;
+    }>;
+  };
+  recoveries: {
+    total: number;
+  };
+}
+
+interface ObservabilityAlert {
+  id: string;
+  key: string;
+  severity: 'critical' | 'warning' | 'info';
+  service: string;
+  message: string;
+  active: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+interface ObservabilityAlertsResponse {
+  count: number;
+  alerts: ObservabilityAlert[];
+}
+
+interface ObservabilityProbe {
+  healthy: boolean;
+  status: number | null;
+  latencyMs: number | null;
+  consecutiveFailures: number;
+  totalChecks: number;
+  totalFailures: number;
+}
+
+interface ObservabilitySummary {
+  ok: boolean;
+  service: string;
+  port: number;
+  uptimeSec: number;
+  completedCycles: number;
+  intervalMs: number;
+  probes: Record<string, ObservabilityProbe>;
+  alerts: {
+    active: number;
+    critical: number;
+    warning: number;
+    info: number;
+  };
+  events: {
+    total: number;
+  };
+  timestamp: string;
+}
+
+interface WatchdogServiceStatus {
+  service: string;
+  url: string;
+  healthy: boolean;
+  status: number | null;
+  latencyMs: number | null;
+  consecutiveFailures: number;
+  lastCheck: number | null;
+  lastSuccess: number | null;
+  lastFailure: number | null;
+  lastError: string | null;
+  lastRestart: number | null;
+  restartCount: number;
+  restarting: boolean;
+}
+
+interface WatchdogStatus {
+  ok: boolean;
+  service: string;
+  port: number;
+  uptimeSec: number;
+  completedCycles: number;
+  policy: {
+    intervalMs: number;
+    timeoutMs: number;
+    failureThreshold: number;
+    restartCooldownMs: number;
+  };
+  services: Record<string, WatchdogServiceStatus>;
+  timestamp: string;
 }
 
 /* FAZA 30: stare publică a tracker-ului SLO (animaxia-ops/slo-100x.sh). */
@@ -181,7 +311,7 @@ function Row({ label, value, mono }: { label: string; value: React.ReactNode; mo
 /* ---------------------------------- view ---------------------------------- */
 
 /* NEON FREE PLAN: sondă auto la 5 MIN (fost 30s), doar tab vizibil —
- * /api/health e cache piggyback pe backend, deci nu trezește Neon, dar
+ * /api/health e cache piggyback pe backend, deci nu accesează inutil SQLite, dar
  * restul sondelor (accel etc.) rulează doar cu utilizator activ pe pagină.
  * Butonul Refresh manual forțează actualizarea instant. */
 const REFRESH_MS = 5 * 60 * 1000;
@@ -194,8 +324,37 @@ export function StatusView() {
 
   const backend = useApi('status-backend', () => api.health());
   const edge = useApi('status-edge', () => svcFetch<EdgeStatus>(8181, '/api/edge/status'));
+  const edgePublic = useApi('status-edge-public', async () => {
+    const res = await fetch('/api/edge-status', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as EdgePublicStatus;
+  });
   const gateway = useApi('status-gateway', () => svcFetch<GwStatus>(4040, '/api/infra/status'));
-  /* FAZA 29-P: strat accelerare căutare (keepalive Neon + LRU + warming). */
+  const watchdog = useApi(
+    'status-watchdog',
+    () => svcFetch<WatchdogStatus>(4020, '/api/watchdog/status'),
+  );
+  const observability = useApi(
+    'status-observability',
+    () => svcFetch<ObservabilitySummary>(4050, '/api/summary'),
+  );
+  const observabilityAlerts = useApi(
+    'status-observability-alerts',
+    () =>
+      svcFetch<ObservabilityAlertsResponse>(
+        4050,
+        '/api/alerts',
+      ),
+  );
+  const stability = useApi(
+    'status-stability',
+    () =>
+      svcFetch<StabilityStatus>(
+        4060,
+        '/api/stability/status',
+      ),
+  );
+  /* FAZA 29-P: strat accelerare căutare (cache SQLite + LRU + warming). */
   const accel = useApi('status-accel', () => api.searchAccelStatus());
   /* FAZA 30: SLO 99.9% + soak (fișier public scris de tracker-ul ops). */
   const [slo, setSlo] = useState<SloStatus | null>(null);
@@ -226,8 +385,12 @@ export function StatusView() {
   }, []);
 
   const refetchBackend = backend.refetch;
-  const refetchEdge = edge.refetch;
+  const refetchEdgePublic = edgePublic.refetch;
   const refetchGateway = gateway.refetch;
+  const refetchWatchdog = watchdog.refetch;
+  const refetchObservability = observability.refetch;
+  const refetchObservabilityAlerts = observabilityAlerts.refetch;
+  const refetchStability = stability.refetch;
   const refetchAccel = accel.refetch;
 
   /* Pattern React „adjust state during render”: marcaj temporal la fiecare
@@ -245,10 +408,23 @@ export function StatusView() {
   /* Auto-refresh la 5 min — doar tab vizibil (sonde pasive, sub rate-limits). */
   const refreshAll = useCallback(() => {
     void refetchBackend();
-    void refetchEdge();
+    void refetchEdgePublic();
     void refetchGateway();
+    void refetchWatchdog();
+    void refetchObservability();
+    void refetchObservabilityAlerts();
+    void refetchStability();
     void refetchAccel();
-  }, [refetchBackend, refetchEdge, refetchGateway, refetchAccel]);
+  }, [
+    refetchBackend,
+    refetchEdgePublic,
+    refetchGateway,
+    refetchWatchdog,
+    refetchObservability,
+    refetchObservabilityAlerts,
+    refetchStability,
+    refetchAccel,
+  ]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -257,21 +433,40 @@ export function StatusView() {
     return () => window.clearInterval(id);
   }, [refreshAll]);
 
-  /* Verdict global onest: edge upstream-uri + redis + Neon conectat. */
+  /* Verdict global bazat pe sondele reale: backend, edge si gateway regional. */
   const verdict = useMemo(() => {
-    const ups = edge.data?.upstreams;
-    const redisOk = edge.data?.redisGlobal?.ok ?? false;
-    const dbOk = backend.data?.db?.connected ?? false;
-    if (ups) {
-      const allHealthy = Object.values(ups).every((u) => u.healthy);
-      if (allHealthy && redisOk && dbOk) return 'ok' as const;
-      const anyHealthy = Object.values(ups).some((u) => u.healthy);
-      if (anyHealthy || dbOk) return 'partial' as const;
-      return 'down' as const;
-    }
-    if (dbOk) return 'partial' as const;
-    return 'unknown' as const;
-  }, [edge.data, backend.data]);
+    const dbOk = backend.data?.db?.connected === true;
+    const edgeOk =
+      edgePublic.data?.ok === true &&
+      edgePublic.data?.upstream?.healthy === true;
+
+    const gatewayRegions = gateway.data?.regions ?? [];
+    const gatewayOk =
+      gateway.data?.ok === true &&
+      gatewayRegions.length > 0 &&
+      gatewayRegions.every((region) =>
+        region.upstreams.some(
+          (upstream) => upstream.healthy && !upstream.forcedDown,
+        ),
+      );
+
+    if (dbOk && edgeOk && gatewayOk) return 'ok' as const;
+    if (dbOk || edgeOk || gatewayOk) return 'partial' as const;
+
+    const finishedLoading =
+      !backend.loading &&
+      !edgePublic.loading &&
+      !gateway.loading;
+
+    return finishedLoading ? 'down' as const : 'unknown' as const;
+  }, [
+    backend.data,
+    backend.loading,
+    edgePublic.data,
+    edgePublic.loading,
+    gateway.data,
+    gateway.loading,
+  ]);
 
   const upstreams = useMemo(
     () =>
@@ -281,8 +476,8 @@ export function StatusView() {
     [edge.data],
   );
 
-  const loading = backend.loading && edge.loading && gateway.loading;
-  const anyError = backend.error && edge.error && gateway.error;
+  const loading = backend.loading && edgePublic.loading && gateway.loading;
+  const anyError = backend.error && edgePublic.error && gateway.error;
 
   return (
     <section className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6">
@@ -296,7 +491,7 @@ export function StatusView() {
           <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">Stare Platformă</h1>
           <p className="mt-1 max-w-xl text-sm text-zinc-400">
             Toate serviciile Animaxia, sondate în timp real: backend, gateway global pe 3 regiuni,
-            edge public, Redis, Neon și providerii externi.
+            edge public, Redis, SQLite și providerii externi.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -355,7 +550,7 @@ export function StatusView() {
             </p>
             <p className="text-sm text-zinc-400">
               {verdict === 'ok'
-                ? `Toate serviciile răspund, Redis PING OK, Neon conectat (${backend.data?.db?.totalItems ?? '—'} titluri în bibliotecă).`
+                ? `Toate serviciile răspund, Redis PING OK, SQLite conectat (${backend.data?.db?.totalItems ?? '—'} titluri în bibliotecă).`
                 : 'Unele sonde nu răspund — detaliile sunt mai jos. Verificăm continuu la fiecare 30 de secunde.'}
             </p>
           </div>
@@ -372,7 +567,7 @@ export function StatusView() {
         <div role="alert" className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-4 text-sm text-zinc-300">
           <p className="font-semibold text-rose-300">Sonde inaccesibile</p>
           <p className="mt-1 text-zinc-400">
-            Backend: {backend.error ?? 'ok'} · Edge: {edge.error ?? 'ok'} · Gateway: {gateway.error ?? 'ok'}
+            Backend: {backend.error ?? 'ok'} · Edge: {edgePublic.error ?? 'ok'} · Gateway: {gateway.error ?? 'ok'}
           </p>
         </div>
       ) : null}
@@ -452,8 +647,8 @@ export function StatusView() {
         <Activity className="h-4 w-4" aria-hidden /> Detalii infrastructură
       </h2>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {/* Bază de date Neon */}
-        <DetailCard icon={<Database className="h-4 w-4 text-rose-400" aria-hidden />} title="Bază de date Neon">
+        {/* Bază de date SQLite */}
+        <DetailCard icon={<Database className="h-4 w-4 text-rose-400" aria-hidden />} title="Bază de date SQLite">
           {backend.loading && !backend.data ? (
             <div className="space-y-2">
               <Skeleton className="h-4 w-full" />
@@ -520,7 +715,12 @@ export function StatusView() {
                     )}
                     title={`Circuit breaker: ${p.state}${p.failures ? ` · eșecuri: ${p.failures}` : ''}`}
                   >
-                    {p.name}: {p.state === 'closed' ? 'sănătos' : p.state}
+                    {p.name}:{' '}
+                    {p.state === 'closed'
+                      ? 'sănătos'
+                      : p.name === 'jikan'
+                        ? 'degradat · timeout upstream'
+                        : `degradat · ${p.state}`}
                   </span>
                 ))}
               </div>
@@ -545,7 +745,11 @@ export function StatusView() {
                 return (
                   <Row
                     key={r.name}
-                    label={r.label}
+                    label={
+                      r.name === 'us'
+                        ? `${r.label} · failover demo`
+                        : r.label
+                    }
                     value={
                       <span className={healthy === total ? 'text-emerald-300' : 'text-amber-300'}>
                         {healthy}/{total} upstream-uri
@@ -567,7 +771,7 @@ export function StatusView() {
         {accel.data ? (
           <DetailCard icon={<Zap className="h-4 w-4 text-yellow-400" aria-hidden />} title="Accelerare căutare · FAZA 29-P">
             <Row
-              label="Keepalive pool Neon"
+              label="Stare SQLite local"
               value={
                 <span className={accel.data.keepalive.avgPingMs != null && accel.data.keepalive.avgPingMs < 300 ? 'text-emerald-300' : 'text-amber-300'}>
                   {accel.data.keepalive.avgPingMs != null ? `${accel.data.keepalive.avgPingMs} ms mediu` : '—'}
@@ -598,7 +802,7 @@ export function StatusView() {
             />
             <Row label="Interogări populare urmărite" value={accel.data.popular.tracked} />
             <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
-              Strat 100% aditiv peste pipeline-ul FAZA 18: menține conexiunile Neon calde, servește
+              Strat 100% aditiv peste pipeline-ul FAZA 18: optimizează accesul la SQLite local, servește
               interogările repetate din cache și reîncălzește top interogări la 30s — motorul FTS
               rămâne neatins.
             </p>
@@ -671,18 +875,257 @@ export function StatusView() {
           </DetailCard>
         ) : null}
 
-        {/* Watchdog (menționat onest) */}
-        <DetailCard icon={<Activity className="h-4 w-4 text-lime-400" aria-hidden />} title="Supraveghere continuă">
-          <Row label="Watchdog :4020" value="respawn automat la 3 eșecuri" />
-          <Row label="Observability :4050" value="metrici, alerte, synthetics" />
-          <Row label="Stability :4060" value="autoscaling · LB geo · failover" />
-          <Row label="Sonde status" value="reîmprospătare la 30s" />
+        {/* Dashboard alerte si incidente */}
+        <DetailCard
+          icon={
+            <AlertTriangle
+              className="h-4 w-4 text-amber-400"
+              aria-hidden
+            />
+          }
+          title="Alerte & Incidente"
+        >
+          {observabilityAlerts.loading &&
+          !observabilityAlerts.data ? (
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-2/3" />
+            </div>
+          ) : observabilityAlerts.data ? (
+            <>
+              <Row
+                label="Alerte active"
+                value={observabilityAlerts.data.count}
+              />
+
+              {stability.data ? (
+                <>
+                  <Row
+                    label="Critice"
+                    value={stability.data.incidents.critical}
+                  />
+                  <Row
+                    label="Warning"
+                    value={stability.data.incidents.warning}
+                  />
+                  <Row
+                    label="Info"
+                    value={stability.data.incidents.info}
+                  />
+                </>
+              ) : null}
+
+              <div className="mt-3 space-y-2">
+                {observabilityAlerts.data.alerts.length === 0 ? (
+                  <p className="text-xs text-emerald-300">
+                    Nu există alerte active.
+                  </p>
+                ) : (
+                  observabilityAlerts.data.alerts.map(
+                    (alert) => (
+                      <div
+                        key={alert.id}
+                        className={cn(
+                          'rounded-xl border px-3 py-2',
+                          alert.severity === 'critical'
+                            ? 'border-rose-500/25 bg-rose-500/10'
+                            : alert.severity === 'warning'
+                              ? 'border-amber-500/25 bg-amber-500/10'
+                              : 'border-sky-500/25 bg-sky-500/10',
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-zinc-100">
+                            {alert.service}
+                          </span>
+                          <span className="text-[10px] font-bold uppercase text-zinc-400">
+                            {alert.severity}
+                          </span>
+                        </div>
+
+                        <p className="mt-1 text-[11px] leading-relaxed text-zinc-300">
+                          {alert.message}
+                        </p>
+                      </div>
+                    ),
+                  )
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-zinc-500">
+              Alertele nu sunt disponibile:{' '}
+              {observabilityAlerts.error}
+            </p>
+          )}
+        </DetailCard>
+
+        {/* Watchdog real :4020 */}
+        <DetailCard
+          icon={<Activity className="h-4 w-4 text-lime-400" aria-hidden />}
+          title="Supraveghere continuă"
+        >
+          {watchdog.loading && !watchdog.data ? (
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-2/3" />
+            </div>
+          ) : watchdog.data ? (
+            <>
+              <Row
+                label="Watchdog :4020"
+                value={
+                  <StatusPill
+                    up={watchdog.data.ok}
+                    label={watchdog.data.ok ? 'Operațional' : 'Degradat'}
+                  />
+                }
+              />
+              <Row
+                label="Uptime"
+                value={fmtUptime(watchdog.data.uptimeSec)}
+              />
+              <Row
+                label="Cicluri finalizate"
+                value={watchdog.data.completedCycles.toLocaleString('ro-RO')}
+              />
+              <Row
+                label="Servicii monitorizate"
+                value={Object.keys(watchdog.data.services).length}
+              />
+              <Row
+                label="Restarturi totale"
+                value={Object.values(watchdog.data.services).reduce(
+                  (total, service) => total + service.restartCount,
+                  0,
+                )}
+              />
+              <Row
+                label="Prag restart"
+                value={`${watchdog.data.policy.failureThreshold} eșecuri consecutive`}
+              />
+
+              <div className="mt-3 space-y-2">
+                {Object.entries(watchdog.data.services).map(([name, service]) => (
+                  <div
+                    key={name}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-xs font-semibold capitalize text-zinc-300">
+                        {name}
+                      </span>
+                      <StatusPill up={service.healthy} />
+                    </div>
+                    <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-500">
+                      <span>
+                        {service.latencyMs != null
+                          ? `${service.latencyMs} ms`
+                          : 'latență indisponibilă'}
+                      </span>
+                      <span>
+                        restarturi: {service.restartCount}
+                      </span>
+                    </div>
+                    {service.lastError ? (
+                      <p className="mt-1 text-[10px] text-rose-300">
+                        {service.lastError}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+
+              <Row
+                label="Observability :4050"
+                value={
+                  observability.data ? (
+                    <StatusPill
+                      up={observability.data.ok}
+                      label={
+                        observability.data.ok
+                          ? 'Operațional'
+                          : 'Degradat'
+                      }
+                    />
+                  ) : (
+                    observability.error ?? 'Se încarcă'
+                  )
+                }
+              />
+              {observability.data ? (
+                <>
+                  <Row
+                    label="Probe finalizate"
+                    value={observability.data.completedCycles.toLocaleString(
+                      'ro-RO',
+                    )}
+                  />
+                  <Row
+                    label="Alerte active"
+                    value={observability.data.alerts.active}
+                  />
+                  <Row
+                    label="Alerte critice"
+                    value={observability.data.alerts.critical}
+                  />
+                  <Row
+                    label="Evenimente"
+                    value={observability.data.events.total}
+                  />
+                </>
+              ) : null}
+              <Row
+                label="Stability :4060"
+                value={
+                  stability.data ? (
+                    <StatusPill
+                      up={stability.data.ok}
+                      label={
+                        stability.data.state === 'stable'
+                          ? 'Stabil'
+                          : stability.data.state === 'degraded'
+                            ? 'Degradat'
+                            : 'Critic'
+                      }
+                    />
+                  ) : (
+                    stability.error ?? 'Se încarcă'
+                  )
+                }
+              />
+              {stability.data ? (
+                <>
+                  <Row
+                    label="Scor stabilitate"
+                    value={`${stability.data.score}/100`}
+                  />
+                  <Row
+                    label="Incidente active"
+                    value={stability.data.incidents.active}
+                  />
+                  <Row
+                    label="Failover-uri active"
+                    value={stability.data.failovers.active}
+                  />
+                  <Row
+                    label="Recuperări"
+                    value={stability.data.recoveries.total}
+                  />
+                </>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-xs text-zinc-500">
+              Sondă indisponibilă: {watchdog.error}
+            </p>
+          )}
         </DetailCard>
       </div>
 
       <p className="mt-8 border-t border-white/5 pt-4 text-[11px] leading-relaxed text-zinc-500">
         Toate datele de pe această pagină sunt sondate LIVE din serviciile reale ale platformei
-        (backend, edge public, gateway global). Nicio valoare nu este simulată — dacă un serviciu
+        (backend, edge public, gateway global, watchdog, observability și stability). Nicio valoare nu este simulată — dacă un serviciu
         cade, cardul lui devine roșu în maximum 30 de secunde.
       </p>
     </section>

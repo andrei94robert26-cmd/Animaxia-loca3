@@ -38,3 +38,18 @@ animaxia-desktop/
 animaxia-edge/
 
 coverage/
+
+# SQLite runtime files
+db/*.db-wal
+db/*.db-shm
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# Local backups
+*.bak
+*.bak-*
+
+# SQLite runtime files
+db/*.db-wal
+db/*.db-shm

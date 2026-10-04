@@ -7,9 +7,9 @@
  *    AR10M + legacy prin gateway, /api/ar10m/search): rezultate cu badge de
  *    sursă, shard și catalog, paginare reală prin cursor („Încarcă mai
  *    multe”). Dacă endpoint-ul AR10M nu răspunde (404 până la montaj / 5xx),
- *    căderea este transparentă spre motorul legacy Neon FTS.
+ *    căderea este transparentă spre motorul motorul SQLite FTS.
  *  - Filtrele avansate neacceptate de AR10M (gen, categorie, actor, studio,
- *    notă, sortare) trec automat pe motorul legacy Neon FTS
+ *    notă, sortare) trec automat pe motorul motorul SQLite FTS
  *    (animaxia-neon-fts), cu badge live „Neon FTS · Xms · N rezultate”.
  *  - Tab-urile externe (Anime / Filme & TV) rămân pe sursele live Jikan/TMDB.
  *  - Căsuța mare are debounce 400ms și autocomplete AR10M cu fallback legacy.
@@ -388,7 +388,7 @@ export function SearchView({ route }: { route: AppRoute }) {
     <Container className="space-y-8 py-8 sm:py-10">
       <PageHeader
         title="Căutare"
-        subtitle="O căsuță, toate sursele — biblioteca ta Neon (motor FTS), MyAnimeList și TMDB."
+        subtitle="O căsuță, toate sursele — biblioteca ta locală (motor FTS), MyAnimeList și TMDB."
       />
 
       <form onSubmit={submit} role="search" aria-label="Caută pe Animaxia" className="flex flex-col gap-3 sm:flex-row">
@@ -802,7 +802,7 @@ function LibrarySearchPanel({ q }: { q: string }) {
 
   /* AR10M rulează doar cu interogare liberă + an (singurele filtre suportate
    * de contractul /api/ar10m/search) și sortare implicită; orice filtru
-   * avansat trece automat pe motorul legacy Neon FTS. */
+   * avansat trece automat pe motorul motorul SQLite FTS. */
   const ar10mCompatible =
     Boolean(q) &&
     filters.genre === 'any' &&
@@ -854,7 +854,7 @@ function LibrarySearchPanel({ q }: { q: string }) {
   const facetsRes = useApi('search-filters-options', () => api.searchFilters());
   const facets = facetsRes.data;
 
-  /* Motorul legacy Neon FTS — rulează doar când AR10M nu poate servi (filtre
+  /* Motorul motorul SQLite FTS — rulează doar când AR10M nu poate servi (filtre
    * avansate neacceptate sau endpoint AR10M indisponibil).
    * FAZA 29-P: accel-first — stratul de cache/warming (identic ca răspuns);
    * fallback transparent pe searchAdvanced doar dacă accel lipsește (404/502
@@ -1116,7 +1116,7 @@ function LibrarySearchPanel({ q }: { q: string }) {
         <EmptyState
           icon={<SearchX className="h-6 w-6" aria-hidden />}
           title="Caută în catalogul real"
-          message="Scrie un nume mai sus sau alege un filtru — motorul AR10M caută în catalogul fuzionat, legacy Neon FTS în biblioteca indexată."
+          message="Scrie un nume mai sus sau alege un filtru — motorul AR10M caută în catalogul fuzionat, motorul SQLite FTS în biblioteca indexată."
           action={
             genreSuggestions.length > 0 ? (
               <div className="flex max-w-lg flex-wrap justify-center gap-1.5">
@@ -1341,7 +1341,7 @@ function DedupCheckPanel() {
       <CollapsibleTrigger className="flex w-full items-center gap-2.5 px-4 py-3 text-left text-sm font-semibold text-zinc-300 transition hover:bg-white/[0.04] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60">
         <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
         <span className="flex-1">Ai un link de adăugat? Verifică duplicat</span>
-        <span className="hidden text-xs font-normal text-zinc-500 sm:inline">registru global Neon · anti-duplicat</span>
+        <span className="hidden text-xs font-normal text-zinc-500 sm:inline">registru SQLite local · anti-duplicat</span>
         <ChevronDown className={cn('h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200', open && 'rotate-180')} aria-hidden />
       </CollapsibleTrigger>
       <CollapsibleContent>
@@ -1383,7 +1383,7 @@ function DedupCheckPanel() {
               <div className="flex items-start gap-2 text-sm text-amber-200">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
                 <span>
-                  <span className="font-bold">Link deja în Neon</span>
+                  <span className="font-bold">Link deja în SQLite</span>
                   {' — '}
                   {result.source.kind} · adăugat {fmtDate(result.source.createdat)} · {result.source.hits}{' '}
                   {result.source.hits === 1 ? 'accesare' : 'accesări'}
@@ -1412,7 +1412,7 @@ function DedupCheckPanel() {
                 <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
                 <span>
                   <span className="font-bold">Link nou</span> — poate fi adăugat fără duplicat.
-                  <span className="block text-[11px] text-emerald-300/70">Nu există în registru Neon · urlhash unic</span>
+                  <span className="block text-[11px] text-emerald-300/70">Nu există în registrul SQLite · urlhash unic</span>
                 </span>
               </div>
               <Button

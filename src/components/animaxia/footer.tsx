@@ -46,7 +46,7 @@ export function Footer() {
             <p className="mt-3 max-w-xs text-xs leading-relaxed text-zinc-500">
               O singură platformă pentru anime, filme, seriale, sport și știri. Conturi, planuri
               premium, feed-uri sociale, recomandări AI, analytics, motor de căutare, worker-i și un API
-              mobil — pe un backend enterprise Express + Neon PostgreSQL.
+              mobil — pe un backend enterprise Express + SQLite.
             </p>
             <a href="/animaxia-platform.zip" download className="mt-4 inline-block">
               <Button
@@ -131,10 +131,10 @@ export function Footer() {
                   download
                   className="text-sm text-zinc-400 transition hover:text-rose-300"
                 >
-                  Arhiva backend (Express + Neon)
+                  Arhiva backend (Express + SQLite)
                 </a>
               </li>
-              <li className="text-sm text-zinc-500">Express · Neon PostgreSQL</li>
+              <li className="text-sm text-zinc-500">Express · SQLite</li>
               <li className="text-sm text-zinc-500">TMDB · Jikan · TVmaze</li>
               <li className="text-sm text-zinc-500">Football-Data · Ergast F1</li>
               <li className="text-sm text-zinc-500">BBC · CNN · NHK · Al Jazeera</li>
@@ -146,7 +146,7 @@ export function Footer() {
           <p className="text-xs text-zinc-600">© 2025 Animaxia — construit în scop demonstrativ.</p>
           <p className="flex items-center gap-1.5 text-xs text-zinc-600">
             <Github className="h-3.5 w-3.5" aria-hidden />
-            Node.js + Express · Neon PostgreSQL · Next.js
+            Node.js + Express · SQLite · Next.js
           </p>
         </div>
       </div>

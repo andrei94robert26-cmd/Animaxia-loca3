@@ -206,7 +206,7 @@ export function StatsView() {
           value={formatRo(totalItems)}
           percent={indexCapacity != null ? totalItems / indexCapacity : 0}
           maxLabel={indexCapacity != null ? `capacitate index ${formatRo(indexCapacity)}` : 'fără capacitate'}
-          sub={<span>titluri reale în Neon{typeSummary ? <><br />{typeSummary}</> : null}</span>}
+          sub={<span>titluri reale în SQLite{typeSummary ? <><br />{typeSummary}</> : null}</span>}
           stroke="#f43f5e"
         />
         <Gauge

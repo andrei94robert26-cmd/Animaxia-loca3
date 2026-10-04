@@ -7,5 +7,9 @@
   "scripts": {
     "dev": "bun --hot index.ts",
     "start": "bun index.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

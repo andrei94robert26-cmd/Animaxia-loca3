@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Animaxia — Anime, Filme, Seriale și Mai Mult",
   description:
-    "Animaxia este o platformă completă de streaming: anime, filme, seriale, sport și știri, pe un backend enterprise Express + Neon PostgreSQL cu extractor de stream-uri integrat.",
+    "Animaxia este o platformă completă de streaming: anime, filme, seriale, sport și știri, pe un backend enterprise Express + SQLite cu extractor de stream-uri integrat.",
   keywords: ["Animaxia", "anime", "filme", "seriale", "streaming", "player", "sport", "știri"],
   manifest: "/manifest.webmanifest",
   icons: {

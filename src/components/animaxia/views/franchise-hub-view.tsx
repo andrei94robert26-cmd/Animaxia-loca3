@@ -2,7 +2,7 @@
 
 /**
  * franchise-hub-view.tsx — REAL franchise & trilogy hubs (sidebar menus
- * "🎬 Francise" and "🎞️ Trilogii"). Data comes from /api/franchises and
+ * "🎬 Francize" and "🎞️ Trilogii"). Data comes from /api/franchises and
  * /api/trilogies: curated TMDB collections resolved at runtime, each with
  * its actual parts (clickable → external movie detail), average rating and
  * year span. Card CTA opens the existing franchise detail view
@@ -22,7 +22,7 @@ import { ErrorState } from '../states';
 
 const HUB_META = {
   franchises: {
-    title: 'Francise',
+    title: 'Francize',
     subtitle:
       'Cele mai mari saga din cinema — date reale din colecțiile TMDB, cu toate filmele în ordine cronologică.',
     chip: 'TMDB Collections · live',

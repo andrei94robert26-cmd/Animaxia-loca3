@@ -219,7 +219,7 @@ function UpstreamCard() {
 export function EdgeView() {
   return (
     <Container className="space-y-8 py-10">
-      <PageHeader title="Animaxia Edge — Cloudflare Workers" subtitle="FAZA 8 · stratul edge: gateway cu WAF, rate limiting pe 3 nivele, cache SWR/stale-if-error, căutare fuzzy, RAG accelerat, auth cu anti-replay, player HLS și analytics — 7 worker-e + strat shared, testate end-to-end pe lanțul edge → cloud → Neon.">
+      <PageHeader title="Animaxia Edge — Cloudflare Workers" subtitle="FAZA 8 · stratul edge: gateway cu WAF, rate limiting pe 3 nivele, cache SWR/stale-if-error, căutare fuzzy, RAG accelerat, auth cu anti-replay, player HLS și analytics — 7 worker-e + strat shared, testate end-to-end pe lanțul edge → cloud → SQLite local.">
         <div className="flex flex-wrap gap-2 pt-1">
           <Badge className="bg-rose-600 font-bold hover:bg-rose-500">FAZA 8</Badge>
           <Badge variant="secondary" className="border-zinc-700 bg-zinc-800 text-zinc-300">7 worker-e</Badge>

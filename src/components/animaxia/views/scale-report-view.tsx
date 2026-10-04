@@ -157,7 +157,7 @@ function BudgetSection({ budget }: { budget: Ar10mBudget | null }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h3 className="flex items-center gap-2 text-base font-black tracking-tight text-white">
           <Gauge className="h-5 w-5 text-rose-400" aria-hidden />
-          Buget Neon — stare reală
+          Stocare SQLite — stare reală
         </h3>
         <div className="flex flex-wrap items-center gap-2">
           {budget.economicMode ? (
@@ -411,7 +411,7 @@ export function ScaleReportView() {
             icon={Network}
             title="Capacitate proiectată"
             value={formatCount(designed)}
-            hint="15 sharduri Neon, arhitectura hash — ținta arhitecturală spre care platforma crește gradual."
+            hint="15 sharduri locale, arhitectura hash — ținta arhitecturală spre care platforma crește gradual."
             tone="designed"
           />
           <CapacityCard
@@ -516,7 +516,7 @@ export function ScaleReportView() {
 
       {/* ------------------------------ buget Neon ------------------------------ */}
       <Section
-        title="Buget Neon"
+        title="Stocare SQLite"
         subtitle="Consum real față de pragurile planului — ce nu se poate măsura apare onest ca indisponibil."
       >
         {budget.loading && !budget.data ? (

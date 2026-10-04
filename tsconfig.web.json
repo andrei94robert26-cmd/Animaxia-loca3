@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "next-env.d.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "animaxia-mobile",
+    "animaxia-player",
+    "animaxia-searchflow",
+    "animaxia-searchfull",
+    "animaxia-searchopt",
+    "animaxia-searchrate",
+    "animaxia-sections",
+    "mini-services"
+  ]
+}
