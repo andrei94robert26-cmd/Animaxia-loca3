@@ -8,7 +8,7 @@ on:
 jobs:
   frontend:
     name: Frontend + Player
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
 
   backend-providers:
     name: Backend 8 Providers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     env:
       TWITCH_PARENT: localhost
@@ -112,7 +112,7 @@ jobs:
     needs:
       - frontend
       - backend-providers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
