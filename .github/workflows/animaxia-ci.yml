@@ -94,6 +94,11 @@ jobs:
           set -o pipefail
           node --test tests/minimal-search.test.mjs 2>&1 | tee ../../reports/minimal-search.txt
 
+      - name: Show backend errors on failure
+        if: failure()
+        run: |
+          tail -n 120 ../../reports/backend.log || true
+
       - name: Upload backend report
         if: always()
         uses: actions/upload-artifact@v4
