@@ -7,6 +7,7 @@ import { getSourceRecord } from '../ingest/source-registry.js';
 import { getProviderFetchHealth } from './health.js';
 import { EXTRA_DRIVER_IDS } from './extra-fetch.js';
 import { COMMUNITY_DRIVER_IDS } from './community-fetch.js';
+import { EXPANSION_DRIVER_IDS } from './expansion-fetch.js';
 
 const IDS_BY_GROUP = {
   "films": "tmdb omdb tvmaze thetvdb trakt watchmode opensubtitles swapi archive loc",
@@ -108,7 +109,7 @@ const ENV_BY_ID = {
     "FANART_API_KEY"
   ]
 };
-export const DRIVER_IDS = Object.freeze(['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',...EXTRA_DRIVER_IDS,...COMMUNITY_DRIVER_IDS]);
+export const DRIVER_IDS = Object.freeze(['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',...EXTRA_DRIVER_IDS,...COMMUNITY_DRIVER_IDS,...EXPANSION_DRIVER_IDS]);
 
 const items = Object.entries(IDS_BY_GROUP).flatMap(([category, names]) =>
   names.split(' ').map((id) => ({
