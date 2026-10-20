@@ -60,6 +60,7 @@
 import express from 'express';
 import metadataSearchRouter from './metadata.js';
 import { sqliteAdvancedSearch } from './sqlite-advanced.js';
+import { countFtsRows } from './content-fts.js';
 import { driverInfo } from '../../db.js';
 import { rows, one, parseJsonb } from '../platform/sql.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
@@ -71,7 +72,7 @@ import { clientIpOf } from '../security/security.js'; // FAZA 18: pipeline clien
 import pipeline, { PipelineRejection } from './pipeline.js'; // FAZA 18: 10-layer orchestration around the executors below
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-const ENGINE = 'animaxia-sqlite-json-search';
+const ENGINE = 'animaxia-sqlite-fts5-hybrid';
 const SYNC_DEBOUNCE_MS = 3000;
 const LATENCY_WINDOW = 50;
 const SYNC_CHUNK = 25; // rows per multi-row upsert
@@ -1004,7 +1005,8 @@ router.get('/status', wrap(async (req, res) => {
     docs,
     engine: ENGINE,
     backend: driverInfo().driver,
-    extensions: { pg_trgm: pgTrgm },
+    extensions: { pg_trgm: pgTrgm, fts5: true },
+    fullTextIndex: { indexedDocuments: countFtsRows(), engine: 'sqlite-fts5', distributed: false },
     lastSync,
     dirty,
     latency: searchLatencySnapshot(),
