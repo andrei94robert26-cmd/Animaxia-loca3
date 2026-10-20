@@ -59,6 +59,15 @@ test('SQLite persists complete metadata and metadata endpoint filters JSON field
     const result = await response.json();
     assert.ok(result.data.some((row) => row.id === record.id));
     assert.equal(result.paginationMode, 'keyset');
+    const fullText = await fetch(endpoint + '?q=celestial&category=anime');
+    assert.equal(fullText.status, 200);
+    const indexed = await fullText.json();
+    assert.equal(indexed.searchMode, 'sqlite-fts5');
+    assert.ok(indexed.data.some((row) => row.id === record.id));
+
+    const punctuation = await fetch(endpoint + '?q=Star%20Quest&category=anime');
+    assert.equal(punctuation.status, 200);
+    assert.equal((await punctuation.json()).searchMode, 'sqlite-like-fallback');
     const invalid = await fetch(endpoint + '?year=twenty');
     assert.equal(invalid.status, 400);
   } finally {
