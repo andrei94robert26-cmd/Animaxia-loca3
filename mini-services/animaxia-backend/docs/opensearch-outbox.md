@@ -1,0 +1,157 @@
+# Animaxia — OpenSearch opțional, cu outbox persistent (Etapa 12)
+
+**Status:** implementat în Pull Request #1, cu teste automatizate folosind
+răspunsuri OpenSearch simulate. Nu s-a creat și nu s-a configurat un cluster
+real, nu există deployment și nu există benchmark la un miliard de titluri.
+
+## De ce acest mecanism
+
+SQLite FTS5 rămâne motorul de căutare implicit și baza Content rămâne sursa
+de adevăr. OpenSearch este o proiecție de citire separată. Activarea nu
+migrează automat catalogul SQLite în PostgreSQL și nu înseamnă că un miliard
+de titluri poate fi deja procesat.
+
+Schema `search_index_outbox` este creată numai dacă este configurat
+`ANIMAXIA_OPENSEARCH_URL`. Trigger-ele `Content` adaugă sau actualizează
+câte o intrare persistentă la INSERT, UPDATE, DELETE. Scrierea catalogului
+și scrierea în outbox apar în aceeași tranzacție SQLite. Înregistrările sunt
+acknowledged numai la succesul *individual* din răspunsul OpenSearch Bulk.
+Dacă un document se schimbă în timpul unei trimiteri, numărul de versiune
+din outbox împiedică ștergerea jobului nou.
+
+## Configurare în siguranță
+
+Pe backend, printr-un secret manager, **fără chei în cod sau în frontend**:
+
+```dotenv
+ANIMAXIA_OPENSEARCH_URL=https://search.example.net
+ANIMAXIA_OPENSEARCH_INDEX=animaxia-content-v1
+ANIMAXIA_OPENSEARCH_USERNAME=<username>
+ANIMAXIA_OPENSEARCH_PASSWORD=<password>
+# Alternativ, în loc de username+password:
+# ANIMAXIA_OPENSEARCH_API_KEY=<api-key>
+
+ANIMAXIA_OPENSEARCH_WORKER=false
+ANIMAXIA_SEARCH_BACKEND=sqlite
+```
+
+Producția cere HTTPS și autentificare. HTTP este permis numai către
+loopback în dezvoltare (nu în `NODE_ENV=production`). Configurația respinge
+URL-uri care conțin credențiale, parametri sau căi arbitrare.
+
+**Important:** Nu porni încă workerul. Fă backup bazei SQLite; asigură-te că
+ai creat un cluster OpenSearch real, izolat în rețea, cu TLS, autentificare,
+backupuri, politici de retenție, monitorizare și acces controlat.
+
+## 1. Creează indexul
+
+Ca administrator autentificat, din fila `#/admin/opensearch` sau:
+
+```http
+POST /api/search/opensearch/setup
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{}
+```
+
+Creează indexul configurat cu mapping strict pentru:
+titlu, an, categorie, descriere, actori, genuri, studiouri, franciză,
+trilogie, colecție, posterId și rating. Nu indexează automat URL-uri video,
+embed sau surse media private.
+
+## 2. Backfill în pagini limitate
+
+```http
+POST /api/search/opensearch/backfill
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{"afterId":0,"limit":500}
+```
+
+Folosește `nextAfterId` din răspuns pentru pagina următoare; când primești
+`finished:true`, ai parcurs catalogul vizibil la acel moment. Dacă există
+scrieri concurente, trigger-ele păstrează actualizările noi în outbox.
+Backfillul nu suprascrie intrările deja modificate.
+
+## 3. Indexarea efectivă
+
+În test sau pentru operații controlate:
+
+```http
+POST /api/search/opensearch/flush
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{"limit":40}
+```
+
+După validarea clusterului poți porni pe server:
+`ANIMAXIA_OPENSEARCH_WORKER=true`. Workerul trimite loturi de maximum
+40 de modificări la aproximativ cinci secunde, când există intrări în outbox.
+Un rezultat parțial OpenSearch reîncearcă numai documentele eșuate, cu
+întârziere progresivă până la o oră. Un document DELETE este idempotent:
+răspunsul 404 este tratat ca succes dacă nu mai există pe cluster.
+
+Starea se citește la
+`GET /api/search/opensearch/status`, numai de către un administrator.
+Fila OpenSearch arată numărul de operații în așteptare.
+
+**Atenție:** acesta este un worker pe o singură instanță SQLite. Nu are
+leasing distribuit sau coordonare între replici. Nu porni același worker pe
+mai multe procese care partajează aceeași bază. Pentru HA la scară mare,
+folosește o coadă distribuită durabilă și un datastore principal scalabil.
+
+## 4. Comută gradual motorul pentru metadate
+
+Numai după backfill complet, număr de elemente comparat, testare pe exemple
+și monitorizarea erorilor:
+
+```dotenv
+ANIMAXIA_SEARCH_BACKEND=opensearch
+```
+
+Aceasta comută **doar `GET /api/search/metadata`**, inclusiv filtrarea după
+categorie/an/actor/gen/studio/franciză/trilogie/colecție/descriere/poster.
+Răspunsul conține `engine: animaxia-opensearch-v1`, `searchMode: opensearch`
+și cursor `search_after`. `GET /api/search/advanced`, autocomplete și
+alte căi rămân în continuare pe implementarea actuală SQLite; migrarea lor
+necesită o etapă distinctă.
+
+Un cluster indisponibil **nu provoacă fallback tăcut la SQLite** atunci când
+OpenSearch este selectat explicit, deoarece aceasta ar masca pierderea de
+acoperire și ar face rezultatele greu de verificat.
+
+## 5. Revenire imediată (rollback)
+
+Setează înapoi:
+
+```dotenv
+ANIMAXIA_SEARCH_BACKEND=sqlite
+ANIMAXIA_OPENSEARCH_WORKER=false
+```
+
+Datele catalogului și indexul SQLite FTS5 nu sunt eliminate când folosești
+OpenSearch. Poți opri clusterul de căutare fără să pierzi catalogul local.
+Asigură un backup/retention plan pentru outbox înainte să elimini volumul.
+
+## Validarea din CI
+
+`tests/opensearch.test.mjs` verifică: restricțiile HTTPS/autentificare,
+mappingul, construirea filtrului de căutare, cursorul legat de filtre,
+trigger-ele insert/update/delete, proiecția fără URL-urile video,
+procesarea Bulk NDJSON, succesul parțial și retry, precum și backfillul
+limitat. Testul nu contactează un cluster OpenSearch real.
+
+Referințe oficiale OpenSearch:
+https://docs.opensearch.org/latest/api-reference/document-apis/bulk/
+https://docs.opensearch.org/latest/query-dsl/full-text/multi-match/
+
+## Probleme încă deschise
+
+Nu există cluster de producție, replicare, backupuri testate, TLS validat
+live, benchmark, autoscaling, cache distribuit, migrare Postgres, leasing de
+worker, migrarea completă a celorlalte căi de căutare sau demonstrarea
+suportului pentru 1.000.000.000 de titluri. Capacitatea reală și latența
+la scară globală **nu au fost încă măsurate**.
