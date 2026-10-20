@@ -93,6 +93,10 @@ function verifyPassword(password, stored) {
 
 /* ------------------------------ user serialization ---------------------------- */
 
+function isBanned(row) {
+  return row?.banned === true || row?.banned === 1 || row?.banned === '1';
+}
+
 export function publicUser(row) {
   if (!row) return null;
   return {
@@ -183,7 +187,7 @@ export async function attachUser(req, _res, next) {
       const payload = verifyJwt(token);
       if (payload?.sub) {
         const row = await getUserById(payload.sub);
-        if (row) {
+        if (row && !isBanned(row)) {
           req.user = publicUser(row);
           req.user.tenant = tenantOfPayload(payload); // FAZA 11 (additive field)
         }
@@ -205,6 +209,7 @@ export async function requireAuth(req, res, next) {
   try {
     const row = await getUserById(payload.sub);
     if (!row) return res.status(401).json({ error: 'Account no longer exists', code: 'AUTH_REQUIRED' });
+    if (isBanned(row)) return res.status(403).json({ error: 'Account suspended', code: 'ACCOUNT_BANNED' });
     req.user = publicUser(row);
     req.user.tenant = tenantOfPayload(payload); // FAZA 11 (additive field)
     return next();
@@ -351,7 +356,7 @@ authRouter.post('/login', authLimiter, async (req, res, next) => {
     // TS2b (admin producție): suspended accounts are refused after the
     // password proves correct — the ban is an account state, not a credential
     // error, so it stays a distinct 403 (never counted as a brute-force miss).
-    if (row.banned === true) {
+    if (isBanned(row)) {
       await auditLog({ userid: Number(row.id), action: 'auth.login.banned', ip, meta: { email } });
       return res.status(403).json({ error: 'Cont suspendat', code: 'ACCOUNT_BANNED' });
     }
@@ -393,6 +398,7 @@ authRouter.post('/refresh', authLimiter, async (req, res, next) => {
     await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE id = $1`, [Number(row.id)]);
     const user = await getUserById(row.userid);
     if (!user) return res.status(401).json({ error: 'Account no longer exists', code: 'REFRESH_INVALID' });
+    if (isBanned(user)) return res.status(403).json({ error: 'Account suspended', code: 'ACCOUNT_BANNED' });
     const session = await issueSession(user, clientIpOf(req), row.tenantid || null);
     return res.json({ ok: true, ...session });
   } catch (err) {
