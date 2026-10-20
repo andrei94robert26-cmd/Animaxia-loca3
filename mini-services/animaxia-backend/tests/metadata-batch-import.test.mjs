@@ -117,6 +117,24 @@ test('hub/API/addon JSON batch ingestion persists searchable metadata safely', a
     assert.equal(serviceResponse.status, 200);
     assert.equal((await serviceResponse.json()).created, 1);
 
+    // Common API payload aliases: TMDB-style media_type/name/date/company.
+    const apiBody = { source: { type: 'api', id: 'tmdb' }, items: [{
+      id: stamp + 'tv', name: 'TV Series ' + stamp, media_type: 'tv',
+      first_air_date: '2023-02-20', posterId: 123456,
+      production_companies: [{ name: 'TMDB Studio' }],
+      belongs_to_collection: { name: 'Shared Universe' },
+      genres: [{ name: 'Drama' }],
+    }] };
+    const apiResponse = await post(apiBody, bearer(adminId));
+    assert.equal(apiResponse.status, 200);
+    assert.equal((await apiResponse.json()).created, 1);
+    const apiRow = await getContentByExternalId('api:tmdb:tv:' + stamp + 'tv');
+    assert.equal(apiRow.type, 'tv');
+    assert.equal(apiRow.year, 2023);
+    assert.equal(apiRow.metadata.posterId, '123456');
+    assert.deepEqual(apiRow.metadata.studios, ['TMDB Studio']);
+    assert.equal(apiRow.metadata.collection, 'Shared Universe');
+
     const invalid = await post({ source: payload.source, items: Array(101).fill(item) }, bearer(adminId));
     assert.equal(invalid.status, 400);
   } finally {
@@ -125,6 +143,8 @@ test('hub/API/addon JSON batch ingestion persists searchable metadata safely', a
     if (row) await deleteContent(row.id);
     const serviceRow = await getContentByExternalId('addon:torentino:movie:' + stamp + 'svc');
     if (serviceRow) await deleteContent(serviceRow.id);
+    const apiRow = await getContentByExternalId('api:tmdb:tv:' + stamp + 'tv');
+    if (apiRow) await deleteContent(apiRow.id);
     if (previousServiceKey === undefined) delete process.env.ANIMAXIA_INGEST_SERVICE_KEY;
     else process.env.ANIMAXIA_INGEST_SERVICE_KEY = previousServiceKey;
     if (previousSources === undefined) delete process.env.ANIMAXIA_INGEST_ALLOWED_SOURCES;
