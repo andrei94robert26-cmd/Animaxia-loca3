@@ -141,7 +141,7 @@ router.post('/metadata', requireMetadataIngestAccess, limiter, async (req, res, 
         error: 'Expected source:{type:hub|api|addon,id:slug} and items array (1..100)',
       });
     }
-    if (req.metadataIngestService && !allowedMetadataServiceSource(source)) {
+    if (!allowedMetadataServiceSource(source, req)) {
       return res.status(403).json({ error: 'Source is not enabled for metadata service ingestion' });
     }
     return res.json(await persistMetadataBatch(source, items));
