@@ -14,10 +14,11 @@ import { sqliteAdvancedSearch } from '../modules/search/sqlite-advanced.js';
 import providerRoutes from '../modules/providers/routes.js';
 import { getProviderFetchHealth } from '../modules/providers/health.js';
 
-test('88 API inventory has 6 implemented, separately enabled drivers', () => {
+test('88 API inventory has 12 implemented, separately enabled drivers', () => {
   assert.equal(PROVIDER_CATALOG.length, 88);
   assert.equal(new Set(PROVIDER_CATALOG.map((x) => x.id)).size, 88);
-  assert.deepEqual(DRIVER_IDS, ['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt']);
+  assert.deepEqual(DRIVER_IDS, ['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',
+    'omdb','kitsu','rickmorty','freetogame','swapi','scryfall']);
   assert.ok(PROVIDER_CATALOG.some((x) => x.id === 'spotify' && !x.driverImplemented));
   assert.equal(providerReadiness('not-a-provider'), null);
   assert.throws(() => buildProviderRequest('spotify', { q: 'music' }), /No verified fetch driver/);
@@ -28,9 +29,11 @@ test('88 API inventory has 6 implemented, separately enabled drivers', () => {
   assert.equal(request.url.searchParams.get('q'), 'naruto');
 });
 
-test('six provider JSON mappers are explicit, bounded, media metadata only', async () => {
+test('12 provider JSON mappers are explicit, bounded, media metadata only', async () => {
   const originalKey = process.env.TMDB_API_KEY;
   process.env.TMDB_API_KEY = 'unit-test-key-no-network';
+  const priorOmdbKey = process.env.OMDB_API_KEY;
+  process.env.OMDB_API_KEY = 'test-key-no-network';
   const mockData = {
     tmdb: { results: [
       { id: 101, media_type: 'movie', title: 'Synthetic Movie', release_date: '2020-02-02', overview: 'Test film' },
@@ -47,6 +50,29 @@ test('six provider JSON mappers are explicit, bounded, media metadata only', asy
     cheapshark: [{ gameID: '500', external: 'Synthetic Game', thumb: 'https://example.org/thumb.jpg' }],
     gdelt: { articles: [{ url: 'https://news.example.org/item/a', title: 'Synthetic News',
       seendate: '20261020T010000Z', domain: 'news.example.org' }] },
+    omdb: { Response: 'True', Search: [
+      { imdbID: 'tt0000111', Title: 'Synthetic Movie OMDb', Year: '2023', Type: 'movie', Poster: 'N/A' },
+      { imdbID: 'tt0000112', Title: 'Synthetic Series OMDb', Year: '2020–', Type: 'series' },
+    ] },
+    kitsu: { data: [{ type: 'anime', id: '1000', attributes: {
+      canonicalTitle: 'Synthetic Anime Kitsu', synopsis: 'Adventure anime',
+      averageRating: '85.4', startDate: '2022-08-19', posterImage: { medium: 'https://img.example/1' },
+    } }] },
+    rickmorty: { info: { pages: 1 }, results: [
+      { id: 21, name: 'Synthetic Cartoon Episode', episode: 'S02E01',
+        air_date: 'July 26, 2015' },
+    ] },
+    freetogame: [{ id: 401, title: 'Synthetic Free Game', genre: 'MMO',
+      publisher: 'Example Studio', release_date: '2021-01-01',
+      thumbnail: 'https://img.example/401.jpg', short_description: 'Description' }],
+    swapi: { count: 1, results: [
+      { episode_id: 4, title: 'Synthetic Space Film', release_date: '1977-05-25',
+        opening_crawl: 'In a galaxy far away', producer: 'Sample Studio' },
+    ] },
+    scryfall: { object: 'list', data: [
+      { id: 'card-uuid-123', name: 'Synthetic Magic Card', set_name: 'Magic Test',
+        type_line: 'Creature', oracle_text: 'Draw a card', released_at: '2022-01-01' },
+    ] },
   };
   try {
     for (const id of DRIVER_IDS) {
@@ -57,7 +83,8 @@ test('six provider JSON mappers are explicit, bounded, media metadata only', asy
           headers: { 'content-type': 'application/json' }, status: 200,
         });
       };
-      const result = await fetchProviderMetadata(id, { q: 'synthetic', page: 1 }, mock);
+      const result = await fetchProviderMetadata(id,
+        { q: id === 'freetogame' ? '' : 'synthetic', page: 1 }, mock);
       assert.equal(captured.length, 1);
       assert.equal(captured[0].options.redirect, 'error');
       assert.equal(new URL(captured[0].url).protocol, 'https:');
@@ -82,6 +109,8 @@ test('six provider JSON mappers are explicit, bounded, media metadata only', asy
   } finally {
     if (originalKey === undefined) delete process.env.TMDB_API_KEY;
     else process.env.TMDB_API_KEY = originalKey;
+    if (priorOmdbKey === undefined) delete process.env.OMDB_API_KEY;
+    else process.env.OMDB_API_KEY = priorOmdbKey;
   }
 });
 
