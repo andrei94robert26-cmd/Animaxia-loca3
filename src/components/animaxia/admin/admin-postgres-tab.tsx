@@ -29,6 +29,11 @@ type PreviewPage={
   engine:string;shadow:boolean;sourceOfTruth:string;authoritative:boolean;
   data:PreviewItem[];hasMore:boolean;nextCursor:string|null;
 };
+type ShadowAudit={
+  scanned:number;matched:number;missing:number;mismatched:number;
+  repairCandidates:number;repairQueued:number;alreadyPendingOrMissing:number;
+  nextAfterId:number|null;finished:boolean;dryRun:boolean;pending:number;
+};
 
 const endpoint=(path:string)=>path+'?XTransformPort=4000';
 
@@ -45,6 +50,9 @@ export function AdminPostgresTab(){
   const [previewYear,setPreviewYear]=useState('');
   const [preview,setPreview]=useState<PreviewPage|null>(null);
   const [previewLoading,setPreviewLoading]=useState(false);
+  const [auditCursor,setAuditCursor]=useState('0');
+  const [audit,setAudit]=useState<ShadowAudit|null>(null);
+  const [auditBusy,setAuditBusy]=useState(false);
 
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
@@ -108,6 +116,28 @@ export function AdminPostgresTab(){
     }catch(err){toast.error(err instanceof Error?err.message:'Compararea a eșuat');}
     finally{setWorking(false);}
   }
+  async function verifyMirror(dryRun=true){
+    const afterId=Number(auditCursor);
+    if(!Number.isSafeInteger(afterId)||afterId<0){
+      toast.error('Cursorul verificării trebuie să fie un întreg pozitiv');return;
+    }
+    if(!dryRun&&!window.confirm(
+      'Adaugi în coadă rândurile lipsă sau diferite din copia PostgreSQL?'
+    ))return;
+    setAuditBusy(true);
+    try{
+      const report=await action<ShadowAudit>('/api/migration/postgres/verify',{
+        afterId,limit:25,dryRun,
+      });
+      setAudit(report);
+      toast.success(report.scanned+' rânduri verificate · '+
+        report.repairCandidates+' diferențe · '+
+        report.repairQueued+' reparații în coadă');
+      if(!dryRun)await refresh();
+    }catch(err){toast.error(err instanceof Error?err.message:'Verificarea PG a eșuat');}
+    finally{setAuditBusy(false);}
+  }
+
   async function previewCatalog(next=false){
     const year=previewYear.trim();
     if(year&&!/^[12][0-9]{3}$/.test(year)){
@@ -252,6 +282,46 @@ export function AdminPostgresTab(){
             {preview.data.length===0&&<p className="text-sm text-zinc-400">
               Nu există metadate pentru filtrele selectate.</p>}
           </div>}
+        </CardContent>
+      </Card>
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Integritate SQLite ↔ PostgreSQL</CardTitle>
+          <CardDescription>
+            Compară efectiv metadatele a maximum 25 de titluri din
+            catalogul principal cu copia PostgreSQL. Implicit doar verifică.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <Label htmlFor="pg-audit-cursor">Ultimul ID SQLite verificat</Label>
+          <Input id="pg-audit-cursor" value={auditCursor} inputMode="numeric"
+            onChange={e=>{setAuditCursor(e.target.value);setAudit(null);}} />
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={auditBusy||!status?.configured}
+              onClick={()=>void verifyMirror(true)}>
+              {auditBusy?'Se verifică…':'Verifică 25 fără modificări'}
+            </Button>
+            <Button disabled={auditBusy||!status?.configured}
+              onClick={()=>void verifyMirror(false)}>Reindexează diferențele</Button>
+            <Button variant="outline" disabled={auditBusy||!audit?.nextAfterId}
+              onClick={()=>{
+                setAuditCursor(String(audit?.nextAfterId));setAudit(null);
+              }}>Următoarea pagină</Button>
+          </div>
+          {audit&&<p role="status" className="text-xs text-zinc-300">
+            Verificate: {audit.scanned}
+            {' · '}Identice: {audit.matched}
+            {' · '}Lipsă în PG: {audit.missing}
+            {' · '}Diferite: {audit.mismatched}
+            {' · '}Reparații noi: {audit.repairQueued}
+            {' · '}Deja în coadă: {audit.alreadyPendingOrMissing}
+            {' · '}{audit.finished?'Ultima pagină':'Mai există pagini'}
+          </p>}
+          <p className="text-xs text-zinc-400">
+            Repararea introduce joburi în coada SQLite și nu rescrie
+            direct PostgreSQL. Nu verifică documentele orfane existente
+            numai în PostgreSQL; nu există snapshot distribuit consistent.
+          </p>
         </CardContent>
       </Card>
     </div>
