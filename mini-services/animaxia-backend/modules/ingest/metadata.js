@@ -83,12 +83,60 @@ function toMetadata(item, source) {
   return result;
 }
 
+
+export function validMetadataBatch(source, items) {
+  return isObject(source) && SOURCE_TYPES.has(source.type)
+    && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(source.id || '')
+    && Array.isArray(items) && items.length >= 1 && items.length <= 100;
+}
+
+/** Shared persistence path for synchronous requests and durable jobs. */
+export async function persistMetadataBatch(source, items) {
+  if (!validMetadataBatch(source, items)) {
+    throw Object.assign(new Error('Invalid source or metadata batch'), { status: 400 });
+  }
+  const successes = [];
+  const errors = [];
+  const changedIds = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const category = normalizedType(item?.category || item?.type || item?.mediaType || item?.media_type || item?.metadata?.mediaType || '');
+    const title = text(item?.title || item?.name || item?.original_title || item?.original_name, 300);
+    const itemId = item?.id == null ? '' : String(item.id).trim();
+    if (!isObject(item) || !title || !category || !/^[a-zA-Z0-9._:-]{1,128}$/.test(itemId)) {
+      errors.push({ index: i, error: 'Missing/invalid item id, title or category' });
+      continue;
+    }
+    const externalid = [source.type, source.id, category, itemId].join(':');
+    const metadata = toMetadata(item, source);
+    const thumbnail = safeUrl(item.thumbnail || item.poster || item.posterUrl || item.metadata?.thumbnail);
+    try {
+      const result = await upsertContent({ externalid, title, type: category, thumbnail, metadata });
+      changedIds.push(result.record.id);
+      successes.push({ index: i, id: result.record.id, externalid, created: result.created });
+    } catch (err) {
+      errors.push({ index: i, error: 'Content could not be stored (check duplicate identifiers or metadata)' });
+    }
+  }
+  if (changedIds.length) {
+    cache.clearPrefix('http:');
+    events.emit('content:changed:ids', { ids: [...new Set(changedIds)], action: 'update' });
+    events.emit('content:changed');
+  }
+  return {
+    ok: errors.length === 0, partial: errors.length > 0 && successes.length > 0,
+    source: { type: source.type, id: source.id },
+    accepted: successes.length, created: successes.filter((s) => s.created).length,
+    updated: successes.filter((s) => !s.created).length,
+    rejected: errors.length, data: successes, errors,
+    mode: 'sqlite-synchronous', indexed: 'scheduled',
+  });
+}
+
 router.post('/metadata', requireMetadataIngestAccess, limiter, async (req, res, next) => {
   try {
     const { source, items } = req.body || {};
-    if (!isObject(source) || !SOURCE_TYPES.has(source.type)
-      || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(source.id || '')
-      || !Array.isArray(items) || items.length < 1 || items.length > 100) {
+    if (!validMetadataBatch(source, items)) {
       return res.status(400).json({
         error: 'Expected source:{type:hub|api|addon,id:slug} and items array (1..100)',
       });
@@ -96,42 +144,7 @@ router.post('/metadata', requireMetadataIngestAccess, limiter, async (req, res, 
     if (req.metadataIngestService && !allowedMetadataServiceSource(source)) {
       return res.status(403).json({ error: 'Source is not enabled for metadata service ingestion' });
     }
-    const successes = [];
-    const errors = [];
-    const changedIds = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const category = normalizedType(item?.category || item?.type || item?.mediaType || item?.media_type || item?.metadata?.mediaType || '');
-      const title = text(item?.title || item?.name || item?.original_title || item?.original_name, 300);
-      const itemId = item?.id == null ? '' : String(item.id).trim();
-      if (!isObject(item) || !title || !category || !/^[a-zA-Z0-9._:-]{1,128}$/.test(itemId)) {
-        errors.push({ index: i, error: 'Missing/invalid item id, title or category' });
-        continue;
-      }
-      const externalid = [source.type, source.id, category, itemId].join(':');
-      const metadata = toMetadata(item, source);
-      const thumbnail = safeUrl(item.thumbnail || item.poster || item.posterUrl || item.metadata?.thumbnail);
-      try {
-        const result = await upsertContent({ externalid, title, type: category, thumbnail, metadata });
-        changedIds.push(result.record.id);
-        successes.push({ index: i, id: result.record.id, externalid, created: result.created });
-      } catch (err) {
-        errors.push({ index: i, error: 'Content could not be stored (check duplicate identifiers or metadata)' });
-      }
-    }
-    if (changedIds.length) {
-      cache.clearPrefix('http:');
-      events.emit('content:changed:ids', { ids: [...new Set(changedIds)], action: 'update' });
-      events.emit('content:changed');
-    }
-    return res.json({
-      ok: errors.length === 0, partial: errors.length > 0 && successes.length > 0,
-      source: { type: source.type, id: source.id },
-      accepted: successes.length, created: successes.filter((s) => s.created).length,
-      updated: successes.filter((s) => !s.created).length,
-      rejected: errors.length, data: successes, errors,
-      mode: 'sqlite-synchronous', indexed: 'scheduled',
-    });
+    return res.json(await persistMetadataBatch(source, items));
   } catch (err) { return next(err); }
 });
 export default router;
