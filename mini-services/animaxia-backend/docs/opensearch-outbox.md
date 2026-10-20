@@ -124,7 +124,9 @@ ANIMAXIA_SEARCH_BACKEND=opensearch
 Aceasta comută **doar `GET /api/search/metadata`**, inclusiv filtrarea după
 categorie/an/actor/gen/studio/franciză/trilogie/colecție/descriere/poster.
 Răspunsul conține `engine: animaxia-opensearch-v1`, `searchMode: opensearch`
-și cursor `search_after`. `GET /api/search/advanced`, autocomplete și
+și cursor `search_after`. Pentru peste 10.000 de rezultate, `totalRelation:gte`
+indică o limită inferioară, nu un total exact, pentru a evita numărări
+costisitoare la scară mare. `GET /api/search/advanced`, autocomplete și
 alte căi rămân în continuare pe implementarea actuală SQLite; migrarea lor
 necesită o etapă distinctă.
 
