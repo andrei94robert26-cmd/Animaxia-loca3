@@ -74,6 +74,25 @@ export function enqueueMetadataBatch({ source, items, idempotencyKey = null }) {
       (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey))) {
     throw Object.assign(new Error('Invalid idempotencyKey'), { status: 400 });
   }
+  // The database is persistent but local disk is finite. Reject new work
+  // when the pending queue has reached its configured capacity. Replays with
+  // a matching idempotency key still return the existing job.
+  if (idempotencyKey) {
+    const previous = localDb.prepare(`
+      SELECT * FROM metadata_sync_jobs
+      WHERE sourcetype=? AND sourceid=? AND idempotencykey=?
+    `).get(source.type, source.id, idempotencyKey);
+    if (previous) return { ...summary(previous), queued: false, duplicate: true };
+  }
+  const queueCap = Math.max(100, Math.min(20_000,
+    Number.parseInt(process.env.ANIMAXIA_METADATA_QUEUE_CAP, 10) || 2000));
+  const pending = localDb.prepare(`
+    SELECT COUNT(*) AS n FROM metadata_sync_jobs WHERE status IN ('queued','running')
+  `).get();
+  if (Number(pending.n) >= queueCap) {
+    throw Object.assign(new Error('Metadata queue capacity reached; retry later'), { status: 429 });
+  }
+
   const id = crypto.randomUUID();
   const result = localDb.prepare(`
     INSERT INTO metadata_sync_jobs(id,sourcetype,sourceid,idempotencykey,payload)
@@ -134,8 +153,11 @@ export function recoverMetadataJobs() {
   ready();
   const result = localDb.prepare(`
     UPDATE metadata_sync_jobs
-    SET status='queued', nextattemptat=CURRENT_TIMESTAMP,
-        startedat=NULL, error='requeued after worker restart'
+    SET status=CASE WHEN attempts >= 3 THEN 'failed' ELSE 'queued' END,
+        nextattemptat=CURRENT_TIMESTAMP, startedat=NULL,
+        finishedat=CASE WHEN attempts >= 3 THEN CURRENT_TIMESTAMP ELSE NULL END,
+        error=CASE WHEN attempts >= 3 THEN 'retry limit reached after restart'
+                   ELSE 'requeued after worker restart' END
     WHERE status='running'
   `).run();
   return Number(result.changes);
