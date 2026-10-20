@@ -4,6 +4,7 @@
  * Only IDs with real 'driverImplemented' support are fetchable here.
  */
 import { getSourceRecord } from '../ingest/source-registry.js';
+import { getProviderFetchHealth } from './health.js';
 
 const IDS_BY_GROUP = {
   "films": "tmdb omdb tvmaze thetvdb trakt watchmode opensubtitles swapi archive loc",
@@ -130,6 +131,7 @@ export function providerReadiness(entry) {
   const credentialsPresent = requirements.every((choice) => choice.some((key) =>
     typeof process.env[key] === 'string' && process.env[key].length > 0));
   const enabled = Boolean(source && Number(source.enabled) === 1);
+  const fetchHealth = getProviderFetchHealth(provider.id);
   return {
     ...provider,
     installed: Boolean(source),
@@ -137,6 +139,9 @@ export function providerReadiness(entry) {
     credentialsPresent,
     readyForSync: provider.driverImplemented && enabled && credentialsPresent,
     // Live availability requires a successful actual network call, never guessed.
-    liveVerified: false,
+    // Last HTTP attempt is evidence of one fetch, not a live uptime SLA.
+    liveVerified: fetchHealth.lastStatus === 'success'
+      && Date.now() - Date.parse(fetchHealth.lastAttemptAt || '') < 86_400_000,
+    fetchHealth,
   };
 }
