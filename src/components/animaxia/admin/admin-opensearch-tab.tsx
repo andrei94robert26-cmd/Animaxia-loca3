@@ -17,6 +17,11 @@ type Status = {
 type Backfill = {scanned: number; nextAfterId: number | null; finished: boolean};
 type Flush = {processed: number; failed: number; pending: number};
 type Comparison = {localCount: number; remoteCount: number; delta: number; pending: number; countAligned: boolean};
+type Reconciliation = {
+  scanned: number; matched: number; missing: number; mismatched: number;
+  repairCandidates: number; repairQueued: number; alreadyPending: number;
+  dryRun: boolean; nextAfterId: number | null; finished: boolean; pending: number;
+};
 const backend = (path: string) => path + '?XTransformPort=4000';
 
 export function AdminOpenSearchTab() {
@@ -26,6 +31,8 @@ export function AdminOpenSearchTab() {
   const [busy, setBusy] = useState(false);
   const [cursor, setCursor] = useState('0');
   const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [reconcileCursor,setReconcileCursor] = useState('0');
+  const [reconciliation,setReconciliation] = useState<Reconciliation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
@@ -49,6 +56,29 @@ export function AdminOpenSearchTab() {
         'S-au detectat diferențe între catalog și index');
     }catch(e){toast.error(e instanceof Error?e.message:'Compararea nu a reușit');}
     finally{setBusy(false);}
+  }
+
+  async function reconcile(dryRun: boolean) {
+    const afterId=Number(reconcileCursor);
+    if(!Number.isSafeInteger(afterId)||afterId<0) {
+      toast.error('Cursorul trebuie să fie un întreg pozitiv');return;
+    }
+    if(!dryRun&&!window.confirm('Adaugi documentele lipsă sau modificate în outbox pentru reindexare?')) {
+      return;
+    }
+    setBusy(true);
+    try{
+      const report=await post<Reconciliation>('/api/search/opensearch/reconcile',{
+        afterId,limit:25,dryRun,
+      });
+      setReconciliation(report);
+      toast.success(report.scanned+' documente verificate · '+
+        report.repairCandidates+' diferențe'+
+        (dryRun?' (fără modificări)':' · '+report.repairQueued+' reparații în coadă'));
+      if(!dryRun)await refresh();
+    }catch(e){
+      toast.error(e instanceof Error?e.message:'Verificarea documentelor a eșuat');
+    }finally{setBusy(false);}
   }
 
   async function initialize(){
@@ -148,6 +178,47 @@ export function AdminOpenSearchTab() {
           <p className="text-xs text-zinc-400">
             Nu activa ANIMAXIA_SEARCH_BACKEND=opensearch înainte ca întregul catalog
             să fie sincronizat, verificat și monitorizat în cluster.
+          </p>
+        </CardContent>
+      </Card>
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Verificare document cu document</CardTitle>
+          <CardDescription>
+            Compară până la 25 de înregistrări SQLite cu documentele OpenSearch.
+            Verificarea simplă nu schimbă indexul; repararea necesită confirmare.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <Label htmlFor="opensearch-verify-cursor">Ultimul ID verificat</Label>
+          <Input id="opensearch-verify-cursor" value={reconcileCursor}
+            inputMode="numeric" onChange={(e)=>{
+              setReconcileCursor(e.target.value);
+              setReconciliation(null);
+            }} />
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={busy||!status?.configured}
+              onClick={()=>void reconcile(true)}>Verifică 25 (fără modificări)</Button>
+            <Button disabled={busy||!status?.configured}
+              onClick={()=>void reconcile(false)}>Reindexează diferențele</Button>
+            <Button variant="outline" disabled={busy||!reconciliation?.nextAfterId}
+              onClick={()=>{
+                setReconcileCursor(String(reconciliation?.nextAfterId));
+                setReconciliation(null);
+              }}>Următoarea pagină</Button>
+          </div>
+          {reconciliation&&<p className="text-xs text-zinc-300" role="status">
+            Analizate: {reconciliation.scanned} · Identice: {reconciliation.matched}
+            {' · '}Lipsă: {reconciliation.missing}
+            {' · '}Modificate: {reconciliation.mismatched}
+            {' · '}Introduse în coadă: {reconciliation.repairQueued}
+            {' · '}Deja în coadă: {reconciliation.alreadyPending}
+            {' · '}{reconciliation.finished?'Sfârșitul catalogului':'Mai există pagini'}
+          </p>}
+          <p className="text-xs text-zinc-400">
+            Verificarea urmărește ID-urile locale. Nu detectează documentele
+            orfane care există doar în OpenSearch și nu garantează consistență
+            în timpul modificărilor simultane.
           </p>
         </CardContent>
       </Card>
