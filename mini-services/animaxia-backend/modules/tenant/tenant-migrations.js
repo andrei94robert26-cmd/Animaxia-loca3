@@ -26,6 +26,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { rows, one, num } from '../platform/sql.js';
+import { driverInfo } from '../../db.js';
 
 /** Default enforceable limits per tenant plan (FAZA 11 pricing tiers). */
 export const TENANT_PLAN_LIMITS = {
@@ -121,6 +122,16 @@ const DDL_STATEMENTS = [
 export async function ensureTenantSchema() {
   let applied = 0;
   for (const statement of DDL_STATEMENTS) {
+    // Vector indexing is optional: a fresh local SQLite install may not have
+    // the AI vector table. Never abort auth/tenant setup over this index.
+    if (driverInfo().driver === 'sqlite' && statement.includes('idx_vectorembeddings_tenant')) {
+      const columns = await rows('PRAGMA table_info(vectorembeddings)');
+      const names = new Set(columns.map((column) => String(column.name).toLowerCase()));
+      if (!names.has('tenantid') || !names.has('kind')) {
+        logger.warn('[tenant] Optional vector index skipped (vector schema unavailable)');
+        continue;
+      }
+    }
     try {
       await rows(statement);
       applied += 1;
