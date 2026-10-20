@@ -16,7 +16,7 @@ const submitLimit = userRateLimit({ scope: 'ip', max: 20, windowMs: 60_000, key:
 router.post('/metadata/queue', requireMetadataIngestAccess, submitLimit, (req, res, next) => {
   try {
     const { source, items, idempotencyKey } = req.body || {};
-    if (req.metadataIngestService && !allowedMetadataServiceSource(source)) {
+    if (!allowedMetadataServiceSource(source, req)) {
       return res.status(403).json({ error: 'Source not approved for ingestion' });
     }
     ensureMetadataQueueSchema();
