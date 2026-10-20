@@ -13,6 +13,10 @@ test('hub/API/addon JSON batch ingestion persists searchable metadata safely', a
   await initDb();
   await ensurePlatformSchema();
   await ensureAdminUsersSchema();
+  const previousServiceKey = process.env.ANIMAXIA_INGEST_SERVICE_KEY;
+  const previousSources = process.env.ANIMAXIA_INGEST_ALLOWED_SOURCES;
+  process.env.ANIMAXIA_INGEST_SERVICE_KEY = crypto.randomBytes(48).toString('hex');
+  process.env.ANIMAXIA_INGEST_ALLOWED_SOURCES = 'addon:torentino';
   const stamp = crypto.randomBytes(6).toString('hex');
   const makeUser = async (role) => {
     const result = await query(
@@ -93,12 +97,38 @@ test('hub/API/addon JSON batch ingestion persists searchable metadata safely', a
     assert.deepEqual(updated.metadata.actors, ['Actor A']);
     assert.equal(updated.metadata.player.sources.length, 1);
 
+    // Service credential is scoped ONLY to approved source identifiers.
+    const serviceBody = { source: payload.source, items: [{
+      id: stamp + 'svc', title: 'Service-only import ' + stamp,
+      category: 'filme', year: 2025,
+    }] };
+    const serviceRequest = (requestBody, keyValue) => fetch(base + '/api/ingest/metadata', {
+      method: 'POST', headers: {
+        'content-type': 'application/json',
+        'x-animaxia-ingest-key': keyValue,
+      }, body: JSON.stringify(requestBody),
+    });
+    assert.equal((await serviceRequest(serviceBody, 'wrong-service-key')).status, 403);
+    assert.equal((await serviceRequest({
+      ...serviceBody, source: { type: 'api', id: 'unapproved' },
+    }, process.env.ANIMAXIA_INGEST_SERVICE_KEY)).status, 403);
+    const serviceResponse = await serviceRequest(
+      serviceBody, process.env.ANIMAXIA_INGEST_SERVICE_KEY);
+    assert.equal(serviceResponse.status, 200);
+    assert.equal((await serviceResponse.json()).created, 1);
+
     const invalid = await post({ source: payload.source, items: Array(101).fill(item) }, bearer(adminId));
     assert.equal(invalid.status, 400);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     const row = await getContentByExternalId(key);
     if (row) await deleteContent(row.id);
+    const serviceRow = await getContentByExternalId('addon:torentino:movie:' + stamp + 'svc');
+    if (serviceRow) await deleteContent(serviceRow.id);
+    if (previousServiceKey === undefined) delete process.env.ANIMAXIA_INGEST_SERVICE_KEY;
+    else process.env.ANIMAXIA_INGEST_SERVICE_KEY = previousServiceKey;
+    if (previousSources === undefined) delete process.env.ANIMAXIA_INGEST_ALLOWED_SOURCES;
+    else process.env.ANIMAXIA_INGEST_ALLOWED_SOURCES = previousSources;
     await query('DELETE FROM users WHERE id IN (?,?)', [adminId, userId]);
   }
 });
