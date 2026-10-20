@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import {spawn} from 'node:child_process';
 import pg from 'pg';
 import {initDb,upsertContent,deleteContent} from '../db.js';
 import {localDb} from '../modules/local/sqlite.js';
@@ -104,6 +105,45 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
     assert.equal((await db.query(
       'SELECT id FROM animaxia_shadow_content WHERE id=$1',[records[1]]
     )).rowCount,0);
+
+    // A completely separate Node process uses ONLY PostgreSQL and applies
+    // queued tasks. No SQLite Content import or shared SQLite volume needed.
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-2',
+      title:'Applied by standalone PG worker '+nonce,
+      type:'movie',metadata:{actors:['Standalone Worker']},
+    });
+    assert.ok((await stageDistributedShadow({limit:100})).staged>=1);
+    const child=spawn(process.execPath,['cli/postgres-shadow-worker.mjs'],{
+      cwd:process.cwd(),
+      env:{...process.env,ANIMAXIA_PG_DISTRIBUTED_WORKER:'true',
+        ANIMAXIA_PG_DISTRIBUTED_BRIDGE:'false'},
+      stdio:['ignore','pipe','pipe'],
+    });
+    let stdout='',stderr='';
+    child.stdout.on('data',chunk=>{stdout+=chunk.toString();});
+    child.stderr.on('data',chunk=>{stderr+=chunk.toString();});
+    const childExit=new Promise((resolve,reject)=>{
+      child.once('error',reject);
+      child.once('exit',(code,signal)=>resolve({code,signal}));
+    });
+    try{
+      let complete=false;
+      for(let attempt=0;attempt<48;attempt++){
+        await new Promise(resolve=>setTimeout(resolve,250));
+        const check=await db.query(
+          'SELECT title FROM animaxia_shadow_content WHERE id=$1',[records[2]]);
+        if(check.rows[0]?.title==='Applied by standalone PG worker '+nonce){
+          complete=true;break;
+        }
+      }
+      assert.equal(complete,true,'Standalone PostgreSQL-only process did not apply queued job');
+    }finally{
+      child.kill('SIGTERM');
+      const exit=await childExit;
+      assert.equal(exit.code,0,'Standalone worker exit: '+stderr);
+    }
+    assert.match(stdout,/PostgreSQL-only worker started/);
   }finally{
     for(const id of records){
       try{await deleteContent(id);}catch{/* already deleted */}
