@@ -130,7 +130,7 @@ export async function persistMetadataBatch(source, items) {
     updated: successes.filter((s) => !s.created).length,
     rejected: errors.length, data: successes, errors,
     mode: 'sqlite-synchronous', indexed: 'scheduled',
-  });
+  };
 }
 
 router.post('/metadata', requireMetadataIngestAccess, limiter, async (req, res, next) => {
