@@ -17,6 +17,7 @@ import { breakerStats } from './utils/fetcher.js';
 import { mineUrl } from './miner.js';
 import { seed } from './seed.js';
 import { playerAllowedTypes, resolvePlayer } from './modules/player/player.js';
+import { baseAuthSecret } from './modules/tenant/jwt-tenant.js';
 import animeRouter from './modules/anime/jikan.js';
 import { moviesRouter, tvRouter } from './modules/movies/tmdb.js';
 import footballRouter from './modules/sports/football.js';
@@ -728,6 +729,8 @@ app.use((err, req, res, next) => {
 /* ---------------------------------- boot ------------------------------------ */
 
 async function main() {
+  // Refuse to expose a production service without a safe, shared JWT signing key.
+  if (process.env.NODE_ENV === 'production') baseAuthSecret();
   await initDb();
 
   // Phase-2 platform schema (users, tokens, watchlist, history, comments,
