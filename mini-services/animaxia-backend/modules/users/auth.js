@@ -111,8 +111,8 @@ export function publicUser(row) {
     createdat: isoOrNull(row.createdat),
     lastloginat: isoOrNull(row.lastloginat),
     // TS3 (auth avansat): additive fields — email verification + 2FA state.
-    emailverified: row.emailverified === true,
-    twofaenabled: row.twofaenabled === true,
+    emailverified: row.emailverified === true || row.emailverified === 1,
+    twofaenabled: row.twofaenabled === true || row.twofaenabled === 1,
   };
 }
 
