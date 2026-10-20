@@ -121,7 +121,7 @@ export async function persistMetadataBatch(source, items) {
   if (changedIds.length) {
     cache.clearPrefix('http:');
     events.emit('content:changed:ids', { ids: [...new Set(changedIds)], action: 'update' });
-    events.emit('content:changed');
+    events.emit('content:changed', { ids: [...new Set(changedIds)], source: 'metadata-ingest' });
   }
   return {
     ok: errors.length === 0, partial: errors.length > 0 && successes.length > 0,
