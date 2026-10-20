@@ -1,6 +1,7 @@
 /** Administrator-only shadow PostgreSQL migration operations. */
 import express from 'express';
 import { readPgShadowCatalog } from './shadow-read.js';
+import { verifyPgShadow } from './shadow-verify.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import {
@@ -20,6 +21,15 @@ router.get('/status',(_req,res,next)=>{
 router.get('/catalog',limiter,async(req,res,next)=>{
   try { return res.json(await readPgShadowCatalog(req.query)); }
   catch(err){ return next(err); }
+});
+router.post('/verify',limiter,async(req,res,next)=>{
+  try{
+    return res.json(await verifyPgShadow({
+      afterId:req.body?.afterId??0,
+      limit:req.body?.limit??25,
+      dryRun:req.body?.dryRun??true,
+    }));
+  }catch(err){return next(err);}
 });
 router.post('/setup',limiter,async(_req,res,next)=>{
   try{return res.json(await setupPgShadow());}
