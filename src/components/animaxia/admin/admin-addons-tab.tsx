@@ -163,7 +163,7 @@ export function AdminAddonsTab() {
       const response = await mutate<{
         fetched: number; jobId?: string; status?: string; duplicate?: boolean;
       }>('/api/integrations/providers/' + encodeURIComponent(providerId) + '/sync',
-        'POST', { q: providerQuery, page: 1 });
+        'POST', { q: providerId === 'freetogame' ? '' : providerQuery, page: 1 });
       toast.success(response.jobId
         ? providerId + ': ' + response.fetched + ' elemente în coadă (' + response.status + ')'
         : providerId + ': nu există rezultate compatibile pentru import.');
