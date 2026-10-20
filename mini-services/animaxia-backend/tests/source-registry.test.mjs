@@ -71,6 +71,17 @@ test('install, activate, push, rotate and disable addon JSON source with isolate
   const externalid = type + ':' + addonId + ':movie:movie' + nonce;
   let queuedId = null;
   try {
+    // Production blocks uninstalled addon imports, even when a global legacy
+    // key contains the addon name in its environment allowlist.
+    const beforeMode = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      assert.equal((await hit('/api/ingest/metadata', 'POST', payload, legacyKey)).status, 403);
+    } finally {
+      if (beforeMode === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = beforeMode;
+    }
+
     const unauth = await hit('/api/integrations/sources', 'POST', manifest);
     assert.equal(unauth.status, 401);
     const forbiddenProtocol = await hit('/api/integrations/sources', 'POST',
