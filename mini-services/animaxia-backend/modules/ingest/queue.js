@@ -83,7 +83,16 @@ export function enqueueMetadataBatch({ source, items, idempotencyKey = null }) {
       SELECT * FROM metadata_sync_jobs
       WHERE sourcetype=? AND sourceid=? AND idempotencykey=?
     `).get(source.type, source.id, idempotencyKey);
-    if (previous) return { ...summary(previous), queued: false, duplicate: true };
+    if (previous) {
+      // A replay is only valid for the exact same submitted data. Otherwise
+      // a caller could silently suppress a changed page with an old key.
+      if (previous.payload !== payload) {
+        throw Object.assign(new Error('Idempotency key reused for a different payload'), {
+          status: 409,
+        });
+      }
+      return { ...summary(previous), queued: false, duplicate: true };
+    }
   }
   const queueCap = Math.max(100, Math.min(20_000,
     Number.parseInt(process.env.ANIMAXIA_METADATA_QUEUE_CAP, 10) || 2000));
