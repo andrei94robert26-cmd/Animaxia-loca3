@@ -64,6 +64,14 @@ function executor(override){
 export async function shadowPgQuery(sql,params=[],{db}={}) {
   return executor(db).query(sql,params);
 }
+/** A dedicated transactional client. Connect/release are required for
+ * SELECT ... FOR UPDATE SKIP LOCKED across concurrent PostgreSQL workers. */
+export async function withPgShadowClient(callback,{db}={}){
+  const client=await executor(db).connect();
+  try{return await callback(client);}
+  finally{client.release();}
+}
+
 
 export async function setupPgShadow({db}={}) {
   if(!pgShadowConfig().configured)throw Object.assign(new Error('PostgreSQL shadow not configured'),{status:503});
@@ -121,6 +129,9 @@ export function projectPgShadow(row){
   };
 }
 export async function flushPgShadow({limit=40,db}={}) {
+  if(process.env.ANIMAXIA_PG_DISTRIBUTED_BRIDGE==='true') {
+    throw Object.assign(new Error('Legacy SQLite->PG flush disabled during distributed bridge'),{status:409});
+  }
   if(busy)return {skipped:'already-running'};
   if(!pgShadowConfig().configured)throw Object.assign(new Error('PostgreSQL shadow not configured'),{status:503});
   busy=true;
@@ -174,6 +185,8 @@ export function pgShadowStatus(){
 }
 export function startPgShadowWorker(){
   if(timer||process.env.ANIMAXIA_PG_SHADOW_WORKER!=='true')return false;
+  if(process.env.ANIMAXIA_PG_DISTRIBUTED_BRIDGE==='true')
+    throw new Error('Do not enable legacy shadow worker with distributed bridge');
   if(!pgShadowConfig().configured){logger.warn('[pg-shadow] disabled: no database URL');return false;}
   ensurePgShadowOutbox();
   timer=setInterval(()=>{
