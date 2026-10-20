@@ -60,6 +60,11 @@ function connectionPool(){
 function executor(override){
   return override||connectionPool();
 }
+/** Use the connection pool for whitelisted internal SQL read operations. */
+export async function shadowPgQuery(sql,params=[],{db}={}) {
+  return executor(db).query(sql,params);
+}
+
 export async function setupPgShadow({db}={}) {
   if(!pgShadowConfig().configured)throw Object.assign(new Error('PostgreSQL shadow not configured'),{status:503});
   const client=executor(db);
@@ -79,6 +84,14 @@ export async function setupPgShadow({db}={}) {
   await client.query(`
     CREATE INDEX IF NOT EXISTS idx_animaxia_shadow_metadata
     ON animaxia_shadow_content USING GIN(metadata)
+  `);
+  // Stable PostgreSQL full-text index for the admin-only shadow catalog.
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_animaxia_shadow_fts
+    ON animaxia_shadow_content USING GIN (
+      to_tsvector('simple'::regconfig,
+        coalesce(title,'') || ' ' || coalesce(metadata->>'description',''))
+    )
   `);
   ensurePgShadowOutbox();
   return {createdOrExisting:true,sourceOfTruth:'sqlite',replicaRole:'shadow',schemaVersion:1};
