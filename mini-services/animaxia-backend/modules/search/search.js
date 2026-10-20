@@ -735,10 +735,12 @@ router.get('/autocomplete', wrap(async (req, res) => {
   const executor = async () => {
     await ensureSynced();
     const matched = await rows(
-      `SELECT s.contentid, s.title, s.year
-       FROM searchdocs s
-       WHERE s.title LIKE $1 || '%' COLLATE NOCASE
-       ORDER BY s.title COLLATE NOCASE ASC, s.contentid ASC
+      `SELECT c.id AS contentid, c.title, c.year, c.type, c.thumbnail,
+              COALESCE(json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.rating'),
+                       json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.score')) AS rating
+       FROM Content c
+       WHERE c.title LIKE $1 || '%' COLLATE NOCASE
+       ORDER BY c.title COLLATE NOCASE ASC, c.id ASC
        LIMIT 8`,
       [q],
     );
@@ -777,19 +779,36 @@ router.get('/autocomplete', wrap(async (req, res) => {
   return res.json(out.body);
 }));
 
-/** GET /api/search/filters — distinct filter values for UI dropdowns. Public. */
-router.get('/filters', wrap(async (req, res) => {
-  await ensureSynced();
-
-  const years = await rows(
-    `SELECT DISTINCT year
-     FROM searchdocs
-     WHERE year IS NOT NULL
-     ORDER BY year DESC`
-  );
-
+/** GET /api/search/filters — actual SQLite facet values from persisted JSON. */
+router.get('/filters', wrap(async (_req, res) => {
+  // Bound each facet to prevent oversized API responses. For very large
+  // catalogs these queries must eventually move to a materialized facet index.
+  const [yearRows, typeRows] = await Promise.all([
+    rows('SELECT DISTINCT year FROM Content WHERE year IS NOT NULL ORDER BY year DESC LIMIT 150'),
+    rows("SELECT type, COUNT(*) AS n FROM Content GROUP BY type ORDER BY n DESC, type ASC LIMIT 100"),
+  ]);
+  const jsonFacets = async (path) => rows(`
+    SELECT trim(CASE WHEN j.type = 'object'
+      THEN COALESCE(json_extract(j.value, '$.name'), '')
+      ELSE CAST(j.value AS TEXT) END) AS value, COUNT(*) AS n
+    FROM Content c, json_each(
+      CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '${path}'
+    ) j
+    WHERE j.type IN ('text', 'object')
+    GROUP BY value HAVING value <> ''
+    ORDER BY n DESC, value ASC LIMIT 100
+  `);
+  const [genres, actors, studios] = await Promise.all([
+    jsonFacets('$.genres'), jsonFacets('$.actors'), jsonFacets('$.studios'),
+  ]);
   return res.json({
-    years: years.map((r) => Number(r.year)),
+    years: yearRows.map((r) => Number(r.year)),
+    categories: typeRows.map((r) => ({ value: r.type, count: Number(r.n) })),
+    types: typeRows.map((r) => ({ value: r.type, count: Number(r.n) })),
+    genres: genres.map((r) => ({ value: r.value, count: Number(r.n) })),
+    actors: actors.map((r) => ({ value: r.value, count: Number(r.n) })),
+    studios: studios.map((r) => ({ value: r.value, count: Number(r.n) })),
+    backend: 'sqlite',
   });
 }));
 
