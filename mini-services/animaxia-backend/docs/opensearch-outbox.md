@@ -112,6 +112,42 @@ Același rezultat este accesibil prin butonul „Compară documentele” din
 fila `#/admin/opensearch`. **Numerele egale nu garantează identitatea
 fiecărui document**, nici consistența completă în timp real.
 
+### Verificare individuală și reparare limitată
+
+Verificarea numărului total nu garantează că OpenSearch conține aceleași
+titluri sau metadate ca SQLite. Pentru comparație reală a documentelor,
+folosește endpointul administrativ:
+
+```http
+POST /api/search/opensearch/reconcile
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{"afterId":0,"limit":25,"dryRun":true}
+```
+
+Acesta citește maximum 50 de înregistrări locale dintr-o pagină stabilă
+după ID, solicită documentele corespunzătoare prin OpenSearch `/{index}/_mget`
+și compară câmpurile indexate. Răspunsul conține `matched`, `missing`,
+`mismatched`, `repairCandidates`, `nextAfterId` și `finished`.
+
+Implicit, `dryRun:true` **nu scrie nimic**. După verificarea rezultatelor,
+administratorul poate retrimite aceeași pagină cu `dryRun:false`. Numai
+documentele lipsă sau diferite sunt înscrise pentru reindexare în outbox.
+Joburile deja în așteptare sunt păstrate (nu li se suprascrie versiunea).
+În interfața `#/admin/opensearch` sunt butoane separate pentru verificare
+și reparare, cu confirmare pentru modificări.
+
+Dacă OpenSearch răspunde cu o eroare de shard, cu un document în altă ordine
+sau cu un răspuns incomplet, **nu se programează reparații din acea pagină**.
+Continuă cu `nextAfterId` până la `finished:true`; pentru un catalog mare,
+această verificare are un cost de citire proporțional cu numărul titlurilor.
+
+**Limite:** verificarea nu enumeră documentele orfane care există numai în
+OpenSearch. Nici nu oferă un snapshot consistent sub scrieri concurente.
+Este o operație de diagnostic și corectare pe loturi mici, nu dovada
+capacității de a gestiona 1 miliard de titluri.
+
 ## 4. Comută gradual motorul pentru metadate
 
 Numai după backfill complet, număr de elemente comparat, testare pe exemple
