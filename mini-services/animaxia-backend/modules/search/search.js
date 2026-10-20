@@ -352,7 +352,12 @@ async function forceResync() {
 
 // content:changed → dirty immediately; debounced background resync (3s).
 let resyncTimer = null;
-events.on('content:changed', () => {
+events.on('content:changed', ({ ids } = {}) => {
+  // Specific-id events are handled by the incremental searchdocs listener
+  // below. Avoid a redundant full-library rebuild after every JSON batch.
+  if (Array.isArray(ids) && ids.length && ids.every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)) {
+    return;
+  }
   dirty = true;
   if (resyncTimer) clearTimeout(resyncTimer);
   resyncTimer = setTimeout(() => {
