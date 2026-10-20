@@ -106,3 +106,27 @@ export function seedPgShadowOutbox({afterId=0,limit=500}={}) {
   return {scanned:rows.length,nextAfterId:rows.length===cap?rows.at(-1).id:null,
     finished:rows.length<cap};
 }
+
+/**
+ * Repair missing or stale projected rows without overwriting a newer
+ * existing outbox event. Rejects nonexistent canonical Content IDs.
+ */
+export function queuePgShadowRepair(ids) {
+  ensurePgShadowOutbox();
+  if(!Array.isArray(ids)||ids.length>50||ids.some(
+    (id)=>!Number.isSafeInteger(id)||id<=0
+  ))throw Object.assign(new Error('Invalid PostgreSQL shadow repair IDs'),{status:400});
+  const distinct=[...new Set(ids)];
+  const statement=localDb.prepare(
+    "INSERT INTO pg_shadow_outbox(contentid,operation,revision) "+
+    "SELECT id,'upsert',1 FROM Content WHERE id=? "+
+    "ON CONFLICT(contentid) DO NOTHING"
+  );
+  let queued=0;
+  localDb.exec('BEGIN IMMEDIATE');
+  try{
+    for(const id of distinct)queued+=statement.run(id).changes;
+    localDb.exec('COMMIT');
+  }catch(err){localDb.exec('ROLLBACK');throw err;}
+  return {requested:distinct.length,queued,alreadyPendingOrMissing:distinct.length-queued};
+}
