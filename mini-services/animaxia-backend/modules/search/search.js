@@ -58,6 +58,7 @@
  */
 
 import express from 'express';
+import metadataSearchRouter from './metadata.js';
 import { rows, one, parseJsonb } from '../platform/sql.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
 import { events } from '../platform/events.js';
@@ -611,6 +612,7 @@ export async function runSearchLoad(q) {
 /* ---------------------------------- router ----------------------------------- */
 
 const router = express.Router();
+router.use(metadataSearchRouter);
 
 /** GET /api/search/advanced — Neon FTS + trigram fallback + SQL filters. Public. */
 router.get('/advanced', wrap(async (req, res) => {
