@@ -98,6 +98,8 @@ import { franchiseRouter, trilogyRouter } from './modules/discover/collections.j
  * real scale report (live measurements, honest verdicts). */
 import ingestRouter from './modules/ingest/dedup.js';
 import metadataIngestRouter from './modules/ingest/metadata.js';
+import metadataQueueRouter from './modules/ingest/queue-routes.js';
+import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
 import scaleRouter from './modules/platform/scale.js';
 
 /* FAZA 17-a (Task 17-a): resilience core (per-request timeout, load shedding,
@@ -346,6 +348,7 @@ app.use('/api/trilogies', cacheMiddleware(), trilogyRouter);
 // /api/scale is independent (additive mount).
 app.use('/api/ingest', ingestRouter);
 app.use('/api/ingest', metadataIngestRouter);
+app.use('/api/ingest', metadataQueueRouter);
 app.use('/api/scale', scaleRouter);
 
 // FAZA 13 (Task 13-3): /api/shards — sharding model/schema/pools/cluster
@@ -734,6 +737,15 @@ async function main() {
   // Refuse to expose a production service without a safe, shared JWT signing key.
   if (process.env.NODE_ENV === 'production') baseAuthSecret();
   await initDb();
+
+  // Durable JSON metadata imports: schema always available, worker opt-in.
+  // Keep this separate from miner's existing TMDB/Jikan persistent job queue.
+  try {
+    ensureMetadataQueueSchema();
+    startMetadataQueueWorker();
+  } catch (err) {
+    logger.error('[boot] JSON metadata queue unavailable: ' + err.message);
+  }
 
   // Phase-2 platform schema (users, tokens, watchlist, history, comments,
   // votes, likes, views, subscriptions, audit logs, ai chats) — idempotent.
