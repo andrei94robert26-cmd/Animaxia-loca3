@@ -104,6 +104,8 @@ import providerCatalogRouter from './modules/providers/routes.js';
 import { startProviderAutoSync, stopProviderAutoSync } from './modules/providers/auto-sync.js';
 import openSearchRoutes from './modules/search/opensearch-routes.js';
 import { startOpenSearchWorker, stopOpenSearchWorker } from './modules/search/opensearch.js';
+import pgShadowRouter from './modules/postgres/routes.js';
+import { startPgShadowWorker,stopPgShadowWorker } from './modules/postgres/shadow.js';
 import { startMinerAutoSync, stopMinerAutoSync } from './modules/miner/auto-sync.js';
 import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
 import scaleRouter from './modules/platform/scale.js';
@@ -358,6 +360,7 @@ app.use('/api/ingest', metadataQueueRouter);
 app.use('/api/integrations/sources', sourceRegistryRouter);
 app.use('/api/integrations/providers', providerCatalogRouter);
 app.use('/api/search', openSearchRoutes);
+app.use('/api/migration/postgres', pgShadowRouter);
 app.use('/api/scale', scaleRouter);
 
 // FAZA 13 (Task 13-3): /api/shards — sharding model/schema/pools/cluster
@@ -754,6 +757,7 @@ async function main() {
     startMetadataQueueWorker();
     startProviderAutoSync(); // independent fixed-origin API scheduler
     startOpenSearchWorker(); // opt-in durable remote index projection
+    startPgShadowWorker(); // opt-in PostgreSQL shadow projection (SQLite still primary)
   } catch (err) {
     logger.error('[boot] JSON metadata queue unavailable: ' + err.message);
   }
@@ -882,6 +886,7 @@ async function main() {
     stopMinerAutoSync();
     stopProviderAutoSync();
     stopOpenSearchWorker();
+    await stopPgShadowWorker();
     server.close(async () => {
       await closeDb();
       await closeShardPools(); // FAZA 13 (sharding): dedicated shard branch pools (main pool closed by closeDb)
