@@ -7,6 +7,7 @@ import { requireAuth,requireAdmin } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import { seedOpenSearchOutbox } from './opensearch-outbox.js';
 import { localDb } from '../local/sqlite.js';
+import { reconcileOpenSearchDocuments } from './opensearch-reconcile.js';
 import {
   openSearchWorkerState,ensureDistributedIndex,flushDistributedOutbox,
   requestDistributed,distributedConfig,
@@ -34,6 +35,16 @@ router.get('/opensearch/compare',limit,async(_req,res,next)=>{
       countAligned:localCount===remote.count&&state.pending===0,
       note:'Equal counts do not prove document identity or full index consistency.',
     });
+  }catch(err){return next(err);}
+});
+router.post('/opensearch/reconcile',limit,async(req,res,next)=>{
+  try {
+    const report=await reconcileOpenSearchDocuments({
+      afterId:req.body?.afterId??0,
+      limit:req.body?.limit??25,
+      dryRun:req.body?.dryRun??true,
+    });
+    return res.json(report);
   }catch(err){return next(err);}
 });
 router.post('/opensearch/setup',limit,async(_req,res,next)=>{
