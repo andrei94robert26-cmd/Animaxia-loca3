@@ -2,6 +2,10 @@
 import express from 'express';
 import { readPgShadowCatalog } from './shadow-read.js';
 import { verifyPgShadow } from './shadow-verify.js';
+import {
+  setupPgCatalogPilot,upsertPgCatalogPilot,deletePgCatalogPilot,
+  listPgCatalogPilot,pgCatalogPilotStatus,
+} from './catalog-pilot.js';
 import {setupDistributedShadow,stageDistributedShadow,workDistributedShadow,distributedShadowStatus} from './distributed-shadow.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
@@ -31,6 +35,27 @@ router.post('/distributed/stage',limiter,async(req,res,next)=>{
 });
 router.post('/distributed/process',limiter,async(req,res,next)=>{
   try{return res.json(await workDistributedShadow({limit:req.body?.limit??10}));}
+  catch(err){return next(err);}
+});
+// All pilot routes inherit requireAuth+requireAdmin from this router.
+router.get('/pilot/status',limiter,async(_req,res,next)=>{
+  try{return res.json(await pgCatalogPilotStatus());}
+  catch(err){return next(err);}
+});
+router.post('/pilot/setup',limiter,async(_req,res,next)=>{
+  try{return res.json(await setupPgCatalogPilot());}
+  catch(err){return next(err);}
+});
+router.get('/pilot/items',limiter,async(req,res,next)=>{
+  try{return res.json(await listPgCatalogPilot(req.query));}
+  catch(err){return next(err);}
+});
+router.post('/pilot/items',limiter,async(req,res,next)=>{
+  try{return res.status(200).json(await upsertPgCatalogPilot(req.body));}
+  catch(err){return next(err);}
+});
+router.delete('/pilot/items/:externalid',limiter,async(req,res,next)=>{
+  try{return res.json(await deletePgCatalogPilot(req.params.externalid));}
   catch(err){return next(err);}
 });
 router.get('/status',(_req,res,next)=>{
