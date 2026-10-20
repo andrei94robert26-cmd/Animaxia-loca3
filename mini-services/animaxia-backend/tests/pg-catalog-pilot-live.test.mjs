@@ -26,8 +26,12 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
   const blocked=prefix+'blocked';
   let constraintAdded=false;
   try{
+    const before=await pgCatalogPilotStatus();
+    assert.equal(before.enabled,true);
+    assert.equal(before.initialized,false);
     const setup=await setupPgCatalogPilot();
     assert.equal(setup.authoritativeForPublicCatalog,false);
+    assert.equal((await pgCatalogPilotStatus()).initialized,true);
     const item={
       externalid:first,title:'PilotStageEighteen Alpha '+nonce,
       type:'movie',year:2026,
