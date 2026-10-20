@@ -65,6 +65,9 @@ function toMetadata(item, source) {
     maybeField(key, raw, (v) => text(isObject(v) ? v.name : v, 160));
   }
   maybeField('posterId', item.posterId ?? item.poster_id ?? m.posterId, (v) => text(v, 160));
+  // Retain licensing/attribution metadata separately from player sources.
+  maybeField('sourceAttribution', item.sourceAttribution ?? m.sourceAttribution, (v) => text(v, 160));
+  maybeField('sourceUrl', item.sourceUrl ?? m.sourceUrl, safeUrl);
   maybeField('overview', item.description ?? item.overview ?? m.overview ?? m.description ?? m.synopsis,
     (v) => text(v, 5000));
   const yearInput = item.year ?? m.year ?? item.release_date?.slice?.(0, 4)
