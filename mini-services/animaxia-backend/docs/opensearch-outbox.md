@@ -148,6 +148,41 @@ OpenSearch. Nici nu oferă un snapshot consistent sub scrieri concurente.
 Este o operație de diagnostic și corectare pe loturi mici, nu dovada
 capacității de a gestiona 1 miliard de titluri.
 
+### Detectarea documentelor orfane din indexul extern
+
+Etapa 14 adaugă și verificarea în direcția inversă: documente care încă
+există în OpenSearch, dar **nu mai există** în `Content` din SQLite.
+
+```http
+POST /api/search/opensearch/orphans
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{"afterId":0,"limit":25,"dryRun":true}
+```
+
+Un apel examinează maximum 50 de ID-uri OpenSearch, în ordine numerică,
+folosind `search_after`, `_source:false` și `track_total_hits:false`.
+Compară apoi fiecare ID cu catalogul autoritativ SQLite. Răspunsul
+conține `scanned`, `present`, `orphaned`, `nextAfterId`, `finished`.
+
+Implicit, `dryRun:true` nu modifică nimic. Cu `dryRun:false`,
+**administratorul programează numai ștergerea ID-urilor orfane**, nu
+execută direct ștergerea în cluster. Înainte de înscriere, SQLite verifică
+din nou inexistența ID-ului; joburile deja în coadă nu sunt înlocuite.
+Workerul OpenSearch folosește aceeași coadă persistentă pentru ștergeri.
+
+**Important:** nu programa eliminarea documentelor orfane înainte de
+verificarea completă a sursei de adevăr și a backupurilor SQLite. Nu
+este indicată pe un cluster al cărui index este partajat cu alte aplicații.
+Dacă OpenSearch raportează shard eșuat, timeout, ID invalid sau rezultate
+nesortate, cererea eșuează fără reparații.
+
+Nu există garanție de snapshot între surse în timpul scrierilor concurente.
+Scannerul nu poate detecta documentele fără un câmp `id` numeric, ori
+documentele care nu respectă mappingul Animaxia. Un rezultat de verificare
+este un eșantion paginat, **nu** o certificare a întregului index.
+
 ## 4. Comută gradual motorul pentru metadate
 
 Numai după backfill complet, număr de elemente comparat, testare pe exemple
