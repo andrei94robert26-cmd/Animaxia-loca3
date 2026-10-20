@@ -158,6 +158,19 @@ export async function initDb() {
       );
   `);
 
+  // Auth must not depend on optional AI/tenant migrations completing.
+  // Fresh SQLite installs can lack vectorembeddings, which used to abort the
+  // tenant migration before the refresh-token tenantid column was added.
+  for (const [table, column, ddl] of [
+    ['refreshtokens', 'tenantid', 'TEXT'],
+    ['users', 'emailverified', 'INTEGER NOT NULL DEFAULT 0'],
+    ['users', 'twofaenabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ]) {
+    const found = localDb.prepare(`PRAGMA table_info(${table})`).all()
+      .some((entry) => entry.name.toLowerCase() === column);
+    if (!found) localDb.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
+
   touch();
   logger.info('[DB] SQLite minimal database ready');
   return driverInfo();
