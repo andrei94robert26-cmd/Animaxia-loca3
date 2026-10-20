@@ -7,7 +7,7 @@ import express from 'express';
 import { upsertContent } from '../../db.js';
 import { events } from '../platform/events.js';
 import { cache } from '../../cache.js';
-import { requireAuth, requireAdmin } from '../users/auth.js';
+import { requireMetadataIngestAccess, allowedMetadataServiceSource } from './service-auth.js';
 import { userRateLimit } from '../security/security.js';
 import { normalizedType } from '../search/sqlite-advanced.js';
 
@@ -80,7 +80,7 @@ function toMetadata(item, source) {
   return result;
 }
 
-router.post('/metadata', requireAuth, requireAdmin, limiter, async (req, res, next) => {
+router.post('/metadata', requireMetadataIngestAccess, limiter, async (req, res, next) => {
   try {
     const { source, items } = req.body || {};
     if (!isObject(source) || !SOURCE_TYPES.has(source.type)
@@ -89,6 +89,9 @@ router.post('/metadata', requireAuth, requireAdmin, limiter, async (req, res, ne
       return res.status(400).json({
         error: 'Expected source:{type:hub|api|addon,id:slug} and items array (1..100)',
       });
+    }
+    if (req.metadataIngestService && !allowedMetadataServiceSource(source)) {
+      return res.status(403).json({ error: 'Source is not enabled for metadata service ingestion' });
     }
     const successes = [];
     const errors = [];
