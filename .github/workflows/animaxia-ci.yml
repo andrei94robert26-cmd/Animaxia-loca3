@@ -48,10 +48,12 @@ jobs:
 
       - run: npm ci
 
-      - name: Syntax
+      - name: Syntax and security regressions
         run: |
           node --check miner.js
+          node --check db.js
           node --check tests/miner-providers.mjs
+          node --test tests/p0-auth-player.test.mjs
 
       - name: Start backend
         run: |
@@ -87,12 +89,6 @@ jobs:
           echo "=== BACKEND LOG ==="
           tail -n 150 ../../reports/backend.log
 
-      - name: Ingest YouTube canonical test record
-        run: |
-          BASE="http:""//127.0.0.1:4000"
-          curl -fsS -X POST "$BASE/api/miner"             -H "content-type: application/json"             -d '{"url":"https://youtu.be/BjwZQBT0qKs"}'
-          echo
-
       - name: Minimal search 8 providers + year + dedup
         run: |
           set -o pipefail
@@ -117,26 +113,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Animaxia provider status
+      - name: Report verified jobs (not fictional playback assertions)
         run: |
           mkdir -p reports
-          {
-            echo "ANIMAXIA PROVIDER CI REPORT"
-            echo "=========================="
-            echo "Backend provider suite: PASS"
-            echo "Frontend player suite: PASS"
-            echo "Player integration: PASS"
-            echo
-            echo "Providers:"
-            echo "Vimeo        PASS"
-            echo "Twitch       PASS"
-            echo "VK Video     PASS"
-            echo "YouTube      PASS"
-            echo "OK.ru        PASS"
-            echo "Rumble       PASS"
-            echo "Dailymotion  PASS"
-            echo "Odysee       PASS"
-          } | tee reports/ci-summary.txt
+          printf '%s\\n' "Animaxia CI: frontend and backend-provider jobs completed successfully." "See respective test logs for validated scope." "Live playback across devices was NOT tested by this workflow." > reports/ci-summary.txt
 
       - uses: actions/upload-artifact@v4
         with:
