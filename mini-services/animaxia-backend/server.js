@@ -755,11 +755,18 @@ async function main() {
   try {
     ensureMetadataQueueSchema();
     startMetadataQueueWorker();
-    startProviderAutoSync(); // independent fixed-origin API scheduler
-    startOpenSearchWorker(); // opt-in durable remote index projection
-    startPgShadowWorker(); // opt-in PostgreSQL shadow projection (SQLite still primary)
   } catch (err) {
     logger.error('[boot] JSON metadata queue unavailable: ' + err.message);
+  }
+  // Independent optional integrations must not be skipped when an unrelated
+  // miner/provider subsystem fails to initialize.
+  for (const [name, start] of [
+    ['provider-auto-sync', startProviderAutoSync],
+    ['opensearch-outbox', startOpenSearchWorker],
+    ['postgres-shadow', startPgShadowWorker],
+  ]) {
+    try { start(); }
+    catch (err) { logger.warn('[boot] '+name+' disabled: '+err.message); }
   }
 
   // Phase-2 platform schema (users, tokens, watchlist, history, comments,
