@@ -30,6 +30,11 @@ test('SQLite persists complete metadata and metadata endpoint filters JSON field
   const serverApp = express();
   serverApp.use('/api/search', metadataRouter);
   const server = serverApp.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    if (server.listening) return resolve();
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
   try {
     const loaded = await getContentById(record.id);
     assert.equal(loaded.type, 'anime');
