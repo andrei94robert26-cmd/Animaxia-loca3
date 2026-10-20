@@ -153,6 +153,9 @@ jobs:
           node --check modules/postgres/shadow-read.js
           node --check modules/postgres/shadow-verify.js
           node --check modules/postgres/distributed-shadow.js
+          node --check modules/postgres/distributed-pg-worker.js
+          node --check cli/postgres-shadow-worker.mjs
+          node --check modules/postgres/distributed-shadow.js
           node --check modules/postgres/routes.js
           node --check modules/providers/catalog.js
           node --check modules/providers/fetch.js
