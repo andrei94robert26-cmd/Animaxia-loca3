@@ -11,17 +11,20 @@ if(process.env.ANIMAXIA_PG_DISTRIBUTED_WORKER!=='true')
   throw new Error('Set ANIMAXIA_PG_DISTRIBUTED_WORKER=true explicitly');
 if(!pgWorkerConfig().configured)
   throw new Error('Set ANIMAXIA_PG_SHADOW_DATABASE_URL to a secured PostgreSQL service');
-if(!startPgDistributedWorker())throw new Error('Could not start PostgreSQL worker');
+if(!startPgDistributedWorker({keepAlive:true}))throw new Error('Could not start PostgreSQL worker');
 console.info('[animaxia] PostgreSQL-only worker started');
 let shuttingDown=false;
+let resolveShutdown;
+const stopped=new Promise(resolve=>{resolveShutdown=resolve;});
 async function shutdown(signal){
   if(shuttingDown)return;
   shuttingDown=true;
   console.info('[animaxia] '+signal+' received; closing worker');
   await stopPgDistributedWorker();
   process.exitCode=0;
+  resolveShutdown();
 }
 process.once('SIGTERM',()=>void shutdown('SIGTERM'));
 process.once('SIGINT',()=>void shutdown('SIGINT'));
 // The independent worker runs until signalled.
-await new Promise(()=>{});
+await stopped;
