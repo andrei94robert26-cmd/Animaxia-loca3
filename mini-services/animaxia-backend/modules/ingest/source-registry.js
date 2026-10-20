@@ -13,8 +13,10 @@ const TYPES = new Set(['api', 'addon', 'hub']);
 const text = (v, cap) => typeof v === 'string' ? v.trim().slice(0, cap) : '';
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const issueCredential = () => crypto.randomBytes(48).toString('base64url');
+let schemaReady = false;
 
 export function ensureSourceRegistrySchema() {
+  if (schemaReady) return { storage: 'sqlite', executableCode: false };
   localDb.exec(`
     CREATE TABLE IF NOT EXISTS metadata_ingest_sources (
       sourcetype TEXT NOT NULL,
@@ -33,6 +35,7 @@ export function ensureSourceRegistrySchema() {
     CREATE INDEX IF NOT EXISTS idx_metadata_ingest_sources_enabled
       ON metadata_ingest_sources(enabled,sourcetype,sourceid);
   `);
+  schemaReady = true;
   return { storage: 'sqlite', executableCode: false };
 }
 export function normalizeSourceManifest(raw) {
