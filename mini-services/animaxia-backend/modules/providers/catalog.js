@@ -5,6 +5,7 @@
  */
 import { getSourceRecord } from '../ingest/source-registry.js';
 import { getProviderFetchHealth } from './health.js';
+import { EXTRA_DRIVER_IDS } from './extra-fetch.js';
 
 const IDS_BY_GROUP = {
   "films": "tmdb omdb tvmaze thetvdb trakt watchmode opensubtitles swapi archive loc",
@@ -106,7 +107,7 @@ const ENV_BY_ID = {
     "FANART_API_KEY"
   ]
 };
-export const DRIVER_IDS = Object.freeze(['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt']);
+export const DRIVER_IDS = Object.freeze(['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',...EXTRA_DRIVER_IDS]);
 
 const items = Object.entries(IDS_BY_GROUP).flatMap(([category, names]) =>
   names.split(' ').map((id) => ({
@@ -125,8 +126,8 @@ export function providerReadiness(entry) {
   const provider = typeof entry === 'string' ? getProviderDefinition(entry) : entry;
   if (!provider) return null;
   const source = getSourceRecord({ type: 'api', id: provider.id });
-  const requirements = provider.id === 'tmdb'
-    ? [['TMDB_API_KEY','TMDBAPIKEY']]
+  const requirements = provider.id === 'tmdb' ? [['TMDB_API_KEY','TMDBAPIKEY']]
+    : provider.id === 'omdb' ? [['OMDB_API_KEY','OMDBAPIKEY']]
     : provider.requiredEnv.map((key) => [key]);
   const credentialsPresent = requirements.every((choice) => choice.some((key) =>
     typeof process.env[key] === 'string' && process.env[key].length > 0));
