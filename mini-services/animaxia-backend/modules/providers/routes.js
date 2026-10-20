@@ -8,6 +8,7 @@ import { requireAuth, requireAdmin } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import { PROVIDER_CATALOG, getProviderDefinition, providerReadiness } from './catalog.js';
 import { fetchProviderMetadata } from './fetch.js';
+import { recordProviderFetch } from './health.js';
 import { enqueueMetadataBatch } from '../ingest/queue.js';
 
 const router = express.Router();
@@ -48,7 +49,14 @@ router.post('/:id/sync', limiter, async (req, res, next) => {
     if (!Number.isInteger(Number(page)) || Number(page) < 1 || Number(page) > 10) {
       return res.status(400).json({ error: 'page must be 1..10' });
     }
-    const fetched = await fetchProviderMetadata(id, { q: query, page: Number(page) });
+    let fetched;
+    try {
+      fetched = await fetchProviderMetadata(id, { q: query, page: Number(page) });
+      recordProviderFetch(id, { ok: true, count: fetched.count });
+    } catch (error) {
+      recordProviderFetch(id, { ok: false, error: error?.message });
+      throw error;
+    }
     if (!fetched.items.length) return res.json({
       providerId: id, fetched: 0, enqueued: false, reason: 'No supported media metadata in provider response',
     });
