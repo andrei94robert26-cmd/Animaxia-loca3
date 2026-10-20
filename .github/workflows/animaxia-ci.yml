@@ -103,11 +103,32 @@ jobs:
             reports/backend-providers.txt
             reports/backend.log
 
+  backend-metadata:
+    name: Backend SQLite metadata
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mini-services/animaxia-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mini-services/animaxia-backend/package-lock.json
+      - run: npm ci
+      - name: Metadata integration tests
+        run: |
+          node --check modules/search/metadata.js
+          node --check db.js
+          node --test tests/metadata-search.test.mjs
+
   integration:
     name: Final Integration
     needs:
       - frontend
       - backend-providers
+      - backend-metadata
     runs-on: ubuntu-24.04
 
     steps:
