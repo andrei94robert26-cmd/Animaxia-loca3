@@ -6,6 +6,7 @@
 import express from 'express';
 import { rows, one } from '../platform/sql.js';
 import { normalizedType } from './sqlite-advanced.js';
+import { prepareFtsQuery } from './content-fts.js';
 
 const router = express.Router();
 const scalarFields = Object.freeze({
@@ -39,7 +40,10 @@ router.get('/metadata', async (req, res, next) => {
     const params = [];
     const add = (sql, value) => { filters.push(sql); params.push(value); };
     const q = safeText(req.query.q);
-    if (q) {
+    const fts = prepareFtsQuery(q);
+    if (fts) {
+      add('c.id IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)', fts);
+    } else if (q) {
       const needle = likeTerm(q);
       filters.push(`(c.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR
         c.externalid LIKE ? ESCAPE '\\' COLLATE NOCASE OR
@@ -86,7 +90,7 @@ router.get('/metadata', async (req, res, next) => {
     return res.json({
       engine: 'animaxia-sqlite-metadata-v1', total: Number(count?.total || 0),
       data: items, limit, nextCursor: hasMore ? String(items.at(-1).id) : null,
-      paginationMode: 'keyset',
+      paginationMode: 'keyset', searchMode: fts ? 'sqlite-fts5' : (q ? 'sqlite-like-fallback' : 'filters-only'),
     });
   } catch (error) { next(error); }
 });
