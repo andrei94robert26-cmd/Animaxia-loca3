@@ -5,11 +5,13 @@
  * The authoritative catalog / frontend reads remain on SQLite.
  */
 import { localDb } from '../local/sqlite.js';
-import { pgShadowConfig, projectPgShadow, shadowPgQuery, withPgShadowClient } from './shadow.js';
+import { pgShadowConfig, projectPgShadow, shadowPgQuery } from './shadow.js';
+import {workDistributedShadow,startPgDistributedWorker,stopPgDistributedWorker} from './distributed-pg-worker.js';
+export {workDistributedShadow} from './distributed-pg-worker.js';
 import { pgShadowPending,pgShadowAck,pgShadowRetry,pgShadowOutboxStatus } from './shadow-outbox.js';
 import { logger } from '../../utils/logger.js';
 
-let staging=false,working=false,feedTimer=null,workTimer=null;
+let staging=false,feedTimer=null;
 const positive=(v,max,name)=>{
   const n=Number(v);
   if(!Number.isSafeInteger(n)||n<1||n>max)
@@ -90,73 +92,6 @@ export async function stageDistributedShadow({limit=40,db}={}){
  * The row lock prevents racing workers and publishers for the same contentid.
  * A crash rolls back both the catalog change and job deletion.
  */
-export async function workDistributedShadow({limit=10,db}={}){
-  if(working)return {skipped:'same-process-worker-running'};
-  if(!pgShadowConfig().configured)throw Object.assign(
-    new Error('PostgreSQL shadow not configured'),{status:503});
-  working=true;
-  try{
-    let processed=0,failed=0;
-    const cap=positive(limit,100,'worker limit');
-    for(let i=0;i<cap;i++){
-      const result=await withPgShadowClient(async(client)=>{
-        await client.query('BEGIN');
-        try{
-          const claim=await client.query(`
-            SELECT contentid::text AS contentid,operation,document,generation
-            FROM animaxia_shadow_tasks WHERE next_run_at<=NOW()
-            ORDER BY next_run_at,contentid LIMIT 1
-            FOR UPDATE SKIP LOCKED
-          `);
-          if(!claim.rows.length){
-            await client.query('COMMIT');
-            return 'empty';
-          }
-          const task=claim.rows[0];
-          await client.query('SAVEPOINT apply_one');
-          try{
-            if(task.operation==='upsert'){
-              const d=task.document;
-              if(!d||typeof d!=='object'||String(d.id)!==task.contentid)
-                throw new Error('Invalid queued PostgreSQL shadow document');
-              await client.query(APPLY_UPSERT,[
-                task.contentid,d.externalid,d.title,d.type,d.year,d.thumbnail,
-                JSON.stringify(d.metadata||{}),
-              ]);
-            }else if(task.operation==='delete'){
-              await client.query(APPLY_DELETE,[task.contentid]);
-            }else throw new Error('Invalid PostgreSQL shadow operation');
-            await client.query(
-              'DELETE FROM animaxia_shadow_tasks WHERE contentid=$1 AND generation=$2',
-              [task.contentid,task.generation]);
-            await client.query('RELEASE SAVEPOINT apply_one');
-            await client.query('COMMIT');
-            return 'processed';
-          }catch(err){
-            // Preserve the claimed task and record retry in the SAME
-            // transaction. No competing worker can claim before backoff.
-            await client.query('ROLLBACK TO SAVEPOINT apply_one');
-            await client.query(`
-              UPDATE animaxia_shadow_tasks SET attempts=attempts+1,
-                next_run_at=NOW()+LEAST(3600,5*POWER(2,LEAST(attempts,9)))*INTERVAL '1 second',
-                updated_at=NOW() WHERE contentid=$1 AND generation=$2
-            `,[task.contentid,task.generation]);
-            await client.query('COMMIT');
-            logger.warn('[pg-distributed] work retry: '+String(err.message).slice(0,140));
-            return 'failed';
-          }
-        }catch(err){
-          try{await client.query('ROLLBACK');}catch{/* client may have disconnected */}
-          throw err;
-        }
-      },{db});
-      if(result==='empty')break;
-      if(result==='processed')processed++;
-      else failed++;
-    }
-    return {processed,failed};
-  }finally{working=false;}
-}
 export async function distributedShadowStatus({db}={}){
   const c=pgShadowConfig();
   if(!c.configured)return {configured:false,bridgeActive:false,workerActive:false};
@@ -167,7 +102,7 @@ export async function distributedShadowStatus({db}={}){
     FROM animaxia_shadow_tasks
   `,[],{db});
   return {configured:true,bridgeActive:feedTimer!==null,
-    workerActive:workTimer!==null,distributed:true,
+    workerEnabled:process.env.ANIMAXIA_PG_DISTRIBUTED_WORKER==='true',distributed:true,
     pending:Number(result.rows[0].pending),
     retrying:Number(result.rows[0].retries),maxAttempts:Number(result.rows[0].max_attempts),
     localPending:pgShadowOutboxStatus().pending,
@@ -184,15 +119,11 @@ export function startDistributedShadow(){
       feedTimer.unref?.();
     }
   }
-  if(process.env.ANIMAXIA_PG_DISTRIBUTED_WORKER==='true'&&!workTimer){
-    workTimer=setInterval(()=>workDistributedShadow().catch(err=>
-      logger.warn('[pg-distributed] worker failed: '+err.message)),2500);
-    workTimer.unref?.();
-  }
-  return feedTimer!==null||workTimer!==null;
+  const pgWorkerActive=startPgDistributedWorker();
+  return feedTimer!==null||pgWorkerActive;
 }
-export function stopDistributedShadow(){
+export async function stopDistributedShadow(){
   if(feedTimer)clearInterval(feedTimer);
-  if(workTimer)clearInterval(workTimer);
-  feedTimer=null;workTimer=null;
+  feedTimer=null;
+  await stopPgDistributedWorker();
 }
