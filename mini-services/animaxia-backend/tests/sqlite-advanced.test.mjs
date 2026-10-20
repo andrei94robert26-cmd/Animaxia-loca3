@@ -2,7 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initDb, upsertContent, deleteContent } from '../db.js';
 import { ensurePlatformSchema } from '../modules/platform/migrations.js';
-import { sqliteAdvancedSearch } from '../modules/search/sqlite-advanced.js';
+import { sqliteAdvancedSearch, normalizedType } from '../modules/search/sqlite-advanced.js';
+
+test('Romanian accented category aliases normalize to catalog types', () => {
+  assert.equal(normalizedType('ȘTIRI'), 'news');
+  assert.equal(normalizedType('Muzică'), 'music');
+  assert.equal(normalizedType('Desene Animate'), 'cartoon');
+  assert.equal(normalizedType('Telenovele'), 'telenovela');
+});
 
 test('advanced SQLite search indexes metadata filters and paginates', async () => {
   await initDb();
