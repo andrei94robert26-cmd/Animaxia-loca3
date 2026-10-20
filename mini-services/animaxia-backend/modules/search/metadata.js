@@ -49,7 +49,7 @@ router.get('/metadata', async (req, res, next) => {
     if (category) add('c.type = ? COLLATE NOCASE', category);
     const year = req.query.year == null ? '' : String(req.query.year);
     if (year) {
-      if (!/^\\d{4}$/.test(year)) return res.status(400).json({ error: 'Invalid year' });
+      if (!/^[0-9]{4}$/.test(year)) return res.status(400).json({ error: 'Invalid year' });
       add('c.year = ?', Number(year));
     }
     for (const [field, path] of Object.entries(scalarFields)) {
@@ -58,7 +58,7 @@ router.get('/metadata', async (req, res, next) => {
     }
     if (!filters.length) return res.status(400).json({ error: 'Provide q or at least one filter' });
     const cursor = req.query.cursor == null ? '' : String(req.query.cursor);
-    if (cursor && !/^[1-9]\\d*$/.test(cursor)) return res.status(400).json({ error: 'Invalid cursor' });
+    if (cursor && !/^[1-9][0-9]*$/.test(cursor)) return res.status(400).json({ error: 'Invalid cursor' });
     const limit = Math.max(1, Math.min(50, Number.parseInt(req.query.limit, 10) || 20));
     const where = filters.join(' AND ');
     // COUNT excludes the pagination cursor so clients see a stable filter total.
