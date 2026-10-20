@@ -2,6 +2,7 @@
 import express from 'express';
 import { readPgShadowCatalog } from './shadow-read.js';
 import { verifyPgShadow } from './shadow-verify.js';
+import {setupDistributedShadow,stageDistributedShadow,workDistributedShadow,distributedShadowStatus} from './distributed-shadow.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import {
@@ -13,6 +14,24 @@ const router=express.Router();
 router.use(requireAuth,requireAdmin);
 const limiter=userRateLimit({
   scope:'ip',max:8,windowMs:60_000,key:'postgres-shadow-ops',
+});
+router.get('/distributed/status',async(_req,res,next)=>{
+  try{return res.json(await distributedShadowStatus());}
+  catch(err){return next(err);}
+});
+router.post('/distributed/setup',limiter,async(_req,res,next)=>{
+  try{
+    await setupPgShadow();
+    return res.json(await setupDistributedShadow());
+  }catch(err){return next(err);}
+});
+router.post('/distributed/stage',limiter,async(req,res,next)=>{
+  try{return res.json(await stageDistributedShadow({limit:req.body?.limit??40}));}
+  catch(err){return next(err);}
+});
+router.post('/distributed/process',limiter,async(req,res,next)=>{
+  try{return res.json(await workDistributedShadow({limit:req.body?.limit??10}));}
+  catch(err){return next(err);}
 });
 router.get('/status',(_req,res,next)=>{
   try{return res.json(pgShadowStatus());}
