@@ -121,6 +121,17 @@ test('durable JSON metadata jobs: auth, deduplication, success, restart and retr
     assert.equal(retried.status, 'queued');
     assert.equal(retried.attempts, 1);
     assert.match(retried.error, /JSON|token|position/i);
+    // A worker crash after the third attempt must not endlessly replay.
+    const exhaustedId = crypto.randomUUID();
+    submittedIds.push(exhaustedId);
+    await query(`
+      INSERT INTO metadata_sync_jobs
+        (id,sourcetype,sourceid,payload,status,attempts)
+      VALUES(?,?,?,?,'running',3)
+    `, [exhaustedId, 'api', 'tmdb', JSON.stringify(payload)]);
+    assert.equal(recoverMetadataJobs(), 1);
+    assert.equal(getMetadataJob(exhaustedId).status, 'failed');
+
     const summary = metadataSourceStatus();
     assert.equal(summary.queue.distributed, false);
   } finally {
