@@ -266,7 +266,11 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
     // Production bootstrap requires an explicitly configured admin email.
     // Never let an arbitrary first public registration become administrator.
     const firstLocalAdmin = process.env.NODE_ENV !== 'production' && num(adminCount?.count) === 0;
-    const role = adminEmails.includes(String(email).toLowerCase()) || firstLocalAdmin ? 'admin' : 'user';
+    // Public registration never provisions administrators in production,
+    // including addresses from ADMINEMAILS: email ownership is unproven here.
+    const role = process.env.NODE_ENV === 'production'
+      ? 'user'
+      : (adminEmails.includes(String(email).toLowerCase()) || firstLocalAdmin ? 'admin' : 'user');
 
     const inserted = await one(
       `INSERT INTO users (email, username, passwordhash, role, preferences)
@@ -297,10 +301,13 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
           html: `<p>Salut, <b>${inserted.username}</b>!</p><p>Confirmă adresa de email pentru contul tău Animaxia:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p style="color:#888">Link-ul expiră în 24 de ore și poate fi folosit o singură dată.</p>`,
         });
         logger.info(`[auth] Verification email sent/queued for ${inserted.email}`);
-      } else {
+      } else if (process.env.NODE_ENV !== 'production') {
         emailVerified = true;
         await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(inserted.id)]);
         logger.info(`[auth] sandbox: auto-verified ${inserted.email} (SMTPURL unset)`);
+      } else {
+        // Production without SMTP must not claim the email address was verified.
+        logger.warn('[auth] SMTP is unconfigured in production; new email remains unverified');
       }
     } catch (verifyErr) {
       // Never block registration on the verification side-channel.
