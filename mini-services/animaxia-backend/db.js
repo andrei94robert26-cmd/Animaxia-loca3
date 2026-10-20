@@ -1,5 +1,6 @@
 import { localDb } from './modules/local/sqlite.js';
 import { ensureContentFts } from './modules/search/content-fts.js';
+import { ensureOpenSearchOutbox } from './modules/search/opensearch-outbox.js';
 import { shardMap, shardBranchName } from './modules/sharding/model.js';
 import { logger } from './utils/logger.js';
 
@@ -166,6 +167,9 @@ export async function initDb() {
   // Build the native full-text index only on first installation; all later
   // INSERT/UPDATE/DELETE mutations stay synchronized through SQLite triggers.
   ensureContentFts();
+  // Search outbox is opt-in; no extra write amplification on installations
+  // that have not configured OpenSearch. Existing rows use manual backfill.
+  if (process.env.ANIMAXIA_OPENSEARCH_URL) ensureOpenSearchOutbox();
 
   // Auth must not depend on optional AI/tenant migrations completing.
   // Fresh SQLite installs can lack vectorembeddings, which used to abort the
