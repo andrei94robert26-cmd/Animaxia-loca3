@@ -1,6 +1,7 @@
 import { localDb } from './modules/local/sqlite.js';
 import { ensureContentFts } from './modules/search/content-fts.js';
 import { ensureOpenSearchOutbox } from './modules/search/opensearch-outbox.js';
+import { ensurePgShadowOutbox } from './modules/postgres/shadow-outbox.js';
 import { shardMap, shardBranchName } from './modules/sharding/model.js';
 import { logger } from './utils/logger.js';
 
@@ -170,6 +171,8 @@ export async function initDb() {
   // Search outbox is opt-in; no extra write amplification on installations
   // that have not configured OpenSearch. Existing rows use manual backfill.
   if (process.env.ANIMAXIA_OPENSEARCH_URL) ensureOpenSearchOutbox();
+  // Separate, opt-in PostgreSQL shadow migration queue. SQLite stays primary.
+  if (process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL) ensurePgShadowOutbox();
 
   // Auth must not depend on optional AI/tenant migrations completing.
   // Fresh SQLite installs can lack vectorembeddings, which used to abort the
