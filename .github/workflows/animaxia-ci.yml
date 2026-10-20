@@ -152,6 +152,7 @@ jobs:
           node --check modules/postgres/shadow.js
           node --check modules/postgres/shadow-read.js
           node --check modules/postgres/shadow-verify.js
+          node --check modules/postgres/distributed-shadow.js
           node --check modules/postgres/routes.js
           node --check modules/providers/catalog.js
           node --check modules/providers/fetch.js
@@ -174,6 +175,13 @@ jobs:
           ANIMAXIA_PG_SHADOW_TLS: 'false'
           NODE_ENV: test
         run: node --test tests/pg-shadow-live.test.mjs
+
+      - name: PostgreSQL 16 concurrent workers and transactional replay
+        env:
+          ANIMAXIA_PG_SHADOW_DATABASE_URL: postgresql://animaxia:ephemeral-ci-only@127.0.0.1:5432/animaxia_ci
+          ANIMAXIA_PG_SHADOW_TLS: 'false'
+          NODE_ENV: test
+        run: node --test tests/pg-distributed-live.test.mjs
 
   integration:
     name: Final Integration
