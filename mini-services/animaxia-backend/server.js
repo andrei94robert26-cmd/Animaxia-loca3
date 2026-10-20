@@ -895,7 +895,7 @@ async function main() {
     stopMinerAutoSync();
     stopProviderAutoSync();
     stopOpenSearchWorker();
-    stopDistributedShadow();
+    await stopDistributedShadow();
     await stopPgShadowWorker();
     server.close(async () => {
       await closeDb();
