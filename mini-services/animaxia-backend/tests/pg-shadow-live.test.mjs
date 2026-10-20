@@ -11,6 +11,7 @@ import { initDb,upsertContent,deleteContent,countContent } from '../db.js';
 import { localDb } from '../modules/local/sqlite.js';
 import { pgShadowOutboxStatus,seedPgShadowOutbox } from '../modules/postgres/shadow-outbox.js';
 import { readPgShadowCatalog } from '../modules/postgres/shadow-read.js';
+import { verifyPgShadow } from '../modules/postgres/shadow-verify.js';
 import {
   setupPgShadow,flushPgShadow,comparePgShadow,stopPgShadowWorker,
 } from '../modules/postgres/shadow.js';
@@ -66,6 +67,24 @@ test('live PostgreSQL 16 shadow: schema, backfill, update, delete and JSONB proj
     assert.equal(aligned.remoteCount,aligned.localCount);
     assert.equal(aligned.pending,0);
     assert.equal(aligned.countsAligned,true);
+
+    // Real database drift: alter PG row outside the SQLite write path,
+    // detect mismatch, queue repair without mutation, then restore it.
+    const auditPage={afterId:id-1,limit:1};
+    const cleanAudit=await verifyPgShadow(auditPage);
+    assert.equal(cleanAudit.matched,1);
+    assert.equal(cleanAudit.repairQueued,0);
+    await db.query('UPDATE animaxia_shadow_content SET title=$1 WHERE id=$2',
+      ['Remote drift that should be repaired',id]);
+    const drift=await verifyPgShadow(auditPage);
+    assert.equal(drift.mismatched,1);
+    assert.equal(drift.repairQueued,0);
+    const repair=await verifyPgShadow({...auditPage,dryRun:false});
+    assert.equal(repair.repairQueued,1);
+    const replicated=await flushPgShadow();
+    assert.equal(replicated.failed,0);
+    assert.equal((await verifyPgShadow(auditPage)).matched,1);
+    assert.equal((await verifyPgShadow(auditPage)).mismatched,0);
 
     // LIVE PostgreSQL 16 read path, with GIN FTS, JSONB filters and keysets.
     const paged=[];const lookupExternalIds=[];
