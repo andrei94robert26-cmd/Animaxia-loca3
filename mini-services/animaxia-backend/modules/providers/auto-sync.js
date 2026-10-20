@@ -24,10 +24,10 @@ const configured = () => [...new Set(
 /** Prevent scheduling fetch requests unsupported by provider's actual API. */
 export function providerSupportsPollQuery(id, query) {
   const value = typeof query === 'string' ? query.trim() : '';
-  if (['omdb','itunes','cheapshark','gdelt','scryfall','musicbrainz'].includes(id)) {
+  if (['omdb','itunes','cheapshark','gdelt','scryfall','musicbrainz','deezer','radiobrowser','hackernews'].includes(id)) {
     return value.length >= 2;
   }
-  if (['freetogame','pokeapi','openligadb','jolpica','opendota'].includes(id)) {
+  if (['freetogame','pokeapi','openligadb','jolpica','opendota','openf1','nhl'].includes(id)) {
     return value.length === 0;
   }
   return true;
