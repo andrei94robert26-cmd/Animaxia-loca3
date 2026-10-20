@@ -25,7 +25,7 @@ const TYPES = Object.freeze({
 });
 
 const safeString = (value) => typeof value === 'string' ? value.trim().slice(0, 160) : '';
-const normalizedType = (input) => {
+export const normalizedType = (input) => {
   const type = safeString(input).toLowerCase();
   return TYPES[type] || type;
 };
