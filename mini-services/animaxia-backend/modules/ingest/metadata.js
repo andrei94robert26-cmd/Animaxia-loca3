@@ -16,7 +16,8 @@ const limiter = userRateLimit({ scope: 'ip', max: 20, windowMs: 60_000, key: 'me
 const SOURCE_TYPES = new Set(['hub', 'api', 'addon']);
 const MEDIA_TYPES = new Set(['mp4', 'm3u8', 'mpd', 'iframe', 'youtube']);
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-const text = (v, limit = 300) => typeof v === 'string' ? v.trim().slice(0, limit) : '';
+const text = (v, limit = 300) => (typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v)))
+  ? String(v).trim().slice(0, limit) : '';
 const asNames = (raw) => {
   const list = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
   return [...new Set(list.map((x) => text(isObject(x) ? x.name : x, 120)).filter(Boolean))].slice(0, 40);
@@ -58,14 +59,16 @@ function toMetadata(item, source) {
   };
   maybeField('genres', item.genres ?? item.genre ?? m.genres, asNames);
   maybeField('actors', item.actors ?? item.cast ?? m.actors, asNames);
-  maybeField('studios', item.studios ?? item.studio ?? m.studios, asNames);
+  maybeField('studios', item.studios ?? item.studio ?? item.production_companies ?? m.studios, asNames);
   for (const key of ['franchise', 'trilogy', 'collection']) {
-    maybeField(key, item[key] ?? m[key], (v) => text(v, 160));
+    const raw = item[key] ?? m[key] ?? (key === 'collection' ? item.belongs_to_collection : undefined);
+    maybeField(key, raw, (v) => text(isObject(v) ? v.name : v, 160));
   }
   maybeField('posterId', item.posterId ?? item.poster_id ?? m.posterId, (v) => text(v, 160));
   maybeField('overview', item.description ?? item.overview ?? m.overview ?? m.description ?? m.synopsis,
     (v) => text(v, 5000));
-  const yearInput = item.year ?? m.year;
+  const yearInput = item.year ?? m.year ?? item.release_date?.slice?.(0, 4)
+    ?? item.first_air_date?.slice?.(0, 4);
   if (yearInput !== undefined && yearInput !== null) {
     const year = Number(yearInput);
     if (Number.isInteger(year) && year >= 1880 && year <= 2200) result.year = year;
@@ -98,8 +101,8 @@ router.post('/metadata', requireMetadataIngestAccess, limiter, async (req, res, 
     const changedIds = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const category = normalizedType(item?.category || item?.type || '');
-      const title = text(item?.title || item?.name, 300);
+      const category = normalizedType(item?.category || item?.type || item?.mediaType || item?.media_type || item?.metadata?.mediaType || '');
+      const title = text(item?.title || item?.name || item?.original_title || item?.original_name, 300);
       const itemId = item?.id == null ? '' : String(item.id).trim();
       if (!isObject(item) || !title || !category || !/^[a-zA-Z0-9._:-]{1,128}$/.test(itemId)) {
         errors.push({ index: i, error: 'Missing/invalid item id, title or category' });
