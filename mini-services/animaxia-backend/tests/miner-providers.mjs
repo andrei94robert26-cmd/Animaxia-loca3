@@ -47,11 +47,32 @@ const validators = {
 
 let failed = 0;
 
+// Provider CI uses a fresh local database. Obtain a real access token via the
+// public registration flow; anonymous mining must never be re-enabled for tests.
+const register = await fetch('http://127.0.0.1:4000/api/auth/register', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    email: `ci-provider-${Date.now()}@example.invalid`,
+    username: `ci${Date.now()}`,
+    password: 'ProviderTest-LocalOnly-2026!'
+  })
+});
+if (!register.ok) throw new Error(`Provider CI registration failed: HTTP ${register.status}`);
+const accessToken = (await register.json()).accessToken;
+if (!accessToken) throw new Error('Provider CI could not obtain an access token');
+
+const anonymous = await fetch('http://127.0.0.1:4000/api/miner', {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ url: 'https://example.org/a.mp4' })
+});
+if (anonymous.status !== 401) throw new Error(`Anonymous miner must return 401, got ${anonymous.status}`);
+
 for (const [provider, url] of tests) {
   try {
     const res = await fetch('http://127.0.0.1:4000/api/miner', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
       body: JSON.stringify({ url }),
     });
 
