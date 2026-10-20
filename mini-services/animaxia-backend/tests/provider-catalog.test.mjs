@@ -14,11 +14,12 @@ import { sqliteAdvancedSearch } from '../modules/search/sqlite-advanced.js';
 import providerRoutes from '../modules/providers/routes.js';
 import { getProviderFetchHealth } from '../modules/providers/health.js';
 
-test('88 API inventory has 12 implemented, separately enabled drivers', () => {
+test('88 API inventory has 17 implemented, separately enabled drivers', () => {
   assert.equal(PROVIDER_CATALOG.length, 88);
   assert.equal(new Set(PROVIDER_CATALOG.map((x) => x.id)).size, 88);
   assert.deepEqual(DRIVER_IDS, ['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',
-    'omdb','kitsu','rickmorty','freetogame','swapi','scryfall']);
+    'omdb','kitsu','rickmorty','freetogame','swapi','scryfall',
+    'musicbrainz','pokeapi','openligadb','jolpica','opendota']);
   assert.ok(PROVIDER_CATALOG.some((x) => x.id === 'spotify' && !x.driverImplemented));
   assert.equal(providerReadiness('not-a-provider'), null);
   assert.throws(() => buildProviderRequest('spotify', { q: 'music' }), /No verified fetch driver/);
@@ -29,7 +30,7 @@ test('88 API inventory has 12 implemented, separately enabled drivers', () => {
   assert.equal(request.url.searchParams.get('q'), 'naruto');
 });
 
-test('12 provider JSON mappers are explicit, bounded, media metadata only', async () => {
+test('17 provider JSON mappers are explicit, bounded, media metadata only', async () => {
   const originalKey = process.env.TMDB_API_KEY;
   process.env.TMDB_API_KEY = 'unit-test-key-no-network';
   const priorOmdbKey = process.env.OMDB_API_KEY;
@@ -73,6 +74,24 @@ test('12 provider JSON mappers are explicit, bounded, media metadata only', asyn
       { id: 'card-uuid-123', name: 'Synthetic Magic Card', set_name: 'Magic Test',
         type_line: 'Creature', oracle_text: 'Draw a card', released_at: '2022-01-01' },
     ] },
+    musicbrainz: { recordings: [{
+      id: '027fa041-3917-4c73-9079-ed16e36f20f8', title: 'Synthetic Recording',
+      'first-release-date': '2020-09-12', 'artist-credit': [{ artist: { name: 'CI Singer' } }],
+    }] },
+    pokeapi: { count: 1500, results: [{ name: 'pikachu', url: 'https://pokeapi.co/api/v2/pokemon/25/' }] },
+    openligadb: [{
+      matchID: 5012, matchDateTime: '2026-09-28T18:00:00',
+      leagueName: 'Bundesliga', team1: { teamName: 'Example Dortmund' },
+      team2: { teamName: 'Example München' },
+      group: { groupOrderID: 6 },
+    }],
+    jolpica: { MRData: { RaceTable: { Races: [{
+      season: '2026', round: '4', raceName: 'Synthetic Grand Prix',
+      date: '2026-04-02',
+      Circuit: { circuitName: 'CI Circuit', Location: { locality: 'CI City' } },
+    }] } } },
+    opendota: [{ match_id: 567890123, start_time: 1790000000,
+      radiant_name: 'Team One', dire_name: 'Team Two', league_name: 'Synthetic League' }],
   };
   try {
     for (const id of DRIVER_IDS) {
@@ -84,7 +103,7 @@ test('12 provider JSON mappers are explicit, bounded, media metadata only', asyn
         });
       };
       const result = await fetchProviderMetadata(id,
-        { q: id === 'freetogame' ? '' : 'synthetic', page: 1 }, mock);
+        { q: ['freetogame','pokeapi','openligadb','jolpica','opendota'].includes(id) ? '' : 'synthetic', page: 1 }, mock);
       assert.equal(captured.length, 1);
       assert.equal(captured[0].options.redirect, 'error');
       assert.equal(new URL(captured[0].url).protocol, 'https:');
