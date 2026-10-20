@@ -37,9 +37,10 @@ function playerSources(raw) {
     const url = safeUrl(entry.url || entry.src);
     if (!url || seen.has(url)) return [];
     const declared = text(entry.type, 20).toLowerCase();
-    const inferred = /\\.mp4(?:[?#]|$)/i.test(url) ? 'mp4'
-      : /\\.m3u8(?:[?#]|$)/i.test(url) ? 'm3u8'
-      : /\\.mpd(?:[?#]|$)/i.test(url) ? 'mpd' : 'iframe';
+    const pathname = new URL(url).pathname.toLowerCase();
+    const inferred = pathname.endsWith('.mp4') ? 'mp4'
+      : pathname.endsWith('.m3u8') ? 'm3u8'
+      : pathname.endsWith('.mpd') ? 'mpd' : 'iframe';
     const type = MEDIA_TYPES.has(declared) ? declared : inferred;
     seen.add(url);
     return [{ url, type, label: text(entry.label, 90) || 'External source' }];
@@ -47,28 +48,38 @@ function playerSources(raw) {
 }
 function toMetadata(item, source) {
   const m = isObject(item.metadata) ? item.metadata : {};
-  const yearInput = item.year ?? m.year;
-  const year = Number(yearInput);
-  const rawSources = item.sources ?? m.player?.sources ?? [];
-  const rating = Number(item.rating ?? m.rating);
-  const overview = text(item.description ?? item.overview ?? m.overview ?? m.description ?? m.synopsis, 5000);
-  const normalized = {
-    year: Number.isInteger(year) && year >= 1880 && year <= 2200 ? year : null,
-    genres: asNames(item.genres ?? item.genre ?? m.genres),
-    actors: asNames(item.actors ?? item.cast ?? m.actors),
-    studios: asNames(item.studios ?? item.studio ?? m.studios),
-    franchise: text(item.franchise ?? m.franchise, 160),
-    trilogy: text(item.trilogy ?? m.trilogy, 160),
-    collection: text(item.collection ?? m.collection, 160),
-    posterId: text(item.posterId ?? item.poster_id ?? m.posterId, 160),
-    overview,
+  // Partial updates must preserve existing fields and media sources.
+  const result = {
     source: source.type + ':' + source.id,
     origin: { providerType: source.type, providerId: source.id, itemId: String(item.id) },
-    player: { sources: playerSources(rawSources) },
   };
-  if (Number.isFinite(rating) && rating >= 0 && rating <= 10) normalized.rating = rating;
-  return normalized;
+  const maybeField = (key, raw, transform) => {
+    if (raw !== undefined && raw !== null) result[key] = transform(raw);
+  };
+  maybeField('genres', item.genres ?? item.genre ?? m.genres, asNames);
+  maybeField('actors', item.actors ?? item.cast ?? m.actors, asNames);
+  maybeField('studios', item.studios ?? item.studio ?? m.studios, asNames);
+  for (const key of ['franchise', 'trilogy', 'collection']) {
+    maybeField(key, item[key] ?? m[key], (v) => text(v, 160));
+  }
+  maybeField('posterId', item.posterId ?? item.poster_id ?? m.posterId, (v) => text(v, 160));
+  maybeField('overview', item.description ?? item.overview ?? m.overview ?? m.description ?? m.synopsis,
+    (v) => text(v, 5000));
+  const yearInput = item.year ?? m.year;
+  if (yearInput !== undefined && yearInput !== null) {
+    const year = Number(yearInput);
+    if (Number.isInteger(year) && year >= 1880 && year <= 2200) result.year = year;
+  }
+  const ratingInput = item.rating ?? m.rating;
+  if (ratingInput !== undefined && ratingInput !== null) {
+    const rating = Number(ratingInput);
+    if (Number.isFinite(rating) && rating >= 0 && rating <= 10) result.rating = rating;
+  }
+  const sources = item.sources ?? m.player?.sources;
+  if (sources !== undefined) result.player = { sources: playerSources(sources) };
+  return result;
 }
+
 router.post('/metadata', requireAuth, requireAdmin, limiter, async (req, res, next) => {
   try {
     const { source, items } = req.body || {};
