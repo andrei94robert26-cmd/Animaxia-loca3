@@ -75,6 +75,11 @@ test('durable JSON metadata jobs: auth, deduplication, success, restart and retr
     assert.equal(duplicateBody.id, first.id);
     assert.equal(duplicateBody.duplicate, true);
     assert.equal(duplicateBody.queued, false);
+    const collision = await submit({
+      ...payload, items: [{ ...document, title: 'Another title with same key' }],
+    }, { 'x-animaxia-ingest-key': secret });
+    assert.equal(collision.status, 409);
+    assert.equal(getMetadataJob(first.id).status, 'queued');
 
     const stateAnonymous = await fetch(base + '/api/ingest/metadata/jobs/' + first.id);
     assert.equal(stateAnonymous.status, 401);
