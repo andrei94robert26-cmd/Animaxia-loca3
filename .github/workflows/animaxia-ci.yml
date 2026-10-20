@@ -26,6 +26,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit --pretty false
+
   backend-providers:
     name: Backend 8 Providers
     runs-on: ubuntu-24.04
