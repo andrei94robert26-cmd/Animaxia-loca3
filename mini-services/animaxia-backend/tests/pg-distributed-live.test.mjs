@@ -49,7 +49,7 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
 
     // A separate JS module instance simulates an independently running PG
     // worker process; both share only their PostgreSQL task table.
-    const independent=await import('../modules/postgres/distributed-shadow.js?ci-worker=2');
+    const independent=await import('../modules/postgres/distributed-pg-worker.js?ci-worker=2');
     const [workerA,workerB]=await Promise.all([
       workDistributedShadow({limit:40}),
       independent.workDistributedShadow({limit:40}),
