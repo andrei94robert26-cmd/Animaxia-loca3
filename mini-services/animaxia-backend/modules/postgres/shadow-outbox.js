@@ -93,10 +93,16 @@ export function seedPgShadowOutbox({afterId=0,limit=500}={}) {
     INSERT INTO pg_shadow_outbox(contentid,operation,revision)
     VALUES(?,'upsert',1) ON CONFLICT(contentid) DO NOTHING
   `);
-  const tx=localDb.transaction((ids)=>{
-    for(const row of ids)insert.run(row.id);
-  });
-  tx(rows);
+  // node:sqlite DatabaseSync has no transaction(fn) API.
+  // SQLite's BEGIN IMMEDIATE / COMMIT ensures a bounded, atomic backfill.
+  localDb.exec('BEGIN IMMEDIATE');
+  try {
+    for(const row of rows)insert.run(row.id);
+    localDb.exec('COMMIT');
+  } catch(err) {
+    localDb.exec('ROLLBACK');
+    throw err;
+  }
   return {scanned:rows.length,nextAfterId:rows.length===cap?rows.at(-1).id:null,
     finished:rows.length<cap};
 }
