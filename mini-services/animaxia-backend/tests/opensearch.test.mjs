@@ -95,15 +95,15 @@ test('SQLite outbox tracks insert, update, delete and remote bulk partial failur
     throw new Error('Unexpected mocked OpenSearch route '+url);
   };
   try {
-    // Existing catalog items can be backfilled explicitly with bounded cursor.
-    const backfill=seedOpenSearchOutbox({afterId:0,limit:1});
-    assert.equal(backfill.scanned,0);
     const inserted=await upsertContent({
       externalid,type:'movie',title:'Index Trigger '+nonce,
       metadata:{actors:['Actor One'],overview:'Adventure',rating:7.8,
         player:{sources:[{url:'https://example.org/private.mp4',type:'mp4'}]}},
     });
     recordId=inserted.record.id;
+    // Manual backfill does not overwrite the newer live-change event.
+    const seeded=seedOpenSearchOutbox({afterId:recordId-1,limit:1});
+    assert.equal(seeded.scanned,1);
     let pending=pendingChanges().find((x)=>x.contentid===recordId);
     assert.ok(pending);
     assert.ok(pending.document);
