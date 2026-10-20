@@ -9,6 +9,7 @@ import { userRateLimit } from '../security/security.js';
 import { PROVIDER_CATALOG, getProviderDefinition, providerReadiness } from './catalog.js';
 import { fetchProviderMetadata } from './fetch.js';
 import { recordProviderFetch } from './health.js';
+import { providerAutoSyncStatus } from './auto-sync.js';
 import { enqueueMetadataBatch } from '../ingest/queue.js';
 
 const router = express.Router();
@@ -21,6 +22,7 @@ router.get('/', (_req, res) => res.json({
   catalogIsNotInstalled: true,
   providers: PROVIDER_CATALOG.map(providerReadiness),
 }));
+router.get('/auto-sync/status', (_req,res) => res.json(providerAutoSyncStatus()));
 router.get('/:id', (req, res) => {
   const result = providerReadiness(req.params.id);
   return result ? res.json(result) : res.status(404).json({ error: 'Unknown provider' });
