@@ -202,7 +202,8 @@ export function buildDistributedSearch(params={}){
       searchAfter=parsed.after;
     }catch{throw Object.assign(new Error('Invalid search cursor'),{status:400});}
   }
-  return {body:{size:limit+1,track_total_hits:true,query,sort,
+  // Exact totals at unbounded scale can be expensive; report >=10k honestly.
+  return {body:{size:limit+1,track_total_hits:10000,query,sort,
     ...(searchAfter?{search_after:searchAfter}:{})},limit,sig};
 }
 export async function distributedSearch(params={},options={}){
