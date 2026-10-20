@@ -699,8 +699,8 @@ async function handleMine(req, res) {
 
 // GET /api/miner also UPSERTs (explicitly uncached — every call re-mines and re-upserts).
 // TS1 (security): mining upserts content — both verbs now require authentication.
-app.get('/api/miner', requireAuth, wrap(handleMine));
-app.post('/api/miner', requireAuth, wrap(handleMine));
+app.get('/api/miner', requireAuth, requireAdmin, wrap(handleMine));
+app.post('/api/miner', requireAuth, requireAdmin, wrap(handleMine));
 
 /* TS1 (security): seeding is an admin-only mutation. */
 app.post(
