@@ -51,6 +51,18 @@ test('source ingest enforces admin auth, dedup and ban, including existing JWT',
 
   try {
     assert.equal(normalizeSource('javascript:alert(1)'), null);
+    assert.equal(
+      normalizeSource('https://evil-youtube.com/watch?v=ABCDEFGHIJK').kind,
+      'link',
+    );
+    assert.equal(
+      normalizeSource('https://www.youtube.com/watch?v=ABCDEFGHIJK').kind,
+      'youtube',
+    );
+    assert.equal(
+      normalizeSource('https://notvimeo.com/123').kind,
+      'link',
+    );
     assert.equal(normalizeSource('<iframe src="javascript:alert(1)"></iframe>'), null);
     const anonymous = await send('/api/ingest/register', null, { url });
     assert.equal(anonymous.status, 401);
