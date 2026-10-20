@@ -32,18 +32,10 @@ const authLimiter = userRateLimit({ scope: 'ip', max: 30, windowMs: 60000, key: 
 /* --------------------------------- JWT core --------------------------------- */
 
 function authSecret() {
-  if (process.env.AUTHSECRET) return process.env.AUTHSECRET;
-  // Deterministic derived secret: stable across restarts without extra config,
-  // deterministic local SQLite fallback.
-  return crypto
-    .createHash('sha256')
-    .update('animaxia-auth:sqlite-local')
-    .digest('hex');
+  return baseAuthSecret();
 }
 
-// FAZA 11: the canonical base secret + per-tenant derivation live in
-// modules/tenant/jwt-tenant.js (same derivation as authSecret above).
-void baseAuthSecret;
+// FAZA 11: canonical base secret and per-tenant derivation share one implementation.
 const authSecretForTenant = (slug) => tenantSecretFor(slug);
 
 function b64url(input) {
