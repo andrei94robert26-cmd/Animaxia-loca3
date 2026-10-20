@@ -87,7 +87,7 @@ test('OpenSearch reconciliation detects missing and stale content despite matchi
     assert.equal(again.alreadyPending,2);
     assert.equal(pendingChanges(100).find(x=>x.contentid===records[1].id).version,
       staleJob.version,'reconciliation cannot replace a newer pending update');
-    assert.throws(()=>reconcileOpenSearchDocuments({limit:200}),/limit/);
+    await assert.rejects(reconcileOpenSearchDocuments({limit:200}),/limit/);
     await assert.rejects(reconcileOpenSearchDocuments(
       {afterId:from,limit:3,dryRun:'false'},{fetchImpl:mock}),/dryRun/);
     const finished=await reconcileOpenSearchDocuments(
