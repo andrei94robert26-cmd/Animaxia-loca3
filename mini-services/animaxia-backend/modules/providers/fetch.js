@@ -169,15 +169,28 @@ async function boundedJsonResponse(res, maxBytes = 1_000_000) {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } finally { reader.releaseLock(); }
 }
+
+// MusicBrainz requires <=1 request/sec/client. Reserve slots atomically
+// within this one-node backend. Multi-replica deployment needs Redis limits.
+let nextMusicBrainzSlot = 0;
+export async function respectProviderRateLimit(id) {
+  if (id !== 'musicbrainz') return;
+  const slot = Math.max(Date.now(), nextMusicBrainzSlot);
+  nextMusicBrainzSlot = slot + 1150;
+  const delay = slot - Date.now();
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
 export async function fetchProviderMetadata(providerId, options = {}, fetchImpl = globalThis.fetch) {
   const def = getProviderDefinition(providerId);
   if (!def || !def.driverImplemented) {
     throw Object.assign(new Error('Provider has catalog metadata only (no active driver)'), { status: 501 });
   }
   const { url, page, query } = buildProviderRequest(providerId, options);
+  await respectProviderRateLimit(providerId);
   const response = await fetchImpl(url.toString(), {
     method: 'GET', redirect: 'error',
-    headers: { Accept: 'application/json', 'User-Agent': 'AnimaxiaMetadataBot/1.0 (JSON catalog metadata)' },
+    headers: { Accept: 'application/json', 'User-Agent': 'AnimaxiaMetadataBot/1.0 (https://github.com/andrei94robert26-cmd/Animaxia-loca3)' },
     signal: AbortSignal.timeout(12000),
   });
   const payload = await boundedJsonResponse(response);
