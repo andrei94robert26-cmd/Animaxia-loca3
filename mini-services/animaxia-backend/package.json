@@ -9,7 +9,8 @@
     "test": "bun tests/smoke-sharding.mjs",
     "test:providers": "node tests/miner-providers.mjs",
     "test:miner": "npm run test:providers",
-    "cli:miner-test": "node cli/miner-test.mjs"
+    "cli:miner-test": "node cli/miner-test.mjs",
+    "worker:postgres-shadow": "node cli/postgres-shadow-worker.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
