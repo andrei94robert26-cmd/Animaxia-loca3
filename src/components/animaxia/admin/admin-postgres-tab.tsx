@@ -36,6 +36,12 @@ type DistributedStatus={
 };
 type DistributedStage={staged:number;failed:number;stale:number;pendingLocal:number};
 type DistributedProcess={processed:number;failed:number};
+type PilotStatus={enabled:boolean;publicCatalogUnchanged:boolean;documents?:number;events?:number};
+type PilotItem={
+  id:number;externalid:string;title:string;type:string;year:number|null;
+  revision:number;metadata:{actors?:string[];genres?:string[];description?:string};
+};
+type PilotPage={data:PilotItem[];hasMore:boolean;nextAfterId:number|null};
 type ShadowAudit={
   scanned:number;matched:number;missing:number;mismatched:number;
   repairCandidates:number;repairQueued:number;alreadyPendingOrMissing:number;
@@ -62,6 +68,13 @@ export function AdminPostgresTab(){
   const [auditBusy,setAuditBusy]=useState(false);
   const [distributed,setDistributed]=useState<DistributedStatus|null>(null);
   const [distributedBusy,setDistributedBusy]=useState(false);
+  const [pilotStatus,setPilotStatus]=useState<PilotStatus|null>(null);
+  const [pilotExternalId,setPilotExternalId]=useState('');
+  const [pilotTitle,setPilotTitle]=useState('');
+  const [pilotType,setPilotType]=useState('movie');
+  const [pilotYear,setPilotYear]=useState('');
+  const [pilotResults,setPilotResults]=useState<PilotItem[]>([]);
+  const [pilotBusy,setPilotBusy]=useState(false);
 
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
@@ -177,6 +190,53 @@ export function AdminPostgresTab(){
     finally{setDistributedBusy(false);}
     await refreshDistributed();
     await refresh();
+  }
+
+  async function checkPilot(){
+    setPilotBusy(true);
+    try{
+      const state=await authRequest<PilotStatus>(
+        endpoint('/api/migration/postgres/pilot/status'));
+      setPilotStatus(state);
+      if(state.enabled){
+        const page=await authRequest<PilotPage>(
+          '/api/migration/postgres/pilot/items?XTransformPort=4000&limit=5');
+        setPilotResults(page.data);
+      }else setPilotResults([]);
+    }catch(err){toast.error(err instanceof Error?err.message:'Pilotul PostgreSQL nu a putut fi verificat');}
+    finally{setPilotBusy(false);}
+  }
+  async function setupPilot(){
+    if(!pilotStatus?.enabled||!window.confirm(
+      'Creezi tabelele separate PostgreSQL pentru catalogul pilot?'
+    ))return;
+    setPilotBusy(true);
+    try{
+      await action('/api/migration/postgres/pilot/setup',{});
+      toast.success('Catalog pilot PostgreSQL inițializat');
+    }catch(err){toast.error(err instanceof Error?err.message:'Schema pilot nu a putut fi creată');}
+    finally{setPilotBusy(false);}
+  }
+  async function savePilot(){
+    const externalid=pilotExternalId.trim(),title=pilotTitle.trim();
+    const year=pilotYear.trim();
+    if(!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,219}$/.test(externalid)||!title){
+      toast.error('Introdu un externalid valid (minimum 3 caractere) și un titlu');return;
+    }
+    if(year&&!/^[12][0-9]{3}$/.test(year)){
+      toast.error('Anul trebuie să conțină patru cifre');return;
+    }
+    if(!window.confirm('Salvezi titlul DOAR în catalogul pilot PostgreSQL?'))return;
+    setPilotBusy(true);
+    try{
+      await action('/api/migration/postgres/pilot/items',{
+        externalid,title,type:pilotType,...(year?{year:Number(year)}:{}),
+        metadata:{description:'Inserare controlată de administrator în pilot'},
+      });
+      toast.success('Titlu salvat doar în PostgreSQL pilot (nu în biblioteca publică)');
+    }catch(err){toast.error(err instanceof Error?err.message:'Scrierea pilot a eșuat');}
+    finally{setPilotBusy(false);}
+    await checkPilot();
   }
 
   async function previewCatalog(next=false){
@@ -399,6 +459,68 @@ export function AdminPostgresTab(){
             Activarea feederului sau a workerelor pe alte servere necesită
             configurarea variabilelor de mediu. Nu activa simultan workerul
             PostgreSQL vechi și noul feeder. Biblioteca publică rămâne SQLite.
+          </p>
+        </CardContent>
+      </Card>
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Catalog PostgreSQL nativ — pilot izolat</CardTitle>
+          <CardDescription>
+            Scriere directă în PostgreSQL cu identificatori unici și jurnal
+            tranzacțional. Dezactivat implicit. Aceste titluri NU intră în
+            catalogul public SQLite sau în player.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <p>Activare: {pilotStatus?.enabled?'Pilot disponibil':
+            pilotStatus?.enabled===false?'Pilot dezactivat în server':'Stare necunoscută'}
+            {' · '}Documente pilot: {pilotStatus?.documents??'—'}
+            {' · '}Evenimente: {pilotStatus?.events??'—'}</p>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={pilotBusy}
+              onClick={()=>void checkPilot()}>
+              {pilotBusy?'Se verifică…':'Verifică pilotul'}
+            </Button>
+            <Button variant="outline" disabled={pilotBusy||!pilotStatus?.enabled}
+              onClick={()=>void setupPilot()}>Creează schema pilot</Button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="pg-pilot-externalid">ID extern stabil</Label>
+              <Input id="pg-pilot-externalid" maxLength={220}
+                placeholder="api:example:movie:123" value={pilotExternalId}
+                onChange={e=>setPilotExternalId(e.target.value)}/>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="pg-pilot-title">Titlu</Label>
+              <Input id="pg-pilot-title" maxLength={300} value={pilotTitle}
+                onChange={e=>setPilotTitle(e.target.value)}/>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="pg-pilot-type">Tip (movie, tv, anime, documentary etc.)</Label>
+              <Input id="pg-pilot-type" maxLength={50} value={pilotType}
+                onChange={e=>setPilotType(e.target.value)}/>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="pg-pilot-year">An</Label>
+              <Input id="pg-pilot-year" maxLength={4} value={pilotYear}
+                inputMode="numeric" onChange={e=>setPilotYear(e.target.value)}/>
+            </div>
+          </div>
+          <Button disabled={pilotBusy||!pilotStatus?.enabled}
+            onClick={()=>void savePilot()}>Scrie doar în PostgreSQL pilot</Button>
+          {pilotResults.length>0&&<div className="space-y-1">
+            <p className="text-xs text-zinc-400">Ultimele titluri din catalogul pilot:</p>
+            {pilotResults.map(item=>(
+              <p key={item.id} className="text-xs text-zinc-300">
+                {item.externalid} · {item.title} · {item.type} · revizia {item.revision}
+              </p>
+            ))}
+          </div>}
+          <p className="text-xs text-zinc-400">
+            Catalogul pilot este separat. Nici acest buton, nici variabila
+            de activare nu comută implicit conținutul, căutarea, conturile
+            sau playerul platformei la PostgreSQL.
           </p>
         </CardContent>
       </Card>
