@@ -149,13 +149,17 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_content_type
       ON Content(type);
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_content_unique_media
+    -- ID-bearing API/addon records may legitimately share title/year/media
+    -- with different episodes/editions/providers. Keep legacy-url dedupe only
+    -- for manual rows that lack a stable externalid.
+    DROP INDEX IF EXISTS idx_content_unique_media;
+    CREATE UNIQUE INDEX idx_content_unique_media
       ON Content(
         lower(trim(title)),
         ifnull(year, -1),
         ifnull(url, ''),
         ifnull(embedcode, '')
-      );
+      ) WHERE externalid IS NULL;
   `);
 
   // Auth must not depend on optional AI/tenant migrations completing.
