@@ -126,7 +126,7 @@ jobs:
         run: |
           node --check modules/search/metadata.js
           node --check db.js
-          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs
+          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs
 
   integration:
     name: Final Integration
