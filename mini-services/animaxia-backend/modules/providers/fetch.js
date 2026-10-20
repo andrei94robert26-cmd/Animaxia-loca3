@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { getProviderDefinition } from './catalog.js';
 import { EXTRA_DRIVER_IDS, buildExtraProviderRequest, mapExtraProviderItems } from './extra-fetch.js';
 import { COMMUNITY_DRIVER_IDS, buildCommunityProviderRequest, mapCommunityProviderItems } from './community-fetch.js';
+import { EXPANSION_DRIVER_IDS, buildExpansionRequest, mapExpansionItems } from './expansion-fetch.js';
 
 const isoYear = (v) => {
   const m = /^([12]\d{3})/.exec(String(v || ''));
@@ -76,6 +77,10 @@ export function buildProviderRequest(providerId, { q = '', page = 1 } = {}) {
         url = buildCommunityProviderRequest(providerId, query, pageNo);
         break;
       }
+      if (EXPANSION_DRIVER_IDS.includes(providerId)) {
+        url = buildExpansionRequest(providerId, query, pageNo);
+        break;
+      }
       throw Object.assign(new Error('No verified fetch driver is installed for this provider'), { status: 501 });
   }
   return { url, page: pageNo, query };
@@ -137,7 +142,8 @@ export function mapProviderItems(id, json) {
       break;
     default:
       return EXTRA_DRIVER_IDS.includes(id) ? mapExtraProviderItems(id, json)
-        : COMMUNITY_DRIVER_IDS.includes(id) ? mapCommunityProviderItems(id, json) : [];
+        : COMMUNITY_DRIVER_IDS.includes(id) ? mapCommunityProviderItems(id, json)
+        : EXPANSION_DRIVER_IDS.includes(id) ? mapExpansionItems(id, json) : [];
   }
   return mapped.slice(0, 25).filter((x) => x.id && x.id !== 'undefined' &&
     x.id !== 'null' && x.title && x.category);
