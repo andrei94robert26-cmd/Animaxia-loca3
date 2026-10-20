@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import {
   pgCatalogPilotEnabled,validatePgPilotItem,
-  buildPgCatalogPilotSearch,listPgCatalogPilot,
+  buildPgCatalogPilotSearch,listPgCatalogPilot,pgCatalogPilotStatus,
   upsertPgCatalogPilot,
 } from '../modules/postgres/catalog-pilot.js';
 import pgRoutes from '../modules/postgres/routes.js';
@@ -46,6 +46,24 @@ test('PG catalog pilot is opt-in; metadata projection cannot leak playback/secre
   }finally{
     if(old===undefined)delete process.env.ANIMAXIA_PG_CATALOG_PILOT;
     else process.env.ANIMAXIA_PG_CATALOG_PILOT=old;
+  }
+});
+test('pilot status accepts missing schema but propagates other PG errors',async()=>{
+  const prior=process.env.ANIMAXIA_PG_CATALOG_PILOT;
+  process.env.ANIMAXIA_PG_CATALOG_PILOT='true';
+  try{
+    const absent=Object.assign(new Error('relation missing'),{code:'42P01'});
+    const status=await pgCatalogPilotStatus({
+      db:{query:async()=>{throw absent;}},
+    });
+    assert.equal(status.enabled,true);
+    assert.equal(status.initialized,false);
+    await assert.rejects(pgCatalogPilotStatus({
+      db:{query:async()=>{throw Object.assign(new Error('connection refused'),{code:'08006'});}},
+    }),/connection refused/);
+  }finally{
+    if(prior===undefined)delete process.env.ANIMAXIA_PG_CATALOG_PILOT;
+    else process.env.ANIMAXIA_PG_CATALOG_PILOT=prior;
   }
 });
 test('PG pilot queries use bound FTS/category/year and keyset pagination',()=>{
