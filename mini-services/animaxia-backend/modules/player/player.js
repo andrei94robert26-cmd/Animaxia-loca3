@@ -9,7 +9,7 @@ import { logger } from '../../utils/logger.js';
 function policyAllows() {
   return {
     mp4: process.env.PLAYERALLOWMP4 !== 'false',
-    mpd: process.env.PLAYERALLOWDASH !== 'false',
+    mpd: process.env.PLAYERALLOWDASH === 'true',
     m3u8: process.env.PLAYERALLOWM3U8 !== 'false',
     iframe: process.env.PLAYERALLOWIFRAME !== 'false',
     youtube: process.env.PLAYERALLOWYOUTUBE !== 'false',
