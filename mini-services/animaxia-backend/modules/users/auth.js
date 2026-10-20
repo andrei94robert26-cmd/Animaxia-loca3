@@ -258,7 +258,10 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
     const adminCount = await one(`SELECT COUNT(*) AS count FROM users WHERE role = 'admin'`);
-    const role = adminEmails.includes(String(email).toLowerCase()) || num(adminCount?.count) === 0 ? 'admin' : 'user';
+    // Production bootstrap requires an explicitly configured admin email.
+    // Never let an arbitrary first public registration become administrator.
+    const firstLocalAdmin = process.env.NODE_ENV !== 'production' && num(adminCount?.count) === 0;
+    const role = adminEmails.includes(String(email).toLowerCase()) || firstLocalAdmin ? 'admin' : 'user';
 
     const inserted = await one(
       `INSERT INTO users (email, username, passwordhash, role, preferences)
