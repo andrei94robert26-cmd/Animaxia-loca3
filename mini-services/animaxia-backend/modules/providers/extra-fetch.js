@@ -92,6 +92,8 @@ export function mapExtraProviderItems(id, json) {
         studios: v?.publisher ? [str(v.publisher,120)] : [],
         description: str(v?.short_description, 3000),
         thumbnail: v?.thumbnail, sourceAttribution: 'FreeToGame.com',
+        sourceUrl: typeof v?.game_url === 'string' && v.game_url.startsWith('https://www.freetogame.com/')
+          ? v.game_url : 'https://www.freetogame.com/', 
       }));
       break;
     case 'swapi':
