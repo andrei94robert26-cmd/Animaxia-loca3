@@ -99,6 +99,7 @@ import { franchiseRouter, trilogyRouter } from './modules/discover/collections.j
 import ingestRouter from './modules/ingest/dedup.js';
 import metadataIngestRouter from './modules/ingest/metadata.js';
 import metadataQueueRouter from './modules/ingest/queue-routes.js';
+import { startMinerAutoSync, stopMinerAutoSync } from './modules/miner/auto-sync.js';
 import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
 import scaleRouter from './modules/platform/scale.js';
 
@@ -792,6 +793,7 @@ async function main() {
   try {
     await ensureMinerSchema();
     minerBoot(); // interrupted-job recovery + metrics collector + queue resume
+    startMinerAutoSync(); // env-gated TMDB/Jikan periodic scheduling
     minerReady = true;
   } catch (err) {
     logger.warn(`[boot] Miner schema degraded (miner routes will answer 503): ${err.message}`);
@@ -866,6 +868,8 @@ async function main() {
 
   const shutdown = async (signal) => {
     logger.info(`[shutdown] ${signal} received — closing server`);
+    stopMetadataQueueWorker();
+    stopMinerAutoSync();
     server.close(async () => {
       await closeDb();
       await closeShardPools(); // FAZA 13 (sharding): dedicated shard branch pools (main pool closed by closeDb)
