@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { initDb, upsertContent, getContentById, deleteContent } from '../db.js';
+import { ensurePlatformSchema } from '../modules/platform/migrations.js';
 import metadataRouter from '../modules/search/metadata.js';
 
 test('SQLite persists complete metadata and metadata endpoint filters JSON fields', async () => {
   await initDb();
+  await ensurePlatformSchema();
   const externalid = 'ci:metadata:' + Date.now();
   const { record } = await upsertContent({
     externalid,
