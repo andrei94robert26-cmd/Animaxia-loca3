@@ -749,6 +749,7 @@ async function main() {
   try {
     ensureMetadataQueueSchema();
     startMetadataQueueWorker();
+    startProviderAutoSync(); // independent fixed-origin API scheduler
   } catch (err) {
     logger.error('[boot] JSON metadata queue unavailable: ' + err.message);
   }
@@ -799,7 +800,6 @@ async function main() {
     await ensureMinerSchema();
     minerBoot(); // interrupted-job recovery + metrics collector + queue resume
     startMinerAutoSync(); // env-gated TMDB/Jikan periodic scheduling
-    startProviderAutoSync(); // independent fixed-host JSON source scheduler, opt-in
     minerReady = true;
   } catch (err) {
     logger.warn(`[boot] Miner schema degraded (miner routes will answer 503): ${err.message}`);
