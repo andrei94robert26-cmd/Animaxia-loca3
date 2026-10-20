@@ -37,6 +37,11 @@ type CatalogProvider = {
   id: string; category: string; driverImplemented: boolean;
   requiredEnv: string[]; installed: boolean; enabled: boolean;
   credentialsPresent: boolean; readyForSync: boolean; liveVerified: boolean;
+  fetchHealth?: {
+    attempts: number; lastStatus: string; lastAttemptAt: string | null;
+    lastSuccessAt: string | null; lastItemCount: number | null;
+    lastError: string | null;
+  };
 };
 type CatalogResponse = {
   catalogCount: number; implementedDrivers: number;
@@ -202,6 +207,14 @@ export function AdminAddonsTab() {
                         : !provider.installed ? 'Neinstalat'
                         : !provider.enabled ? 'Dezactivat' : 'Necesită chei API'}
                       {' · '}{provider.category}
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      API: {provider.fetchHealth?.lastStatus === 'success' ? 'ultima cerere reușită'
+                        : provider.fetchHealth?.lastStatus === 'error' ? 'ultima cerere a eșuat'
+                        : 'neverificat prin HTTP'}
+                      {provider.fetchHealth?.lastAttemptAt
+                        ? ' · ' + new Date(provider.fetchHealth.lastAttemptAt).toLocaleString('ro-RO')
+                        : ''}
                     </p>
                   </div>
                   <Button type="button" variant="outline" disabled={busy || !provider.readyForSync}
