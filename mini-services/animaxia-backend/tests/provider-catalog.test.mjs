@@ -12,6 +12,7 @@ import { signTenantJwt } from '../modules/tenant/jwt-tenant.js';
 import { processNextMetadataJob, getMetadataJob } from '../modules/ingest/queue.js';
 import { sqliteAdvancedSearch } from '../modules/search/sqlite-advanced.js';
 import providerRoutes from '../modules/providers/routes.js';
+import { getProviderFetchHealth } from '../modules/providers/health.js';
 
 test('88 API inventory has 6 implemented, separately enabled drivers', () => {
   assert.equal(PROVIDER_CATALOG.length, 88);
@@ -113,9 +114,15 @@ test('admin sync queues real-mapped mock provider payload into persisted searcha
   const base = 'http://127.0.0.1:' + server.address().port;
   const original = globalThis.fetch;
   let providerCalls = 0;
+  let mockUpstreamStatus = 200;
   globalThis.fetch = async (url, init) => {
     if (String(url).startsWith('https://api.jikan.moe/')) {
       providerCalls += 1;
+      if (mockUpstreamStatus !== 200) {
+        return new Response(JSON.stringify({ error: 'simulated error' }), {
+          status: mockUpstreamStatus, headers: { 'content-type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify({ data: [{
         mal_id: 866272, title: fixtureTitle, year: 2023,
         synopsis: 'A synthetic test result', genres: [{ name: 'Adventure' }],
@@ -144,6 +151,8 @@ test('admin sync queues real-mapped mock provider payload into persisted searcha
     assert.equal(enqueued.fetched, 1);
     assert.equal(getMetadataJob(jobId).status, 'queued');
     assert.equal(providerCalls, 1);
+    assert.equal(getProviderFetchHealth('jikan').lastStatus, 'success');
+    assert.equal(providerReadiness('jikan').liveVerified, true);
     const processed = await processNextMetadataJob();
     assert.equal(processed.id, jobId);
     assert.equal(processed.status, 'done');
@@ -151,6 +160,15 @@ test('admin sync queues real-mapped mock provider payload into persisted searcha
     assert.equal(record.title, fixtureTitle);
     const found = await sqliteAdvancedSearch({ q: nonce, type: 'anime' });
     assert.ok(found.data.some((x) => x.id === record.id));
+    // The last real HTTP attempt, including upstream failures, is recorded.
+    mockUpstreamStatus = 503;
+    const failed = await original(base + '/api/integrations/providers/jikan/sync', {
+      method: 'POST', headers, body: JSON.stringify({ q: 'retry', page: 1 }),
+    });
+    assert.equal(failed.status, 502);
+    assert.equal(getProviderFetchHealth('jikan').lastStatus, 'error');
+    assert.equal(providerReadiness('jikan').liveVerified, false);
+    assert.match(getProviderFetchHealth('jikan').lastError, /503/);
   } finally {
     globalThis.fetch = original;
     await new Promise((resolve) => server.close(resolve));
@@ -158,6 +176,7 @@ test('admin sync queues real-mapped mock provider payload into persisted searcha
     if (record && record.title === fixtureTitle) await deleteContent(record.id);
     if (jobId) await query('DELETE FROM metadata_sync_jobs WHERE id=?', [jobId]);
     await query('DELETE FROM metadata_ingest_sources WHERE sourcetype=? AND sourceid=?', ['api','jikan']);
+    await query('DELETE FROM provider_fetch_health WHERE providerid=?', ['jikan']);
     await query('DELETE FROM users WHERE id=?', [userId]);
   }
 });
