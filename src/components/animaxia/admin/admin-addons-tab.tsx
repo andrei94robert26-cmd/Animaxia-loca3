@@ -163,7 +163,8 @@ export function AdminAddonsTab() {
       const response = await mutate<{
         fetched: number; jobId?: string; status?: string; duplicate?: boolean;
       }>('/api/integrations/providers/' + encodeURIComponent(providerId) + '/sync',
-        'POST', { q: providerId === 'freetogame' ? '' : providerQuery, page: 1 });
+        'POST', { q: ['freetogame','pokeapi','openligadb','jolpica','opendota'].includes(providerId)
+          ? '' : providerQuery, page: 1 });
       toast.success(response.jobId
         ? providerId + ': ' + response.fetched + ' elemente în coadă (' + response.status + ')'
         : providerId + ': nu există rezultate compatibile pentru import.');
@@ -191,7 +192,7 @@ export function AdminAddonsTab() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1">
-            <Label htmlFor="provider-search">Interogare pentru API (necesară pentru iTunes, CheapShark, GDELT)</Label>
+            <Label htmlFor="provider-search">Interogare API (necesară pentru iTunes, OMDb, MusicBrainz, Scryfall, GDELT)</Label>
             <Input id="provider-search" value={providerQuery} maxLength={120}
               onChange={(event) => setProviderQuery(event.target.value)}
               placeholder="ex: anime, Star Wars, sport" />
