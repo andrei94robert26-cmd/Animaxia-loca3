@@ -7,6 +7,7 @@ import express from 'express';
 import { rows, one } from '../platform/sql.js';
 import { normalizedType } from './sqlite-advanced.js';
 import { prepareFtsQuery } from './content-fts.js';
+import { distributedSearch } from './opensearch.js';
 
 const router = express.Router();
 const scalarFields = Object.freeze({
@@ -36,6 +37,9 @@ function containsJsonField(fieldPath) {
 }
 router.get('/metadata', async (req, res, next) => {
   try {
+    if (process.env.ANIMAXIA_SEARCH_BACKEND === 'opensearch') {
+      return res.json(await distributedSearch(req.query));
+    }
     const filters = [];
     const params = [];
     const add = (sql, value) => { filters.push(sql); params.push(value); };
