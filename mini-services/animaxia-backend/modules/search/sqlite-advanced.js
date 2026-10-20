@@ -26,7 +26,8 @@ const TYPES = Object.freeze({
 
 const safeString = (value) => typeof value === 'string' ? value.trim().slice(0, 160) : '';
 export const normalizedType = (input) => {
-  const type = safeString(input).toLowerCase();
+  const type = safeString(input).toLowerCase()
+    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
   return TYPES[type] || type;
 };
 const searchText = (value) => 'instr(lower(coalesce(' + value + ", '')),lower(?)) > 0";
