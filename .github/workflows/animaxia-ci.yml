@@ -134,6 +134,9 @@ jobs:
           node --check modules/search/opensearch-routes.js
           node --check modules/search/opensearch-reconcile.js
           node --check modules/search/opensearch-orphans.js
+          node --check modules/postgres/shadow-outbox.js
+          node --check modules/postgres/shadow.js
+          node --check modules/postgres/routes.js
           node --check modules/providers/catalog.js
           node --check modules/providers/fetch.js
           node --check modules/providers/routes.js
@@ -147,7 +150,7 @@ jobs:
           node --check modules/ingest/service-auth.js
           node --check modules/miner/auto-sync.js
           node --check db.js
-          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs tests/miner-auto-sync.test.mjs tests/source-registry.test.mjs tests/content-fts.test.mjs tests/provider-catalog.test.mjs tests/provider-auto-sync.test.mjs tests/community-providers.test.mjs tests/expansion-providers.test.mjs tests/opensearch.test.mjs tests/opensearch-reconcile.test.mjs tests/opensearch-orphans.test.mjs
+          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs tests/miner-auto-sync.test.mjs tests/source-registry.test.mjs tests/content-fts.test.mjs tests/provider-catalog.test.mjs tests/provider-auto-sync.test.mjs tests/community-providers.test.mjs tests/expansion-providers.test.mjs tests/opensearch.test.mjs tests/opensearch-reconcile.test.mjs tests/opensearch-orphans.test.mjs tests/pg-shadow.test.mjs
 
   integration:
     name: Final Integration
