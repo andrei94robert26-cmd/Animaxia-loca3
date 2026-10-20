@@ -5,6 +5,7 @@
  */
 import crypto from 'node:crypto';
 import { rows, one } from '../platform/sql.js';
+import { prepareFtsQuery } from './content-fts.js';
 
 const META = "(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END)";
 const FIELDS = Object.freeze({
@@ -72,7 +73,12 @@ export async function sqliteAdvancedSearch({
   const filterParams = [];
   const add = (sql, ...values) => { conditions.push(sql); filterParams.push(...values); };
   const query = safeString(q);
-  if (query) {
+  // Single safe word → native inverted FTS5 lookup. Keep the older LIKE
+  // behavior for punctuation, multiword expressions and partial fragments.
+  const ftsQuery = prepareFtsQuery(query);
+  if (ftsQuery) {
+    add('c.id IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)', ftsQuery);
+  } else if (query) {
     add('(' + [searchText('c.title'), searchText('c.externalid'), searchText('c.metadata')].join(' OR ') + ')',
       query, query, query);
   }
@@ -152,5 +158,6 @@ export async function sqliteAdvancedSearch({
     total: Number(count?.total || 0), page: pageNumber,
     max_score: data.length ? Math.max(...data.map((row) => row._score)) : 0,
     data, nextCursor, paginationMode: cursorState ? 'cursor' : 'offset',
+    searchMode: ftsQuery ? 'sqlite-fts5' : (query ? 'sqlite-like-fallback' : 'filters-only'),
   };
 }
