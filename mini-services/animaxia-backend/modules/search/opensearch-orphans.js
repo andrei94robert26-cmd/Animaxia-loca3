@@ -45,7 +45,7 @@ export async function detectOpenSearchOrphans(
   let previous=cursor;
   for(const hit of scanned){
     const id=Number(hit?._id);
-    if(!Number.isSafeInteger(id)||id<=previous||id<=0 ||
+    if(!Number.isSafeInteger(id)||hit._id!==String(id)||id<=previous||id<=0 ||
       !Array.isArray(hit?.sort)||hit.sort.length!==1||hit.sort[0]!==id){
       throw Object.assign(new Error('Invalid remote ID or sort order; no deletes queued'),{status:502});
     }
