@@ -8,6 +8,7 @@ import { userRateLimit } from '../security/security.js';
 import { seedOpenSearchOutbox } from './opensearch-outbox.js';
 import { localDb } from '../local/sqlite.js';
 import { reconcileOpenSearchDocuments } from './opensearch-reconcile.js';
+import { detectOpenSearchOrphans } from './opensearch-orphans.js';
 import {
   openSearchWorkerState,ensureDistributedIndex,flushDistributedOutbox,
   requestDistributed,distributedConfig,
@@ -45,6 +46,15 @@ router.post('/opensearch/reconcile',limit,async(req,res,next)=>{
       dryRun:req.body?.dryRun??true,
     });
     return res.json(report);
+  }catch(err){return next(err);}
+});
+router.post('/opensearch/orphans',limit,async(req,res,next)=>{
+  try {
+    return res.json(await detectOpenSearchOrphans({
+      afterId:req.body?.afterId??0,
+      limit:req.body?.limit??25,
+      dryRun:req.body?.dryRun??true,
+    }));
   }catch(err){return next(err);}
 });
 router.post('/opensearch/setup',limit,async(_req,res,next)=>{
