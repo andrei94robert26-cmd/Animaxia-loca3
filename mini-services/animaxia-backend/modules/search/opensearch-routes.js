@@ -6,8 +6,10 @@ import express from 'express';
 import { requireAuth,requireAdmin } from '../users/auth.js';
 import { userRateLimit } from '../security/security.js';
 import { seedOpenSearchOutbox } from './opensearch-outbox.js';
+import { localDb } from '../local/sqlite.js';
 import {
   openSearchWorkerState,ensureDistributedIndex,flushDistributedOutbox,
+  requestDistributed,distributedConfig,
 } from './opensearch.js';
 
 const router=express.Router();
@@ -16,6 +18,23 @@ const limit=userRateLimit({scope:'ip',max:10,windowMs:60_000,key:'opensearch-con
 router.get('/opensearch/status',(_req,res,next)=>{
   try{return res.json(openSearchWorkerState());}
   catch(err){return next(err);}
+});
+router.get('/opensearch/compare',limit,async(_req,res,next)=>{
+  try {
+    const c=distributedConfig();
+    if(!c.configured) return res.status(503).json({error:'OpenSearch is not configured'});
+    const localCount=Number(localDb.prepare('SELECT COUNT(*) AS n FROM Content').get().n);
+    const remote=await requestDistributed('/'+c.index+'/_count');
+    if(!Number.isSafeInteger(remote.count)||remote.count<0)
+      throw Object.assign(new Error('Invalid OpenSearch count'),{status:502});
+    const state=openSearchWorkerState();
+    return res.json({
+      localCount,remoteCount:remote.count,delta:localCount-remote.count,
+      pending:state.pending,
+      countAligned:localCount===remote.count&&state.pending===0,
+      note:'Equal counts do not prove document identity or full index consistency.',
+    });
+  }catch(err){return next(err);}
 });
 router.post('/opensearch/setup',limit,async(_req,res,next)=>{
   try{return res.json(await ensureDistributedIndex());}
