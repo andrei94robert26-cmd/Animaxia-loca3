@@ -23,11 +23,12 @@
 import crypto from 'node:crypto';
 
 const developmentSecret = crypto.randomBytes(32).toString('hex');
+const compromisedLegacySecret = crypto.createHash('sha256').update('animaxia-auth:sqlite-local').digest('hex');
 
 /** Base signing secret — identical to auth.js authSecret(). */
 export function baseAuthSecret() {
   const configured = process.env.AUTHSECRET;
-  if (configured && configured.length >= 32) return configured;
+  if (configured && configured.length >= 32 && configured !== compromisedLegacySecret) return configured;
   if (process.env.NODE_ENV === 'production') {
     throw new Error('AUTHSECRET must be a random secret of at least 32 characters in production');
   }
