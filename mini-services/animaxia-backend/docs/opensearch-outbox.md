@@ -103,6 +103,15 @@ leasing distribuit sau coordonare între replici. Nu porni același worker pe
 mai multe procese care partajează aceeași bază. Pentru HA la scară mare,
 folosește o coadă distribuită durabilă și un datastore principal scalabil.
 
+### Compară numărul documentelor înainte de comutare
+
+`GET /api/search/opensearch/compare` (doar administrator) consultă
+`COUNT(*)` din catalogul SQLite și endpointul `_count` din OpenSearch,
+afișând diferența și numărul de modificări în așteptare.
+Același rezultat este accesibil prin butonul „Compară documentele” din
+fila `#/admin/opensearch`. **Numerele egale nu garantează identitatea
+fiecărui document**, nici consistența completă în timp real.
+
 ## 4. Comută gradual motorul pentru metadate
 
 Numai după backfill complet, număr de elemente comparat, testare pe exemple
