@@ -5,7 +5,19 @@ import { initDb, query, getContentByExternalId, deleteContent } from '../db.js';
 import { ensurePlatformSchema } from '../modules/platform/migrations.js';
 import { installSourceManifest, setSourceEnabled, getSourceRecord } from '../modules/ingest/source-registry.js';
 import { processNextMetadataJob } from '../modules/ingest/queue.js';
-import { pollProviderTick, providerAutoSyncStatus, ensureProviderPollSchema } from '../modules/providers/auto-sync.js';
+import { pollProviderTick, providerAutoSyncStatus, ensureProviderPollSchema, providerSupportsPollQuery } from '../modules/providers/auto-sync.js';
+
+test('scheduler skips incompatible query modes before any outbound request', () => {
+  for (const id of ['musicbrainz','omdb','itunes','cheapshark','gdelt','scryfall']) {
+    assert.equal(providerSupportsPollQuery(id,''),false,id);
+    assert.equal(providerSupportsPollQuery(id,'Queen'),true,id);
+  }
+  for (const id of ['pokeapi','openligadb','jolpica','opendota','freetogame']) {
+    assert.equal(providerSupportsPollQuery(id,''),true,id);
+    assert.equal(providerSupportsPollQuery(id,'Queen'),false,id);
+  }
+  assert.equal(providerSupportsPollQuery('kitsu','Naruto'),true);
+});
 
 test('periodic provider sync is opt-in and does not run without metadata worker', async () => {
   const keys = ['ANIMAXIA_PROVIDER_AUTO_SYNC_ENABLED','ANIMAXIA_METADATA_QUEUE_WORKER'];
