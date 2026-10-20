@@ -96,7 +96,7 @@ export function mapExtraProviderItems(id, json) {
       break;
     case 'swapi':
       items = list(json?.results).map((v) => ({
-        id: String(v?.episode_id || v?.url?.match?.(/films\\/(\\d+)/)?.[1]),
+        id: String(v?.episode_id),
         title: str(v?.title), category: 'filme',
         year: year(v?.release_date), franchise: 'Star Wars',
         description: str(v?.opening_crawl, 3000), studios: v?.producer ? [str(v.producer,120)] : [],
