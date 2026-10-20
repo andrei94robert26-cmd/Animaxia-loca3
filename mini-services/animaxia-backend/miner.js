@@ -16,7 +16,7 @@ import { logger } from './utils/logger.js';
 
 const MINER_TIMEOUT_MS = parseInt(process.env.MINERTIMEOUTMS || '15000', 10);
 const MINER_MAX_HTML_BYTES = parseInt(process.env.MINERMAXHTML_BYTES || '5000000', 10);
-const ALLOW_PRIVATE_NETWORK = process.env.MINERALLOWPRIVATE_NETWORK === 'true';
+const ALLOW_PRIVATE_NETWORK = process.env.NODE_ENV !== 'production' && process.env.MINERALLOWPRIVATE_NETWORK === 'true';
 const MAX_REDIRECTS = 4;
 const ALLOWED_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'application/json', 'text/plain'];
 // Lowercase keys so the same header set works for both fetch() and node:http2.
