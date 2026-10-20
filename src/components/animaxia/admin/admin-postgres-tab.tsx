@@ -36,7 +36,7 @@ type DistributedStatus={
 };
 type DistributedStage={staged:number;failed:number;stale:number;pendingLocal:number};
 type DistributedProcess={processed:number;failed:number};
-type PilotStatus={enabled:boolean;publicCatalogUnchanged:boolean;documents?:number;events?:number};
+type PilotStatus={enabled:boolean;initialized?:boolean;publicCatalogUnchanged:boolean;documents?:number;events?:number};
 type PilotItem={
   id:number;externalid:string;title:string;type:string;year:number|null;
   revision:number;metadata:{actors?:string[];genres?:string[];description?:string};
@@ -198,7 +198,7 @@ export function AdminPostgresTab(){
       const state=await authRequest<PilotStatus>(
         endpoint('/api/migration/postgres/pilot/status'));
       setPilotStatus(state);
-      if(state.enabled){
+      if(state.enabled&&state.initialized){
         const page=await authRequest<PilotPage>(
           '/api/migration/postgres/pilot/items?XTransformPort=4000&limit=5');
         setPilotResults(page.data);
@@ -474,6 +474,7 @@ export function AdminPostgresTab(){
         <CardContent className="space-y-3 text-sm">
           <p>Activare: {pilotStatus?.enabled?'Pilot disponibil':
             pilotStatus?.enabled===false?'Pilot dezactivat în server':'Stare necunoscută'}
+            {' · '}Schema: {pilotStatus?.initialized?'Inițializată':'Neinițializată'}
             {' · '}Documente pilot: {pilotStatus?.documents??'—'}
             {' · '}Evenimente: {pilotStatus?.events??'—'}</p>
           <div className="flex flex-wrap gap-2">
