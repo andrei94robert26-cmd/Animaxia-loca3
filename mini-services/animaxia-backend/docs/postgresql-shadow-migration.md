@@ -129,6 +129,72 @@ crearea tabelelor, backfillul, JSONB, inserare, modificare, ștergere și
 compararea numărului de înregistrări. Nu reprezintă un test pe cluster
 de producție și nu demonstrează funcționalitatea la un miliard de titluri.
 
+## Etapa 16 — citire PostgreSQL și verificarea metadatelor
+
+Etapa 16 păstrează SQLite **baza principală**. PostgreSQL are acum două
+operații ADMIN separate de fluxul public și fără surse video.
+
+### A. Căutare și citire cu filtre direct în PostgreSQL
+
+```http
+GET /api/migration/postgres/catalog?q=Adventure&category=filme&year=2026&limit=10
+Authorization: Bearer <admin-jwt>
+```
+
+Suportă `q` (titlu/descriere prin PostgreSQL FTS), `category` sau
+`type`, `year`, `actor`, `genre`, `studio`, `franchise`,
+`trilogy`, `collection`, `description`, `posterId`.
+
+Sortarea este `id DESC`, cu **paginare keyset**, fără `OFFSET`.
+Limita este 1–50. Răspunsul returnează `data`, `hasMore`, `nextCursor`.
+La pagina următoare adaugă `cursor=<nextCursor>`, păstrând filtrele.
+Cursorul este asociat criptografic prin hash cu filtrele; nu este o
+semnătură anti-manipulare sau un snapshot consistent pe termen lung.
+Nu se execută un `COUNT(*)` costisitor la fiecare pagină.
+
+Schema PostgreSQL primește suplimentar un index GIN pe expresia
+`to_tsvector('simple', title || ' ' || metadata.description)`.
+Conținutul rezultat este limitat la câmpurile de metadate; playerul,
+adresele video și câmpurile JSON secrete nu sunt expuse.
+
+Interfața **Admin → PostgreSQL** conține acum un formular de căutare
+și navigare în această copie, fără să comute catalogul utilizatorilor.
+
+### B. Audit document cu document și reparație controlată
+
+```http
+POST /api/migration/postgres/verify
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{"afterId":0,"limit":25,"dryRun":true}
+```
+
+Verifică într-un singur lot cel mult 50 de titluri din SQLite după ID și
+compară înregistrările PostgreSQL efective (inclusiv metadatele JSONB).
+Răspunsul arată `matched`, `missing`, `mismatched`,
+`repairCandidates`, `repairQueued` și `nextAfterId`.
+
+Modul implicit `dryRun:true` **nu modifică nimic**. Numai un
+administrator poate trimite `dryRun:false`; atunci înregistrările
+lipsă sau diferite sunt înscrise pentru sincronizare în outboxul SQLite.
+Nicio reparație nu suprascrie joburile deja în coadă sau un eveniment
+nouer; sincronizarea efectivă are loc prin workerul normal.
+
+Testul CI `tests/pg-shadow-live.test.mjs` execută acum asupra
+**PostgreSQL 16 real** căutări full-text, filtre de categorie/an/actor/gen,
+paginare keyset, alterarea intenționată a unui rând PostgreSQL,
+detectarea nepotrivirii și restabilirea lui din SQLite.
+
+Testele `tests/pg-shadow-read.test.mjs` și
+`tests/pg-shadow-verify.test.mjs` verifică validarea inputului,
+parametrizarea SQL, cursorii, permisiunile și recuperarea.
+
+**Limite:** auditul inspectează doar rândurile prezente în SQLite;
+nu enumeră intrările PostgreSQL orfane. Modificările simultane pot
+schimba rezultatele între pagini. Citirea PostgreSQL este numai
+administrativă și nu demonstrează distribuirea bazei principale.
+
 ## Ce mai lipsește pentru 1.000.000.000 de titluri
 
 - Migrarea autorității de scriere pentru toate modulele din SQLite în PG.
