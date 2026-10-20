@@ -21,6 +21,17 @@ const configured = () => [...new Set(
   (process.env.ANIMAXIA_PROVIDER_AUTO_SYNC_PROVIDERS || 'kitsu,tvmaze,rickmorty,swapi,freetogame')
     .split(',').map((s) => s.trim().toLowerCase()).filter((id) => ALLOWED.has(id))
 )].slice(0,12);
+/** Prevent scheduling fetch requests unsupported by provider's actual API. */
+export function providerSupportsPollQuery(id, query) {
+  const value = typeof query === 'string' ? query.trim() : '';
+  if (['omdb','itunes','cheapshark','gdelt','scryfall','musicbrainz'].includes(id)) {
+    return value.length >= 2;
+  }
+  if (['freetogame','pokeapi','openligadb','jolpica','opendota'].includes(id)) {
+    return value.length === 0;
+  }
+  return true;
+}
 function queries() {
   try {
     const parsed = JSON.parse(process.env.ANIMAXIA_PROVIDER_AUTO_SYNC_QUERIES_JSON || '{}');
@@ -79,11 +90,9 @@ export async function pollProviderTick(fetchImpl = globalThis.fetch) {
       if (last && Date.parse(last.nextafter || '') > Date.now()) continue;
       const rawQuery = qById[id];
       const query = typeof rawQuery === 'string' && rawQuery.length <= 120 ? rawQuery.trim() : '';
-      // APIs that only support search must receive an explicit configured term.
-      if (['omdb','itunes','cheapshark','gdelt','scryfall'].includes(id) && query.length < 2) {
-        continue;
-      }
-      if (id === 'freetogame' && query) continue;
+      // Avoid scheduling requests that the upstream's documented endpoint
+      // cannot handle (search-only requires q, browse-only rejects q).
+      if (!providerSupportsPollQuery(id, query)) continue;
       const stamp = new Date().toISOString();
       const next = new Date(Date.now() + interval * 60_000).toISOString();
       localDb.prepare(`
