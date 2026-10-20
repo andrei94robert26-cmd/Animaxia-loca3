@@ -5,6 +5,12 @@ pachete executabile din internet. Poate primi metadate de la addonuri,
 huburi sau API-uri ce folosesc protocolul `json-push-v1`. Nu execută
 JavaScript nesigur, nu descarcă automat filme și nu ocolește protecția DRM.
 
+**În producție**, orice sursă `addon` trebuie întâi instalată în
+acest registru. O sursă trecută numai în
+`ANIMAXIA_INGEST_ALLOWED_SOURCES` fără instalare nu poate importa
+date. În dezvoltare, vechiul mecanism de allowlist rămâne disponibil
+pentru compatibilitatea testelor existente.
+
 ## 1. Instalează un manifest JSON
 
 `POST /api/integrations/sources` — necesită Bearer token de administrator:
