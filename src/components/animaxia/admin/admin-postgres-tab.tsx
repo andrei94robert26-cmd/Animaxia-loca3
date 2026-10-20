@@ -21,6 +21,15 @@ type CountComparison={
   localCount:number;remoteCount:number;delta:number;
   pending:number;countsAligned:boolean;note:string;
 };
+type PreviewItem={
+  id:number;title:string;year:number|null;type:string;externalid:string|null;
+  metadata:{actors?:string[];genres?:string[];franchise?:string;description?:string;rating?:number|null};
+};
+type PreviewPage={
+  engine:string;shadow:boolean;sourceOfTruth:string;authoritative:boolean;
+  data:PreviewItem[];hasMore:boolean;nextCursor:string|null;
+};
+
 const endpoint=(path:string)=>path+'?XTransformPort=4000';
 
 export function AdminPostgresTab(){
@@ -31,6 +40,12 @@ export function AdminPostgresTab(){
   const [working,setWorking]=useState(false);
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState<string|null>(null);
+  const [previewQuery,setPreviewQuery]=useState('');
+  const [previewCategory,setPreviewCategory]=useState('');
+  const [previewYear,setPreviewYear]=useState('');
+  const [preview,setPreview]=useState<PreviewPage|null>(null);
+  const [previewLoading,setPreviewLoading]=useState(false);
+
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
     setLoading(true);
@@ -93,6 +108,26 @@ export function AdminPostgresTab(){
     }catch(err){toast.error(err instanceof Error?err.message:'Compararea a eșuat');}
     finally{setWorking(false);}
   }
+  async function previewCatalog(next=false){
+    const year=previewYear.trim();
+    if(year&&!/^[12][0-9]{3}$/.test(year)){
+      toast.error('Anul trebuie să aibă patru cifre');return;
+    }
+    const params=new URLSearchParams({
+      XTransformPort:'4000',limit:'10',
+      ...(previewQuery.trim()?{q:previewQuery.trim()}:{}),
+      ...(previewCategory.trim()?{category:previewCategory.trim()}:{}),
+      ...(year?{year}:{}),
+    });
+    if(next&&preview?.nextCursor)params.set('cursor',preview.nextCursor);
+    setPreviewLoading(true);
+    try{
+      setPreview(await authRequest<PreviewPage>(
+        '/api/migration/postgres/catalog?'+params.toString()));
+    }catch(err){toast.error(err instanceof Error?err.message:'Citirea PostgreSQL a eșuat');}
+    finally{setPreviewLoading(false);}
+  }
+
   if(initializing)return <p className="text-sm text-zinc-400">Se verifică sesiunea…</p>;
   if(!isAdmin)return <p role="alert">Administrarea PostgreSQL necesită rolul de administrator.</p>;
   return (
@@ -156,6 +191,67 @@ export function AdminPostgresTab(){
             Nu schimba baza de date principală fără migrarea completă a
             modulelor, verificare de integritate, backup și teste de încărcare.
           </p>
+        </CardContent>
+      </Card>
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Catalog PostgreSQL — citire de verificare</CardTitle>
+          <CardDescription>
+            Caută în copia PostgreSQL folosind un index real, filtre și
+            paginare după ID. Rezultatele nu conțin surse video și nu
+            înlocuiesc biblioteca publică SQLite.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="space-y-1">
+              <Label htmlFor="pg-preview-q">Titlu sau descriere</Label>
+              <Input id="pg-preview-q" maxLength={120} value={previewQuery}
+                onChange={e=>{setPreviewQuery(e.target.value);setPreview(null);}}
+                placeholder="Ex.: Star Wars" />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="pg-preview-category">Categorie</Label>
+              <Input id="pg-preview-category" maxLength={80} value={previewCategory}
+                onChange={e=>{setPreviewCategory(e.target.value);setPreview(null);}}
+                placeholder="Ex.: filme, seriale, anime" />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="pg-preview-year">An</Label>
+              <Input id="pg-preview-year" value={previewYear} inputMode="numeric"
+                onChange={e=>{setPreviewYear(e.target.value);setPreview(null);}}
+                placeholder="2026" maxLength={4} />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={previewLoading||!status?.configured}
+              onClick={()=>void previewCatalog(false)}>
+              {previewLoading?'Se caută…':'Caută în PostgreSQL'}
+            </Button>
+            <Button variant="outline"
+              disabled={previewLoading||!preview?.nextCursor}
+              onClick={()=>void previewCatalog(true)}>Următoarele 10</Button>
+          </div>
+          {preview&&<div className="space-y-2" role="status">
+            <p className="text-xs text-zinc-400">
+              Motor: {preview.engine} · {preview.data.length} rezultate pe pagină
+              {' · '}{preview.hasMore?'Mai există rezultate':'Ultima pagină'}
+              {' · '}Copie de verificare, nu catalogul principal.
+            </p>
+            {preview.data.map(item=>(
+              <div key={item.id} className="rounded border border-white/10 p-3 text-sm">
+                <p className="font-medium">{item.title}</p>
+                <p className="text-xs text-zinc-400">
+                  ID {item.id} · {item.type} · {item.year??'an necunoscut'}
+                  {item.metadata?.actors?.length
+                    ? ' · '+item.metadata.actors.slice(0,3).join(', ')
+                    : ''}
+                </p>
+              </div>
+            ))}
+            {preview.data.length===0&&<p className="text-sm text-zinc-400">
+              Nu există metadate pentru filtrele selectate.</p>}
+          </div>}
         </CardContent>
       </Card>
     </div>
