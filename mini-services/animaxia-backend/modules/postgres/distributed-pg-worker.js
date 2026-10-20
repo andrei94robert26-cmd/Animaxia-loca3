@@ -98,12 +98,13 @@ export async function workDistributedShadow({limit=10,db}={}){
     return {processed,failed};
   }finally{busy=false;}
 }
-export function startPgDistributedWorker(){
+export function startPgDistributedWorker({keepAlive=false}={}){
   if(timer||process.env.ANIMAXIA_PG_DISTRIBUTED_WORKER!=='true')return false;
   if(!pgWorkerConfig().configured)return false;
   timer=setInterval(()=>workDistributedShadow().catch(err=>
     console.warn('[pg-worker] polling error:',err.message)),2500);
-  timer.unref?.();return true;
+  if(!keepAlive)timer.unref?.();
+  return true;
 }
 export async function stopPgDistributedWorker(){
   if(timer)clearInterval(timer);timer=null;
