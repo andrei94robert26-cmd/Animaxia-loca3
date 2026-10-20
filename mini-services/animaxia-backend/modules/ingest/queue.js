@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import { localDb } from '../local/sqlite.js';
 import { validMetadataBatch, persistMetadataBatch } from './metadata.js';
 import { logger } from '../../utils/logger.js';
+import { getSourceRecord } from './source-registry.js';
 
 let initialized = false;
 let running = false;
@@ -183,6 +184,15 @@ export async function processNextMetadataJob() {
     if (!job) return null;
     try {
       const { source, items } = JSON.parse(job.payload);
+      const registered = getSourceRecord(source);
+      if (registered && Number(registered.enabled) !== 1) {
+        localDb.prepare(`
+          UPDATE metadata_sync_jobs
+          SET status='failed',error='Source disabled before processing',
+              finishedat=CURRENT_TIMESTAMP WHERE id=?
+        `).run(job.id);
+        return getMetadataJob(job.id);
+      }
       const result = await persistMetadataBatch(source, items);
       const status = result.rejected > 0 ? (result.accepted > 0 ? 'partial' : 'failed') : 'done';
       localDb.prepare(`
