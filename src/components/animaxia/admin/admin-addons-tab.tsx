@@ -33,12 +33,23 @@ type QueueProvider = {
   lastSuccess: string | null;
 };
 type QueueStatus = { sources: QueueProvider[] };
+type CatalogProvider = {
+  id: string; category: string; driverImplemented: boolean;
+  requiredEnv: string[]; installed: boolean; enabled: boolean;
+  credentialsPresent: boolean; readyForSync: boolean; liveVerified: boolean;
+};
+type CatalogResponse = {
+  catalogCount: number; implementedDrivers: number;
+  providers: CatalogProvider[];
+};
 const backend = (path: string) => path + '?XTransformPort=4000';
 
 export function AdminAddonsTab() {
   const { isAdmin, initializing } = useAuth();
   const [sources, setSources] = useState<RegistrySource[]>([]);
   const [queue, setQueue] = useState<QueueProvider[]>([]);
+  const [providerCatalog, setProviderCatalog] = useState<CatalogResponse | null>(null);
+  const [providerQuery, setProviderQuery] = useState('');
   const [sourceType, setSourceType] = useState<SourceType>('addon');
   const [sourceId, setSourceId] = useState('');
   const [name, setName] = useState('');
@@ -53,12 +64,14 @@ export function AdminAddonsTab() {
     if (!isAdmin) return;
     setLoading(true);
     try {
-      const [registry, status] = await Promise.all([
+      const [registry, status, catalog] = await Promise.all([
         authRequest<{ sources: RegistrySource[] }>(backend('/api/integrations/sources')),
         authRequest<QueueStatus>(backend('/api/ingest/metadata/sources/status')),
+        authRequest<CatalogResponse>(backend('/api/integrations/providers')),
       ]);
       setSources(registry.sources);
       setQueue(status.sources);
+      setProviderCatalog(catalog);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Nu se poate citi registrul de addonuri.');
@@ -138,10 +151,73 @@ export function AdminAddonsTab() {
     }
   }
 
+  async function syncProvider(providerId: string) {
+    if (!isAdmin || busy) return;
+    setBusy(true);
+    try {
+      const response = await mutate<{
+        fetched: number; jobId?: string; status?: string; duplicate?: boolean;
+      }>('/api/integrations/providers/' + encodeURIComponent(providerId) + '/sync',
+        'POST', { q: providerQuery, page: 1 });
+      toast.success(response.jobId
+        ? providerId + ': ' + response.fetched + ' elemente în coadă (' + response.status + ')'
+        : providerId + ': nu există rezultate compatibile pentru import.');
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Sincronizarea API a eșuat.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (initializing) return <p className="text-sm text-zinc-400">Se verifică sesiunea…</p>;
   if (!isAdmin) return <p className="text-sm text-rose-400">Doar administratorii pot gestiona addonurile.</p>;
   return (
     <div className="space-y-5">
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Furnizori API — catalog și sincronizare</CardTitle>
+          <CardDescription>
+            {providerCatalog?.catalogCount ?? 0} surse catalogate;{' '}
+            {providerCatalog?.implementedDrivers ?? 0} drivere de preluare JSON implementate.
+            Un conector nu este activ până la instalarea și activarea sursei.
+            Fără teste live nu se confirmă disponibilitatea furnizorului.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="provider-search">Interogare pentru API (necesară pentru iTunes, CheapShark, GDELT)</Label>
+            <Input id="provider-search" value={providerQuery} maxLength={120}
+              onChange={(event) => setProviderQuery(event.target.value)}
+              placeholder="ex: anime, Star Wars, sport" />
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(providerCatalog?.providers.filter((provider) => provider.driverImplemented) ?? [])
+              .map((provider) => (
+                <div key={provider.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 p-3">
+                  <div>
+                    <p className="font-medium">{provider.id}</p>
+                    <p className="text-xs text-zinc-400">
+                      {provider.readyForSync ? 'Configurat pentru sincronizare'
+                        : !provider.installed ? 'Neinstalat'
+                        : !provider.enabled ? 'Dezactivat' : 'Necesită chei API'}
+                      {' · '}{provider.category}
+                    </p>
+                  </div>
+                  <Button type="button" variant="outline" disabled={busy || !provider.readyForSync}
+                    onClick={() => void syncProvider(provider.id)}>
+                    Sincronizează
+                  </Button>
+                </div>
+              ))}
+          </div>
+          <p className="text-xs text-zinc-400">
+            Rezultatele sunt introduse într-o coadă persistentă; pornirea workerului
+            este configurată separat pe server. Celelalte API-uri sunt doar catalogate.
+          </p>
+        </CardContent>
+      </Card>
+
       <Card className="border-white/10 bg-white/[0.03]">
         <CardHeader>
           <CardTitle>Registrul de addonuri, API-uri și huburi</CardTitle>
