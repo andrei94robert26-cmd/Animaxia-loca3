@@ -16,6 +16,7 @@ type Status = {
 };
 type Backfill = {scanned: number; nextAfterId: number | null; finished: boolean};
 type Flush = {processed: number; failed: number; pending: number};
+type Comparison = {localCount: number; remoteCount: number; delta: number; pending: number; countAligned: boolean};
 const backend = (path: string) => path + '?XTransformPort=4000';
 
 export function AdminOpenSearchTab() {
@@ -24,6 +25,7 @@ export function AdminOpenSearchTab() {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cursor, setCursor] = useState('0');
+  const [comparison, setComparison] = useState<Comparison | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
@@ -38,6 +40,17 @@ export function AdminOpenSearchTab() {
   const post=async<T,>(path:string,body:unknown)=>authRequest<T>(backend(path),{
     method:'POST',body:JSON.stringify(body),
   });
+  async function compare(){
+    setBusy(true);
+    try{
+      const result=await authRequest<Comparison>(backend('/api/search/opensearch/compare'));
+      setComparison(result);
+      toast.success(result.countAligned?'Numărul documentelor este aliniat':
+        'S-au detectat diferențe între catalog și index');
+    }catch(e){toast.error(e instanceof Error?e.message:'Compararea nu a reușit');}
+    finally{setBusy(false);}
+  }
+
   async function initialize(){
     if(!window.confirm('Creezi indexul în clusterul OpenSearch configurat?'))return;
     setBusy(true);
@@ -101,10 +114,18 @@ export function AdminOpenSearchTab() {
             <Button variant="outline" disabled={loading||busy} onClick={()=>void refresh()}>
               {loading?'Se verifică…':'Reîncarcă'}
             </Button>
+            <Button variant="outline" disabled={busy||!status?.configured}
+              onClick={()=>void compare()}>Compară documentele</Button>
             <Button disabled={busy||!status?.configured} onClick={()=>void initialize()}>
               Inițializează indexul
             </Button>
           </div>
+          {comparison&&<p className="text-xs text-zinc-300">
+            SQLite: {comparison.localCount} · OpenSearch: {comparison.remoteCount}
+            {' · '}Diferență: {comparison.delta} · Restanțe: {comparison.pending}
+            {' · '}{comparison.countAligned?'Număr aliniat':'Necesară sincronizare'}
+            . Numărul egal nu confirmă identitatea fiecărui document.
+          </p>}
         </CardContent>
       </Card>
       <Card className="border-white/10 bg-white/[0.03]">
