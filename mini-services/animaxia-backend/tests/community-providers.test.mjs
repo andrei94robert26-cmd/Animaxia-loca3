@@ -5,8 +5,8 @@ import { buildCommunityProviderRequest, mapCommunityProviderItems, COMMUNITY_DRI
 import { respectProviderRateLimit } from '../modules/providers/fetch.js';
 import { DRIVER_IDS } from '../modules/providers/catalog.js';
 
-test('17 drivers cover music, sport and gaming without accepting arbitrary URLs', () => {
-  assert.equal(DRIVER_IDS.length,17);
+test('community drivers cover music, sport and gaming without accepting arbitrary URLs', () => {
+  assert.equal(DRIVER_IDS.length,22);
   assert.deepEqual(COMMUNITY_DRIVER_IDS,[
     'musicbrainz','pokeapi','openligadb','jolpica','opendota',
   ]);
