@@ -14,12 +14,13 @@ import { sqliteAdvancedSearch } from '../modules/search/sqlite-advanced.js';
 import providerRoutes from '../modules/providers/routes.js';
 import { getProviderFetchHealth } from '../modules/providers/health.js';
 
-test('88 API inventory has 17 implemented, separately enabled drivers', () => {
+test('88 API inventory has 22 implemented, separately enabled drivers', () => {
   assert.equal(PROVIDER_CATALOG.length, 88);
   assert.equal(new Set(PROVIDER_CATALOG.map((x) => x.id)).size, 88);
   assert.deepEqual(DRIVER_IDS, ['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',
     'omdb','kitsu','rickmorty','freetogame','swapi','scryfall',
-    'musicbrainz','pokeapi','openligadb','jolpica','opendota']);
+    'musicbrainz','pokeapi','openligadb','jolpica','opendota',
+    'deezer','radiobrowser','hackernews','openf1','nhl']);
   assert.ok(PROVIDER_CATALOG.some((x) => x.id === 'spotify' && !x.driverImplemented));
   assert.equal(providerReadiness('not-a-provider'), null);
   assert.throws(() => buildProviderRequest('spotify', { q: 'music' }), /No verified fetch driver/);
@@ -30,7 +31,7 @@ test('88 API inventory has 17 implemented, separately enabled drivers', () => {
   assert.equal(request.url.searchParams.get('q'), 'naruto');
 });
 
-test('17 provider JSON mappers are explicit, bounded, media metadata only', async () => {
+test('22 provider JSON mappers are explicit, bounded, media metadata only', async () => {
   const originalKey = process.env.TMDB_API_KEY;
   process.env.TMDB_API_KEY = 'unit-test-key-no-network';
   const priorOmdbKey = process.env.OMDB_API_KEY;
@@ -92,6 +93,23 @@ test('17 provider JSON mappers are explicit, bounded, media metadata only', asyn
     }] } } },
     opendota: [{ match_id: 567890123, start_time: 1790000000,
       radiant_name: 'Team One', dire_name: 'Team Two', league_name: 'Synthetic League' }],
+    deezer: { data: [{ id: 2201, title: 'Synthetic Deezer Track',
+      artist: { name: 'Sample Artist' }, album: { title: 'Sample Album', cover_medium: 'https://example.org/cover.jpg' },
+      link: 'https://www.deezer.com/track/2201' }] },
+    radiobrowser: [{ stationuuid: 'uuid-radio-01', name: 'Synthetic Radio Station',
+      tags: 'jazz,pop', country: 'Romania',
+      homepage: 'https://radio.example.org/', favicon: 'https://radio.example.org/logo.png' }],
+    hackernews: { hits: [{ objectID: '56789', title: 'Synthetic Hacker News Story',
+      created_at: '2026-10-20T12:00:00Z', author: 'devexample',
+      url: 'https://example.org/story' }] },
+    openf1: [{ meeting_key: 1968, meeting_name: 'Synthetic Grand Prix',
+      year: 2026, date_start: '2026-10-20T08:00:00Z',
+      circuit_short_name: 'Test Circuit', location: 'Somewhere' }],
+    nhl: { gameWeek: [{ date: '2026-10-20', games: [{
+      id: 2026021234, startTimeUTC: '2026-10-20T22:00:00Z',
+      season: 20262027, awayTeam: { commonName: { default: 'Away Team' } },
+      homeTeam: { commonName: { default: 'Home Team' } },
+    }] }] },
   };
   try {
     for (const id of DRIVER_IDS) {
@@ -103,7 +121,7 @@ test('17 provider JSON mappers are explicit, bounded, media metadata only', asyn
         });
       };
       const result = await fetchProviderMetadata(id,
-        { q: ['freetogame','pokeapi','openligadb','jolpica','opendota'].includes(id) ? '' : 'synthetic', page: 1 }, mock);
+        { q: ['freetogame','pokeapi','openligadb','jolpica','opendota','openf1','nhl'].includes(id) ? '' : 'synthetic', page: 1 }, mock);
       assert.equal(captured.length, 1);
       assert.equal(captured[0].options.redirect, 'error');
       assert.equal(new URL(captured[0].url).protocol, 'https:');
