@@ -14,6 +14,7 @@ import {
   distributedSearch,
 } from '../modules/search/opensearch.js';
 import metadataRouter from '../modules/search/metadata.js';
+import adminOpenSearchRoutes from '../modules/search/opensearch-routes.js';
 
 const vars=['ANIMAXIA_OPENSEARCH_URL','ANIMAXIA_OPENSEARCH_INDEX',
   'ANIMAXIA_SEARCH_BACKEND','ANIMAXIA_OPENSEARCH_API_KEY','NODE_ENV'];
@@ -139,9 +140,37 @@ test('SQLite outbox tracks insert, update, delete and remote bulk partial failur
     assert.deepEqual(follow.body.search_after,[3,120]);
     assert.equal(search.total,2);
     const app=express();
+    app.use(express.json());
+    app.use('/api/search',adminOpenSearchRoutes);
     app.use('/api/search',metadataRouter);
     server=app.listen(0,'127.0.0.1');
     await new Promise((resolve)=>server.listening?resolve():server.once('listening',resolve));
+
+    // An unprivileged caller must never seed/export the search index.
+    const localBase='http://127.0.0.1:'+server.address().port;
+    const unauthorized=await fetch(localBase+'/api/search/opensearch/status');
+    assert.equal(unauthorized.status,401);
+    // Public metadata route deliberately switches only with explicit config.
+    const originalFetch=globalThis.fetch;
+    globalThis.fetch=(url,options)=>{
+      if(String(url).startsWith('https://search.example.test/')){
+        return fakeSearch(String(url),options);
+      }
+      return originalFetch(url,options);
+    };
+    try{
+      process.env.ANIMAXIA_SEARCH_BACKEND='opensearch';
+      const httpResult=await originalFetch(
+        localBase+'/api/search/metadata?q=Adventure&category=filme&limit=1');
+      assert.equal(httpResult.status,200);
+      const page=await httpResult.json();
+      assert.equal(page.searchMode,'opensearch');
+      assert.equal(page.data[0].type,'movie');
+      assert.ok(page.nextCursor);
+    }finally{
+      globalThis.fetch=originalFetch;
+      process.env.ANIMAXIA_SEARCH_BACKEND='sqlite';
+    }
 
     let failures=0;
     const partial=async(url,options)=>{
