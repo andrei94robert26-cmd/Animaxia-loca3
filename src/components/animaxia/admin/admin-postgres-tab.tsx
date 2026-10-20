@@ -29,6 +29,13 @@ type PreviewPage={
   engine:string;shadow:boolean;sourceOfTruth:string;authoritative:boolean;
   data:PreviewItem[];hasMore:boolean;nextCursor:string|null;
 };
+type DistributedStatus={
+  configured:boolean;distributed?:boolean;bridgeActive?:boolean;
+  workerEnabled?:boolean;pending?:number;retrying?:number;
+  maxAttempts?:number;localPending?:number;
+};
+type DistributedStage={staged:number;failed:number;stale:number;pendingLocal:number};
+type DistributedProcess={processed:number;failed:number};
 type ShadowAudit={
   scanned:number;matched:number;missing:number;mismatched:number;
   repairCandidates:number;repairQueued:number;alreadyPendingOrMissing:number;
@@ -53,6 +60,8 @@ export function AdminPostgresTab(){
   const [auditCursor,setAuditCursor]=useState('0');
   const [audit,setAudit]=useState<ShadowAudit|null>(null);
   const [auditBusy,setAuditBusy]=useState(false);
+  const [distributed,setDistributed]=useState<DistributedStatus|null>(null);
+  const [distributedBusy,setDistributedBusy]=useState(false);
 
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
@@ -136,6 +145,38 @@ export function AdminPostgresTab(){
       if(!dryRun)await refresh();
     }catch(err){toast.error(err instanceof Error?err.message:'Verificarea PG a eșuat');}
     finally{setAuditBusy(false);}
+  }
+
+  async function refreshDistributed(){
+    setDistributedBusy(true);
+    try{
+      setDistributed(await authRequest<DistributedStatus>(
+        endpoint('/api/migration/postgres/distributed/status')));
+    }catch(err){toast.error(err instanceof Error?err.message:'Coada PostgreSQL nu poate fi interogată');}
+    finally{setDistributedBusy(false);}
+  }
+  async function distributedAction(operation:'setup'|'stage'|'process'){
+    if(operation==='setup'&&!window.confirm(
+      'Creezi tabelele PostgreSQL pentru joburile distribuite?'
+    ))return;
+    setDistributedBusy(true);
+    try{
+      if(operation==='setup'){
+        await action('/api/migration/postgres/distributed/setup',{});
+        toast.success('Tabelul de joburi PostgreSQL este pregătit');
+      }else if(operation==='stage'){
+        const result=await action<DistributedStage>(
+          '/api/migration/postgres/distributed/stage',{limit:40});
+        toast.success(result.staged+' transferate · '+result.failed+' eșuate');
+      }else{
+        const result=await action<DistributedProcess>(
+          '/api/migration/postgres/distributed/process',{limit:10});
+        toast.success(result.processed+' procesate · '+result.failed+' eșuate');
+      }
+    }catch(err){toast.error(err instanceof Error?err.message:'Operația PostgreSQL a eșuat');}
+    finally{setDistributedBusy(false);}
+    await refreshDistributed();
+    await refresh();
   }
 
   async function previewCatalog(next=false){
@@ -321,6 +362,43 @@ export function AdminPostgresTab(){
             Repararea introduce joburi în coada SQLite și nu rescrie
             direct PostgreSQL. Nu verifică documentele orfane existente
             numai în PostgreSQL; nu există snapshot distribuit consistent.
+          </p>
+        </CardContent>
+      </Card>
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Joburi PostgreSQL — workeri concurenți</CardTitle>
+          <CardDescription>
+            Coada PostgreSQL este opțională. Un singur feeder copiază
+            joburi SQLite către PostgreSQL; workerii procesați separat
+            folosesc blocări tranzacționale și nu necesită SQLite.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {distributed&&<p role="status" className="text-zinc-300">
+            Coada: {distributed.configured?'Configurată':'Neconfigurată'}
+            {' · '}În așteptare PG: {distributed.pending??'—'}
+            {' · '}Cu retry: {distributed.retrying??'—'}
+            {' · '}Rămase SQLite: {distributed.localPending??'—'}
+            {' · '}Feeder: {distributed.bridgeActive?'Activ':'Oprit'}
+            {' · '}Worker pe acest server: {distributed.workerEnabled?'Configurat':'Dezactivat'}
+          </p>}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={distributedBusy||!status?.configured}
+              onClick={()=>void refreshDistributed()}>
+              {distributedBusy?'Se verifică…':'Starea cozii'}
+            </Button>
+            <Button variant="outline" disabled={distributedBusy||!status?.configured}
+              onClick={()=>void distributedAction('setup')}>Creează coada PG</Button>
+            <Button variant="outline" disabled={distributedBusy||!status?.configured}
+              onClick={()=>void distributedAction('stage')}>Transferă 40 de joburi</Button>
+            <Button variant="outline" disabled={distributedBusy||!status?.configured}
+              onClick={()=>void distributedAction('process')}>Procesează 10 joburi</Button>
+          </div>
+          <p className="text-xs text-zinc-400">
+            Activarea feederului sau a workerelor pe alte servere necesită
+            configurarea variabilelor de mediu. Nu activa simultan workerul
+            PostgreSQL vechi și noul feeder. Biblioteca publică rămâne SQLite.
           </p>
         </CardContent>
       </Card>
