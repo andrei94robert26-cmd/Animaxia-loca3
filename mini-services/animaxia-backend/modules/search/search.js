@@ -987,7 +987,7 @@ router.get('/status', wrap(async (req, res) => {
   // FAZA 13 (Task 13-3): additive cluster health field — null when the
   // cluster is disabled or its health probe fails (legacy shape untouched).
   let clusterHealth = null;
-  if (searchCluster.enabled()) {
+  if (driverInfo().driver !== 'sqlite' && searchCluster.enabled()) {
     try {
       clusterHealth = await searchCluster.health();
     } catch (err) {
