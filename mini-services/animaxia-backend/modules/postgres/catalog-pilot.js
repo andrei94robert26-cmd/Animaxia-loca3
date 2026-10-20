@@ -234,15 +234,24 @@ export async function listPgCatalogPilot(params={},options={}){
     nextAfterId:result.rows.length>limit?data.at(-1)?.id:null};
 }
 export async function pgCatalogPilotStatus(options={}){
-  if(!pgCatalogPilotEnabled())return {enabled:false,publicCatalogUnchanged:true};
-  const result=await runner(options).query(`
-    SELECT
-      (SELECT COUNT(*)::text FROM animaxia_pilot_catalog) AS documents,
-      (SELECT COUNT(*)::text FROM animaxia_pilot_events) AS events
-  `);
-  return {enabled:true,mode:'postgresql-isolated-pilot',
-    publicCatalogUnchanged:true,documents:Number(result.rows[0].documents),
-    events:Number(result.rows[0].events)};
+  if(!pgCatalogPilotEnabled())return {enabled:false,initialized:false,publicCatalogUnchanged:true};
+  try{
+    const result=await runner(options).query(`
+      SELECT
+        (SELECT COUNT(*)::text FROM animaxia_pilot_catalog) AS documents,
+        (SELECT COUNT(*)::text FROM animaxia_pilot_events) AS events
+    `);
+    return {enabled:true,initialized:true,mode:'postgresql-isolated-pilot',
+      publicCatalogUnchanged:true,documents:Number(result.rows[0].documents),
+      events:Number(result.rows[0].events)};
+  }catch(err){
+    // A brand new installation must allow the administrator to create the
+    // schema. Do not swallow failed authentication/connection or SQL errors.
+    if(err?.code==='42P01')return {enabled:true,initialized:false,
+      mode:'postgresql-isolated-pilot',publicCatalogUnchanged:true,
+      documents:0,events:0};
+    throw err;
+  }
 }
 export async function stopPgCatalogPilot(){
   if(pool){const old=pool;pool=null;await old.end();}
