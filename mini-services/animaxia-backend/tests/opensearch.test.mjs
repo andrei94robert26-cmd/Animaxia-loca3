@@ -51,6 +51,7 @@ test('OpenSearch query DSL is filter-bound and cursor-safe', () => {
     genre:'Fantasy',sort:'title',limit:'10',
   });
   assert.equal(q.body.size,11);
+  assert.equal(q.body.track_total_hits,10000);
   assert.equal(q.body.query.bool.must[0].multi_match.query,'Adventure');
   assert.ok(q.body.query.bool.filter.some((x)=>x.term?.type==='movie'));
   assert.ok(q.body.query.bool.filter.some((x)=>x.term?.year===2026));
