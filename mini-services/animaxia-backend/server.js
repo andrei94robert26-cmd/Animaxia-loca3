@@ -106,6 +106,7 @@ import openSearchRoutes from './modules/search/opensearch-routes.js';
 import { startOpenSearchWorker, stopOpenSearchWorker } from './modules/search/opensearch.js';
 import pgShadowRouter from './modules/postgres/routes.js';
 import { startPgShadowWorker,stopPgShadowWorker } from './modules/postgres/shadow.js';
+import { startDistributedShadow,stopDistributedShadow } from './modules/postgres/distributed-shadow.js';
 import { startMinerAutoSync, stopMinerAutoSync } from './modules/miner/auto-sync.js';
 import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
 import scaleRouter from './modules/platform/scale.js';
@@ -764,6 +765,7 @@ async function main() {
     ['provider-auto-sync', startProviderAutoSync],
     ['opensearch-outbox', startOpenSearchWorker],
     ['postgres-shadow', startPgShadowWorker],
+    ['postgres-distributed', startDistributedShadow],
   ]) {
     try { start(); }
     catch (err) { logger.warn('[boot] '+name+' disabled: '+err.message); }
@@ -893,6 +895,7 @@ async function main() {
     stopMinerAutoSync();
     stopProviderAutoSync();
     stopOpenSearchWorker();
+    stopDistributedShadow();
     await stopPgShadowWorker();
     server.close(async () => {
       await closeDb();
