@@ -17,6 +17,11 @@ type Status = {
 type Backfill = {scanned: number; nextAfterId: number | null; finished: boolean};
 type Flush = {processed: number; failed: number; pending: number};
 type Comparison = {localCount: number; remoteCount: number; delta: number; pending: number; countAligned: boolean};
+type OrphanReport = {
+  scanned: number; present: number; orphaned: number;
+  repairQueued: number; alreadyPendingOrRestored: number;
+  dryRun: boolean; nextAfterId: number | null; finished: boolean; pending: number;
+};
 type Reconciliation = {
   scanned: number; matched: number; missing: number; mismatched: number;
   repairCandidates: number; repairQueued: number; alreadyPending: number;
@@ -33,6 +38,8 @@ export function AdminOpenSearchTab() {
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const [reconcileCursor,setReconcileCursor] = useState('0');
   const [reconciliation,setReconciliation] = useState<Reconciliation | null>(null);
+  const [orphanCursor,setOrphanCursor] = useState('0');
+  const [orphanReport,setOrphanReport] = useState<OrphanReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refresh=useCallback(async()=>{
     if(!isAdmin)return;
@@ -78,6 +85,28 @@ export function AdminOpenSearchTab() {
       if(!dryRun)await refresh();
     }catch(e){
       toast.error(e instanceof Error?e.message:'Verificarea documentelor a eșuat');
+    }finally{setBusy(false);}
+  }
+
+  async function scanOrphans(dryRun: boolean) {
+    const afterId=Number(orphanCursor);
+    if(!Number.isSafeInteger(afterId)||afterId<0){
+      toast.error('Cursorul trebuie să fie un întreg pozitiv');return;
+    }
+    if(!dryRun&&!window.confirm(
+      'Programezi eliminarea din OpenSearch a documentelor care NU există în catalogul SQLite?'
+    ))return;
+    setBusy(true);
+    try{
+      const report=await post<OrphanReport>('/api/search/opensearch/orphans',{
+        afterId,limit:25,dryRun,
+      });
+      setOrphanReport(report);
+      toast.success(report.scanned+' documente OpenSearch verificate · '+
+        report.orphaned+' orfane · '+report.repairQueued+' programate pentru ștergere');
+      if(!dryRun)await refresh();
+    }catch(e){
+      toast.error(e instanceof Error?e.message:'Verificarea orfanelor a eșuat');
     }finally{setBusy(false);}
   }
 
@@ -219,6 +248,43 @@ export function AdminOpenSearchTab() {
             Verificarea urmărește ID-urile locale. Nu detectează documentele
             orfane care există doar în OpenSearch și nu garantează consistență
             în timpul modificărilor simultane.
+          </p>
+        </CardContent>
+      </Card>
+      <Card className="border-white/10 bg-white/[0.03]">
+        <CardHeader>
+          <CardTitle>Documente orfane în OpenSearch</CardTitle>
+          <CardDescription>
+            Identifică înregistrările din indexul extern care nu mai există
+            în biblioteca SQLite. Doar administratorul poate programa eliminarea lor.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <Label htmlFor="orphan-scan-cursor">Ultimul ID OpenSearch verificat</Label>
+          <Input id="orphan-scan-cursor" value={orphanCursor} inputMode="numeric"
+            onChange={(e)=>{setOrphanCursor(e.target.value);setOrphanReport(null);}} />
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={busy||!status?.configured}
+              onClick={()=>void scanOrphans(true)}>Verifică 25 (fără ștergeri)</Button>
+            <Button variant="destructive" disabled={busy||!status?.configured}
+              onClick={()=>void scanOrphans(false)}>Programează ștergerea orfanelor</Button>
+            <Button variant="outline" disabled={busy||!orphanReport?.nextAfterId}
+              onClick={()=>{
+                setOrphanCursor(String(orphanReport?.nextAfterId));
+                setOrphanReport(null);
+              }}>Următoarea pagină</Button>
+          </div>
+          {orphanReport&&<p className="text-xs text-zinc-300" role="status">
+            Verificate: {orphanReport.scanned}
+            {' · '}Există în SQLite: {orphanReport.present}
+            {' · '}Orfane: {orphanReport.orphaned}
+            {' · '}Ștergeri în coadă: {orphanReport.repairQueued}
+            {' · '}Deja programate: {orphanReport.alreadyPendingOrRestored}
+            {' · '}{orphanReport.finished?'Final':'Mai există pagini'}
+          </p>}
+          <p className="text-xs text-zinc-400">
+            Ștergerea este asincronă, prin outbox. Se verifică doar documentele
+            cu ID numeric valid; nu există încă un snapshot distribuit consistent.
           </p>
         </CardContent>
       </Card>
