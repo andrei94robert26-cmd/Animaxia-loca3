@@ -49,6 +49,9 @@ export function allowedMetadataServiceSource(source, req = {}) {
     if (req.metadataIngestService) return req.metadataIngestSourceScope === id;
     return true; // authenticated admin
   }
+  // In production every addon must be explicitly installed in the registry.
+  // Older environment-allowlisted addon pushes remain usable only in dev.
+  if (process.env.NODE_ENV === 'production' && source.type === 'addon') return false;
   if (!req.metadataIngestService) return true; // manual admin imports
   if (req.metadataIngestSourceScope !== 'legacy-env') return false;
   const allowed = (process.env.ANIMAXIA_INGEST_ALLOWED_SOURCES || '')
