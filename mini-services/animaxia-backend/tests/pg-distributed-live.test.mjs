@@ -66,6 +66,32 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
     let tasks=await db.query('SELECT contentid FROM animaxia_shadow_tasks');
     assert.equal(tasks.rowCount,0);
 
+    // A job claimed by a different transaction is SKIPPED, not duplicated.
+    // Rolling back a crashed claimant makes it available again.
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-3',
+      title:'Locked task recovery '+nonce,type:'tv',
+      metadata:{actors:['Recovery CI']},
+    });
+    assert.ok((await stageDistributedShadow({limit:10})).staged>=1);
+    const lockClient=await db.connect();
+    try{
+      await lockClient.query('BEGIN');
+      const hold=await lockClient.query(
+        'SELECT contentid FROM animaxia_shadow_tasks WHERE contentid=$1 FOR UPDATE',
+        [records[3]]);
+      assert.equal(hold.rowCount,1);
+      const skipping=await workDistributedShadow({limit:1});
+      assert.equal(skipping.processed,0,'A locked task must not be claimed twice');
+      assert.equal(skipping.failed,0);
+      await lockClient.query('ROLLBACK'); // simulate crash before commit
+    }finally{lockClient.release();}
+    const recovery=await workDistributedShadow({limit:1});
+    assert.equal(recovery.processed,1,'Rolled-back task should be claimable again');
+    assert.equal((await db.query(
+      'SELECT title FROM animaxia_shadow_content WHERE id=$1',[records[3]]
+    )).rows[0].title,'Locked task recovery '+nonce);
+
     // PostgreSQL transactional claim failure must preserve the task and
     // assign backoff atomically; no competing worker acknowledges it.
     const poison=records[0];
