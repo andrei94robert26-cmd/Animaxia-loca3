@@ -92,3 +92,24 @@ export function retryChange(change){
     'WHERE contentid=? AND version=?'
   ).run(delay,change.contentid,change.version);
 }
+
+/**
+ * Queue specific canonical content records for another indexing attempt.
+ * Existing, newer live-change jobs retain their version and precedence.
+ * IDs are always selected from Content, so a deleted row cannot be
+ * accidentally resurrected by a reconciliation operation.
+ */
+export function queueContentReindex(ids) {
+  ensureOpenSearchOutbox();
+  if(!Array.isArray(ids)||ids.length>50||ids.some(
+    (id)=>!Number.isSafeInteger(id)||id<=0
+  ))throw Object.assign(new Error('Invalid reconciliation IDs'),{status:400});
+  const statement=localDb.prepare(
+    "INSERT INTO search_index_outbox(contentid,operation,version) "+
+    "SELECT id,'index',1 FROM Content WHERE id=? "+
+    "ON CONFLICT(contentid) DO NOTHING"
+  );
+  let queued=0;
+  for(const id of new Set(ids))queued+=statement.run(id).changes;
+  return {requested:new Set(ids).size,queued,alreadyPending:new Set(ids).size-queued};
+}
