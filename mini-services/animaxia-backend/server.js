@@ -106,6 +106,7 @@ import openSearchRoutes from './modules/search/opensearch-routes.js';
 import { startOpenSearchWorker, stopOpenSearchWorker } from './modules/search/opensearch.js';
 import pgShadowRouter from './modules/postgres/routes.js';
 import { startPgShadowWorker,stopPgShadowWorker } from './modules/postgres/shadow.js';
+import {stopPgCatalogPilot} from './modules/postgres/catalog-pilot.js';
 import { startDistributedShadow,stopDistributedShadow } from './modules/postgres/distributed-shadow.js';
 import { startMinerAutoSync, stopMinerAutoSync } from './modules/miner/auto-sync.js';
 import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
@@ -897,6 +898,7 @@ async function main() {
     stopOpenSearchWorker();
     await stopDistributedShadow();
     await stopPgShadowWorker();
+    await stopPgCatalogPilot();
     server.close(async () => {
       await closeDb();
       await closeShardPools(); // FAZA 13 (sharding): dedicated shard branch pools (main pool closed by closeDb)
