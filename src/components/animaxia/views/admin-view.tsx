@@ -83,6 +83,7 @@ import { AdminAnalyticsTab } from '../admin/admin-analytics-tab';
 import { AdminSecurityTab } from '../admin/admin-security-tab';
 import { AdminWorkersTab } from '../admin/admin-workers-tab';
 import { AdminTenantsTab } from '../admin/admin-tenants-tab'; // FAZA 11 multi-tenant
+import { AdminAddonsTab } from '../admin/admin-addons-tab';
 import { AdminMinerTab } from '../admin/admin-miner-tab'; // FAZA 12 miner ingest + indexing
 import { AdminShardsTab } from '../admin/admin-shards-tab'; // FAZA 13 shard console
 import { AdminPlayerhubTab } from './admin/admin-playerhub-tab'; // FAZA 21 playerhub console
@@ -1309,7 +1310,9 @@ export function AdminView() {
       ? 'tenants'
       : route?.view === 'admin' && route.params[0] === 'ingest'
         ? 'ingest' // FAZA 12: #/admin/ingest deep-links to the miner console
-        : route?.view === 'admin' && route.params[0] === 'shards'
+        : route?.view === 'admin' && route.params[0] === 'addons'
+          ? 'addons'
+          : route?.view === 'admin' && route.params[0] === 'shards'
           ? 'shards' // FAZA 13: #/admin/shards deep-links to the shard console
           : route?.view === 'admin' && route.params[0] === 'playerhub'
             ? 'playerhub' // FAZA 21: #/admin/playerhub deep-links to the playerhub console
@@ -1356,6 +1359,7 @@ export function AdminView() {
           <TabsTrigger value="tenants">
             <Building2 className="h-3.5 w-3.5" aria-hidden /> Tenants
           </TabsTrigger>
+          <TabsTrigger value="addons">Addonuri</TabsTrigger>
           <TabsTrigger value="ingest">
             <DatabaseZap className="h-3.5 w-3.5" aria-hidden /> Ingest
           </TabsTrigger>
@@ -1397,6 +1401,9 @@ export function AdminView() {
         </TabsContent>
         <TabsContent value="tenants">
           <AdminTenantsTab />
+        </TabsContent>
+        <TabsContent value="addons">
+          <AdminAddonsTab />
         </TabsContent>
         <TabsContent value="ingest">
           <AdminMinerTab />
