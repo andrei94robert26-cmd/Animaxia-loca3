@@ -1,4 +1,5 @@
 import { localDb } from './modules/local/sqlite.js';
+import { ensureContentFts } from './modules/search/content-fts.js';
 import { shardMap, shardBranchName } from './modules/sharding/model.js';
 import { logger } from './utils/logger.js';
 
@@ -161,6 +162,10 @@ export async function initDb() {
         ifnull(embedcode, '')
       ) WHERE externalid IS NULL;
   `);
+
+  // Build the native full-text index only on first installation; all later
+  // INSERT/UPDATE/DELETE mutations stay synchronized through SQLite triggers.
+  ensureContentFts();
 
   // Auth must not depend on optional AI/tenant migrations completing.
   // Fresh SQLite installs can lack vectorembeddings, which used to abort the
