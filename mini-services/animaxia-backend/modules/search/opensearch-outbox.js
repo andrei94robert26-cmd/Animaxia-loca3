@@ -113,3 +113,25 @@ export function queueContentReindex(ids) {
   for(const id of new Set(ids))queued+=statement.run(id).changes;
   return {requested:new Set(ids).size,queued,alreadyPending:new Set(ids).size-queued};
 }
+
+/**
+ * Safely queue remote-only numeric content IDs for eventual deletion.
+ * The SELECT NOT EXISTS Content check executes inside SQLite; if canonical
+ * content is reinserted, the existing insert trigger switches this to index.
+ * Existing outbox rows are NEVER replaced by a reconciliation request.
+ */
+export function queueRemoteOrphanDeletes(ids) {
+  ensureOpenSearchOutbox();
+  if(!Array.isArray(ids)||ids.length>50||ids.some(
+    (id)=>!Number.isSafeInteger(id)||id<=0
+  ))throw Object.assign(new Error('Invalid remote-orphan IDs'),{status:400});
+  const distinct=[...new Set(ids)];
+  const statement=localDb.prepare(
+    "INSERT INTO search_index_outbox(contentid,operation,version) "+
+    "SELECT ?,'delete',1 WHERE NOT EXISTS (SELECT 1 FROM Content WHERE id=?) "+
+    "ON CONFLICT(contentid) DO NOTHING"
+  );
+  let queued=0;
+  for(const id of distinct)queued+=statement.run(id,id).changes;
+  return {requested:distinct.length,queued,skipped:distinct.length-queued};
+}
