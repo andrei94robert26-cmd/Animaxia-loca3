@@ -10,6 +10,7 @@ import pg from 'pg';
 import { initDb,upsertContent,deleteContent,countContent } from '../db.js';
 import { localDb } from '../modules/local/sqlite.js';
 import { pgShadowOutboxStatus,seedPgShadowOutbox } from '../modules/postgres/shadow-outbox.js';
+import { readPgShadowCatalog } from '../modules/postgres/shadow-read.js';
 import {
   setupPgShadow,flushPgShadow,comparePgShadow,stopPgShadowWorker,
 } from '../modules/postgres/shadow.js';
@@ -65,6 +66,52 @@ test('live PostgreSQL 16 shadow: schema, backfill, update, delete and JSONB proj
     assert.equal(aligned.remoteCount,aligned.localCount);
     assert.equal(aligned.pending,0);
     assert.equal(aligned.countsAligned,true);
+
+    // LIVE PostgreSQL 16 read path, with GIN FTS, JSONB filters and keysets.
+    const paged=[];const lookupExternalIds=[];
+    try{
+      for(let i=0;i<3;i++){
+        const item=await upsertContent({
+          externalid:'pg-read-'+nonce+'-'+i,
+          title:'CanaryStageSixteen '+nonce+' test '+i,
+          type:i===2?'tv':'movie',
+          metadata:{year:2026,overview:'A catalog migration search test',
+            actors:i<2?['Admin QA Actor']:['Other'],
+            genres:['Adventure'],studios:['Stage16 Studio'],
+            franchise:'Migration Franchise',rating:8},
+        });
+        lookupExternalIds.push(item.record.id);
+      }
+      const queued=await flushPgShadow({limit:40});
+      assert.equal(queued.failed,0);
+      const first=await readPgShadowCatalog({
+        q:'CanaryStageSixteen',category:'filme',year:'2026',
+        actor:'QA Actor',genre:'Adventure',studio:'Stage16',limit:1,
+      });
+      assert.equal(first.data.length,1);
+      assert.equal(first.hasMore,true);
+      assert.ok(first.nextCursor);
+      assert.equal(first.data[0].type,'movie');
+      assert.equal(first.data[0].metadata.franchise,'Migration Franchise');
+      const second=await readPgShadowCatalog({
+        q:'CanaryStageSixteen',category:'filme',year:'2026',
+        actor:'QA Actor',genre:'Adventure',studio:'Stage16',limit:1,
+        cursor:first.nextCursor,
+      });
+      assert.equal(second.data.length,1);
+      assert.equal(second.hasMore,false);
+      assert.ok(first.data[0].id>second.data[0].id);
+      assert.ok(!second.data.some((v)=>v.type==='tv'));
+      await assert.rejects(readPgShadowCatalog({
+        q:'Different',category:'filme',year:'2026',
+        actor:'QA Actor',genre:'Adventure',studio:'Stage16',
+        cursor:first.nextCursor,
+      }),/cursor/);
+    }finally{
+      for(const recId of lookupExternalIds)await deleteContent(recId);
+      const clean=await flushPgShadow({limit:100});
+      assert.equal(clean.failed,0);
+    }
 
     await upsertContent({
       externalid:'pg-live-'+nonce,title:'PG live movie UPDATED '+nonce,
