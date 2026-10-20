@@ -97,6 +97,7 @@ import { franchiseRouter, trilogyRouter } from './modules/discover/collections.j
 /* FAZA 16 (Task 16-a): global source dedup registry (contentsources) +
  * real scale report (live measurements, honest verdicts). */
 import ingestRouter from './modules/ingest/dedup.js';
+import metadataIngestRouter from './modules/ingest/metadata.js';
 import scaleRouter from './modules/platform/scale.js';
 
 /* FAZA 17-a (Task 17-a): resilience core (per-request timeout, load shedding,
@@ -344,6 +345,7 @@ app.use('/api/trilogies', cacheMiddleware(), trilogyRouter);
 // FAZA 16 (Task 16-a): /api/ingest MUST precede the content routes below;
 // /api/scale is independent (additive mount).
 app.use('/api/ingest', ingestRouter);
+app.use('/api/ingest', metadataIngestRouter);
 app.use('/api/scale', scaleRouter);
 
 // FAZA 13 (Task 13-3): /api/shards — sharding model/schema/pools/cluster
