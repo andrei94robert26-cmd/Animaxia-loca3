@@ -132,13 +132,15 @@ jobs:
           node --check modules/providers/catalog.js
           node --check modules/providers/fetch.js
           node --check modules/providers/routes.js
+          node --check modules/providers/extra-fetch.js
+          node --check modules/providers/auto-sync.js
           node --check modules/ingest/queue.js
           node --check modules/ingest/source-registry.js
           node --check modules/ingest/source-routes.js
           node --check modules/ingest/service-auth.js
           node --check modules/miner/auto-sync.js
           node --check db.js
-          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs tests/miner-auto-sync.test.mjs tests/source-registry.test.mjs tests/content-fts.test.mjs tests/provider-catalog.test.mjs
+          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs tests/miner-auto-sync.test.mjs tests/source-registry.test.mjs tests/content-fts.test.mjs tests/provider-catalog.test.mjs tests/provider-auto-sync.test.mjs
 
   integration:
     name: Final Integration
