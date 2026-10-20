@@ -5,6 +5,7 @@
  */
 import crypto from 'node:crypto';
 import { getProviderDefinition } from './catalog.js';
+import { EXTRA_DRIVER_IDS, buildExtraProviderRequest, mapExtraProviderItems } from './extra-fetch.js';
 
 const isoYear = (v) => {
   const m = /^([12]\d{3})/.exec(String(v || ''));
@@ -66,6 +67,10 @@ export function buildProviderRequest(providerId, { q = '', page = 1 } = {}) {
         { query, mode: 'artlist', format: 'json', maxrecords: 25 });
       break;
     default:
+      if (EXTRA_DRIVER_IDS.includes(providerId)) {
+        url = buildExtraProviderRequest(providerId, query, pageNo);
+        break;
+      }
       throw Object.assign(new Error('No verified fetch driver is installed for this provider'), { status: 501 });
   }
   return { url, page: pageNo, query };
@@ -125,7 +130,8 @@ export function mapProviderItems(id, json) {
           thumbnail: x?.socialimage,
         }));
       break;
-    default: return [];
+    default:
+      return EXTRA_DRIVER_IDS.includes(id) ? mapExtraProviderItems(id, json) : [];
   }
   return mapped.slice(0, 25).filter((x) => x.id && x.id !== 'undefined' &&
     x.id !== 'null' && x.title && x.category);
