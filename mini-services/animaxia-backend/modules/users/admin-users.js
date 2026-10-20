@@ -28,6 +28,11 @@ import { logger } from '../../utils/logger.js';
 
 /** Idempotent: the users.banned flag (default false). Runs on module import. */
 export async function ensureAdminUsersSchema() {
+  const columns = await rows('PRAGMA table_info(users)');
+  if (!columns.some((column) => String(column.name).toLowerCase() === 'banned')) {
+    await rows('ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0');
+  }
+  await rows('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(banned)');
   logger.info('[admin-users] schema verified — users.banned ensured (idempotent)');
 }
 
@@ -40,9 +45,9 @@ function publicAdminUser(row) {
     email: row.email,
     isadmin: row.role === 'admin',
     role: row.role || 'user',
-    emailverified: row.emailverified === true,
-    twofaenabled: row.twofaenabled === true,
-    banned: row.banned === true,
+    emailverified: row.emailverified === true || row.emailverified === 1,
+    twofaenabled: row.twofaenabled === true || row.twofaenabled === 1,
+    banned: row.banned === true || row.banned === 1,
     createdat: isoOrNull(row.createdat),
     lastloginat: isoOrNull(row.lastloginat),
   };
