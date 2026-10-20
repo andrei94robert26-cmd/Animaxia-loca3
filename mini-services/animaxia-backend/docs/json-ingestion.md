@@ -45,6 +45,21 @@ Body example:
 }
 ```
 
+Alternatively, a server-side addon or API integration may use a **scoped service key**:
+
+```http
+X-Animaxia-Ingest-Key: <long random service key>
+Content-Type: application/json
+```
+
+The operator must configure both `ANIMAXIA_INGEST_SERVICE_KEY` (at least
+32 random characters) and `ANIMAXIA_INGEST_ALLOWED_SOURCES` (comma-separated
+identities, e.g. `addon:torentino,api:tmdb,hub:internal`). A key is rejected
+without an exact source allowlist match. The key is accepted **only** by
+`/api/ingest/metadata`; it does not grant administrator access to other
+routes. Rotate it if leaked. The key does not install or verify an addon by
+itself; source registration remains an operator configuration task.
+
 An authenticated admin client can use:
 
 ```bash
@@ -101,9 +116,9 @@ GET /api/search/filters
 
 - SQLite is single-node, lacks multi-tenant isolation for a global library,
   and is **not tested for one billion titles**.
-- Imports require an administrator; addon programs should use a tightly
-  scoped service credential rather than sharing an admin user's token.
-  A dedicated service token/scope layer is still **not implemented**.
+- Imports require either a verified administrator bearer token or a
+  configured scoped metadata-ingestion service key. Enable and rotate service
+  keys in the secret manager; do not embed them in browser JavaScript.
 - There is no automatic upstream synchronization, scheduling, provider
   availability tracking or durable job queue for this route.
 - Provider copyright/licensing and playback authorization must be checked
