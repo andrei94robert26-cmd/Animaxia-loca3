@@ -198,10 +198,10 @@ registerShardingCollectors({
  * wildcard (`|| true`). No Origin header (curl / same-origin) is always OK. */
 const CORS_ALLOWLIST = [
   ...(process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean),
-  'http://localhost:81',
-  'http://localhost:3000',
+  ...(process.env.NODE_ENV !== 'production'
+    ? ['http://localhost:81', 'http://localhost:3000'] : []),
 ];
-const CORS_MIRROR = process.env.CORSMODE === 'mirror';
+const CORS_MIRROR = process.env.NODE_ENV !== 'production' && process.env.CORSMODE === 'mirror';
 app.use(
   cors({
     origin: (origin, cb) => {
