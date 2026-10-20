@@ -5,6 +5,7 @@
  */
 import express from 'express';
 import { rows, one } from '../platform/sql.js';
+import { normalizedType } from './sqlite-advanced.js';
 
 const router = express.Router();
 const scalarFields = Object.freeze({
@@ -46,7 +47,7 @@ router.get('/metadata', async (req, res, next) => {
       params.push(needle, needle, needle);
     }
     const category = safeText(req.query.category || req.query.type);
-    if (category) add('c.type = ? COLLATE NOCASE', category);
+    if (category) add('c.type = ? COLLATE NOCASE', normalizedType(category));
     const year = req.query.year == null ? '' : String(req.query.year);
     if (year) {
       if (!/^[0-9]{4}$/.test(year)) return res.status(400).json({ error: 'Invalid year' });
