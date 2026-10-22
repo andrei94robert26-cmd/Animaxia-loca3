@@ -144,6 +144,8 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
     });
     const failure=await flushPgPilotProjection({limit:5});
     assert.equal(failure.failed,1);
+    assert.equal(failure.updated,0,'Failed transactions are not successful updates');
+    assert.equal(failure.deleted,0,'Failed transactions are not committed deletes');
     const retry=await pool.query(
       'SELECT projection_attempts,projection_next_run_at>NOW() AS delayed,projection_applied_at FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid DESC LIMIT 1',
       [ids[3]]);
