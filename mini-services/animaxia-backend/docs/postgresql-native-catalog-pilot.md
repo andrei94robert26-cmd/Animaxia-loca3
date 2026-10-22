@@ -193,6 +193,61 @@ reconstruirea registrului din jurnal și rollbackul la o eroare a
 jurnalizării. Niciuna dintre aceste operații nu schimbă sursa SQLite
 a catalogului public.
 
+### Etapa 24 — reîncercări idempotente pentru scrieri pilot
+
+API-ul PostgreSQL nativ acceptă opțional un `idempotencyKey`
+alfanumeric (8–128 caractere, cu `.`, `_`, `:` și `-`). Este util
+când clientul nu știe dacă o cerere s-a terminat cu succes după un timeout.
+
+La `POST /api/migration/postgres/pilot/items` adaugă în JSON:
+
+```json
+{
+  "externalid": "api:example:movie:123",
+  "title": "Film demonstrativ",
+  "type": "movie",
+  "expectedRevision": 0,
+  "idempotencyKey": "pilot-client:request:20261022:123"
+}
+```
+
+La ștergere:
+
+```http
+DELETE /api/migration/postgres/pilot/items/api%3Aexample%3Amovie%3A123?expectedRevision=3&idempotencyKey=pilot-client%3Adelete%3A123456
+Authorization: Bearer <admin-token>
+```
+
+**Comportament implementat:**
+
+- prima cerere obține un răspuns și salvează într-o tranzacție atât
+  schimbarea catalogului, cât și evenimentul și o chitanță de idempotență
+  în `animaxia_pilot_request_receipts`;
+- reluarea cererii identice cu aceeași cheie returnează **același rezultat
+  salvat** fără a aloca revizie nouă sau eveniment suplimentar;
+- două cereri concurente cu aceeași cheie sunt serializate prin blocare
+  consultativă PostgreSQL până când prima tranzacție finalizează;
+- aceeași cheie folosită cu un payload, `expectedRevision`, titlu
+  sau tip de operație diferit primește **409 Conflict**;
+- dacă tranzacția eșuează, chitanța nu se salvează, iar aceeași cheie
+  poate fi încercată din nou.
+
+Cheia este opțională pentru compatibilitate. O intenție nouă de
+modificare trebuie să folosească **o cheie nouă**. Nu pune secrete sau
+date private în chei și păstrează aceeași cheie numai pentru
+**reîncercarea aceleiași operații**. Răspunsul retransmis descrie
+rezultatul primei cereri, nu garantează că documentul nu a fost
+modificat ulterior de alt administrator.
+
+Chitanțele persistă până la o politică de retenție separată,
+care trebuie să prevină acceptarea periculoasă a cererilor istorice.
+Această protecție este limitată la **catalogul pilot PostgreSQL**,
+nu la uploaduri, biblioteca publică SQLite sau servicii distribuite.
+
+Testele reale PostgreSQL 16 acoperă cereri concurente duplicate,
+replay de actualizare și ștergere, utilizarea greșită a aceleiași
+chei și rollbackul la un eșec de jurnalizare.
+
 ### Citește catalogul pilot
 
 ```http
