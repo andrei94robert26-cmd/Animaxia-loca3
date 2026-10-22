@@ -11,6 +11,7 @@
 import pg from 'pg';
 import { pgWorkerConfig } from './distributed-pg-worker.js';
 import { pgCatalogPilotEnabled, setupPgCatalogPilot } from './catalog-pilot.js';
+import {lockPgPilotExternalId} from './pilot-lock.js';
 
 const { Pool }=pg;
 let pool=null,working=false,timer=null;
@@ -160,10 +161,7 @@ export async function flushPgPilotProjection({limit=20,db}={}){
           try{
             // Serialize projection of a given external ID across PG workers;
             // take the lock BEFORE reading the current native catalog.
-            await client.query(
-              'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 89241))',
-              [event.externalid]
-            );
+            await lockPgPilotExternalId(client,event.externalid);
             const latest=await client.query(`
               SELECT id::text AS id,externalid,title,type,year,thumbnail,
                 metadata,revision::text AS revision
