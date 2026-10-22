@@ -10,7 +10,8 @@
     "test:providers": "node tests/miner-providers.mjs",
     "test:miner": "npm run test:providers",
     "cli:miner-test": "node cli/miner-test.mjs",
-    "worker:postgres-shadow": "node cli/postgres-shadow-worker.mjs"
+    "worker:postgres-shadow": "node cli/postgres-shadow-worker.mjs",
+    "worker:postgres-pilot-projection": "node cli/postgres-pilot-projection-worker.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
