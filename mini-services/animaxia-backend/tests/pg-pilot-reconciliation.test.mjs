@@ -78,7 +78,8 @@ test('orphan scan accepts only ordered external IDs, queues guarded deletes',asy
     process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL='postgresql://ci:pass@localhost/test';
     let updates=0;
     const db={query:async(sql,args)=>{
-      if(sql.includes('FROM animaxia_pilot_search_projection p')){
+      if(sql.trimStart().startsWith('SELECT') &&
+        sql.includes('FROM animaxia_pilot_search_projection p')){
         assert.deepEqual(args,['pilot:before',3]);
         return {rows:[
           {externalid:'pilot:orphan:1',contentid:'100',nativeid:null},
