@@ -170,6 +170,25 @@ const toPublic=(row)=>{
     category:row.type,year:row.year,thumbnail:row.thumbnail,
     revision:Number(row.revision),metadata:row.metadata};
 };
+/** Indexed lookup of a single pilot record by stable external ID.
+ * Exposed only through the administrator router. No SQLite/media access.
+ */
+export async function getPgCatalogPilotByExternalId(externalid,options={}){
+  if(!pgCatalogPilotEnabled())throw disabled();
+  const key=safeText(externalid,220);
+  if(!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,219}$/.test(key))
+    throw invalid('Invalid stable externalid');
+  const result=await runner(options).query(`
+    SELECT id::text,externalid,title,type,year,thumbnail,metadata,
+      revision::text
+    FROM animaxia_pilot_catalog WHERE externalid=$1 LIMIT 1
+  `,[key]);
+  if(!Array.isArray(result.rows)||result.rows.length>1)
+    throw Object.assign(new Error('Invalid native pilot lookup'),{status:502});
+  return {found:result.rows.length===1,
+    data:result.rows.length?toPublic(result.rows[0]):null,
+    mode:'postgresql-isolated-pilot',publicCatalogUnchanged:true};
+}
 export async function upsertPgCatalogPilot(input,options={}){
   if(!pgCatalogPilotEnabled())throw disabled();
   const d=projection(input);
