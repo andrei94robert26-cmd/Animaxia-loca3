@@ -6,6 +6,7 @@
  */
 import pg from 'pg';
 import {pgWorkerConfig} from './distributed-pg-worker.js';
+import {lockPgPilotExternalId} from './pilot-lock.js';
 
 const {Pool}=pg;
 let pool=null;
@@ -147,6 +148,7 @@ export async function upsertPgCatalogPilot(input,options={}){
   const client=await runner(options).connect();
   try{
     await client.query('BEGIN');
+    await lockPgPilotExternalId(client,d.externalid);
     const write=await client.query(`
       INSERT INTO animaxia_pilot_catalog
         (externalid,title,type,year,thumbnail,metadata)
@@ -177,6 +179,7 @@ export async function deletePgCatalogPilot(externalid,options={}){
   const client=await runner(options).connect();
   try{
     await client.query('BEGIN');
+    await lockPgPilotExternalId(client,id);
     const removed=await client.query(`
       DELETE FROM animaxia_pilot_catalog WHERE externalid=$1
       RETURNING id::text,externalid,revision::text
