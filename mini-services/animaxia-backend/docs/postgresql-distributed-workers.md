@@ -20,7 +20,7 @@ SQLite Content (sursa autoritativă)
 Numai feederul are nevoie de catalogul SQLite. Workerii separați
 importă `pg` și modulul `distributed-pg-worker.js`, nu baza SQLite.
 Tabelul PostgreSQL al joburilor are un singur rând per `contentid`,
-`generation` monoton pentru modificări, `next_run_at`, numărul de
+`generation` pentru modificări și `source_revision` durabil, `next_run_at`, numărul de
 încercări și un payload JSONB limitat la metadate.
 
 Un worker revendică un job prin `SELECT ... FOR UPDATE SKIP LOCKED`
@@ -36,6 +36,53 @@ operații poate repeta publicarea; upsertul PostgreSQL coalescează rândul
 după `contentid`, fără a deschide mai multe joburi separate.
 Dacă între timp SQLite s-a modificat, confirmarea reviziei vechi eșuează,
 iar modificarea nouă va fi expediată ulterior.
+
+## Etapa 18 — ordonarea durabilă a evenimentelor (protecția replay)
+
+Etapa 17 avea o problemă: câmpul `revision` din `pg_shadow_outbox` putea
+reveni la `1` după confirmarea și eliminarea unui job. Un mesaj vechi
+retrimis târziu putea astfel ajunge să înlocuiască o versiune mai recentă.
+
+**Noua garanție implementată în cod:**
+
+1. SQLite păstrează un ceas monoton `pg_shadow_change_clock`, care nu se
+   resetează când un job este confirmat. Trigger-ele `Content` atribuie
+   fiecărei inserări, modificări și ștergeri o revizie nouă. Backfillul și
+   reparațiile administrative primesc la rândul lor revizii noi.
+2. Tabelul PG `animaxia_shadow_tasks` conține acum `source_revision`.
+   O retransmitere actualizează un job aflat în coadă **numai dacă**
+   `EXCLUDED.source_revision` este mai mare decât cea stocată deja.
+3. PostgreSQL păstrează `animaxia_shadow_applied_versions`: ultimul număr
+   aplicat pentru fiecare `contentid`. Registrul supraviețuiește atât
+   confirmării joburilor, cât și ștergerii documentului din copia catalogului.
+   Workerul actualizează registrul, aplică titlul/ștergerea și confirmă jobul
+   **în aceeași tranzacție**. Un replay vechi este confirmat fără a rescrie
+   documentul și fără a reface titlurile șterse.
+4. Schema cozii este extinsă folosind `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+   Instanțele din etapa 17 cu joburi existente primesc revizia inițială `0`.
+   După upgrade trebuie executat un backfill/reconciliere din SQLite, cu
+   feederul vechi oprit, pentru ca registrul PG să reflecte corect datele
+   curente.
+
+**Pași obligatorii la upgrade:** oprește feederul și workerii vechi,
+salvează backupuri SQLite și PG, aplică noul cod, pornește
+`POST /api/migration/postgres/distributed/setup` cu drepturi de
+administrator, parcurge backfillul local și procesează coada nouă. Abia apoi
+reactivează feederul și workerii independenți. Nu rula două versiuni de
+worker în paralel, deoarece versiunea veche ignoră registrul de revizii.
+
+Testele PostgreSQL 16 verifică trei situații suplimentare:
+
+- job vechi retrimis **în timp ce un job mai nou așteaptă** în PG;
+- job vechi retrimis **după ce jobul mai nou a fost aplicat**;
+- încercarea de a recrea un document după **ștergerea mai nouă**.
+
+**Limitări:** această protecție asigură ordinea **în proiecția PG shadow**,
+nu face SQLite multi-writer și nu înlocuiește necesitatea unui design
+autoritativ PostgreSQL, a unui failover testat sau a benchmarkurilor reale
+pentru un miliard de titluri. Registrul de revizii crește odată cu
+numărul ID-urilor; politica de retenție trebuie proiectată separat fără a
+permite resurrectarea versiunilor istorice.
 
 ## Pornire controlată
 
