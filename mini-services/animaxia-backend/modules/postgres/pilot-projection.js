@@ -227,12 +227,12 @@ export async function getPgPilotProjectedItems({q='',limit=20,afterId=0}={},opti
     data,hasMore:result.rows.length>cap,
     nextAfterId:result.rows.length>cap?data.at(-1)?.id:null};
 }
-export function startPgPilotProjection(){
+export function startPgPilotProjection({keepAlive=false}={}){
   if(timer||process.env.ANIMAXIA_PG_PILOT_PROJECTION_WORKER!=='true')return false;
   requireConfig();
   timer=setInterval(()=>flushPgPilotProjection().catch(err=>
     console.warn('[pg-pilot-projection] poll:',err.message)),3000);
-  timer.unref?.();
+  if(!keepAlive)timer.unref?.();
   return true;
 }
 export async function stopPgPilotProjection(){
