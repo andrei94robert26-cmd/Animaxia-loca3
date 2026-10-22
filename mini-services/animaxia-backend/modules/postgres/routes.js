@@ -1,6 +1,7 @@
 /** Administrator-only shadow PostgreSQL migration operations. */
 import express from 'express';
 import { readPgShadowCatalog } from './shadow-read.js';
+import { setupPgPilotProjection,flushPgPilotProjection,pgPilotProjectionStatus,getPgPilotProjectedItems } from './pilot-projection.js';
 import { verifyPgShadow } from './shadow-verify.js';
 import {
   setupPgCatalogPilot,upsertPgCatalogPilot,deletePgCatalogPilot,
@@ -38,6 +39,22 @@ router.post('/distributed/process',limiter,async(req,res,next)=>{
   catch(err){return next(err);}
 });
 // All pilot routes inherit requireAuth+requireAdmin from this router.
+router.get('/pilot/projection/status',limiter,async(_req,res,next)=>{
+  try{return res.json(await pgPilotProjectionStatus());}
+  catch(err){return next(err);}
+});
+router.post('/pilot/projection/setup',limiter,async(_req,res,next)=>{
+  try{return res.json(await setupPgPilotProjection());}
+  catch(err){return next(err);}
+});
+router.post('/pilot/projection/flush',limiter,async(req,res,next)=>{
+  try{return res.json(await flushPgPilotProjection({limit:req.body?.limit??20}));}
+  catch(err){return next(err);}
+});
+router.get('/pilot/projection/items',limiter,async(req,res,next)=>{
+  try{return res.json(await getPgPilotProjectedItems(req.query));}
+  catch(err){return next(err);}
+});
 router.get('/pilot/status',limiter,async(_req,res,next)=>{
   try{return res.json(await pgCatalogPilotStatus());}
   catch(err){return next(err);}
