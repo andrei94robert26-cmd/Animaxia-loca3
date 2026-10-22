@@ -6,9 +6,9 @@ import {spawn} from 'node:child_process';
 import pg from 'pg';
 import {initDb,upsertContent,deleteContent} from '../db.js';
 import {localDb} from '../modules/local/sqlite.js';
-import {setupPgShadow,stopPgShadowWorker} from '../modules/postgres/shadow.js';
+import {setupPgShadow,stopPgShadowWorker,projectPgShadow} from '../modules/postgres/shadow.js';
 import {setupDistributedShadow,stageDistributedShadow,workDistributedShadow,
-  distributedShadowStatus} from '../modules/postgres/distributed-shadow.js';
+  distributedShadowStatus,publishDistributedShadowSnapshot} from '../modules/postgres/distributed-shadow.js';
 
 test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refresh',async(t)=>{
   if(!process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL){
@@ -136,6 +136,86 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
     assert.equal((await db.query(
       'SELECT id FROM animaxia_shadow_content WHERE id=$1',[records[1]]
     )).rowCount,0);
+
+    // REPLAY A: while a newer task is waiting in the PostgreSQL queue,
+    // an older SQLite event must not overwrite that pending snapshot.
+    const candidate=records[4];
+    const savedOlder=projectPgShadow(
+      localDb.prepare('SELECT * FROM Content WHERE id=?').get(candidate)
+    );
+    const applied=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(applied.rowCount,1);
+    const previousRevision=Number(applied.rows[0].revision);
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-4',
+      title:'Newer than replay '+nonce,type:'movie',
+      metadata:{actors:['Recent Revision']},
+    });
+    const updateJob=await stageDistributedShadow({limit:100});
+    assert.ok(updateJob.staged>=1);
+    const queuedNewer=await db.query(
+      'SELECT source_revision::text AS revision,document FROM animaxia_shadow_tasks WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(queuedNewer.rowCount,1);
+    const newerRevision=Number(queuedNewer.rows[0].revision);
+    assert.ok(newerRevision>previousRevision,'SQLite revision must increase after ACK');
+    const staleWhenQueued=await publishDistributedShadowSnapshot(
+      {contentid:candidate,revision:previousRevision},savedOlder,{db}
+    );
+    assert.equal(staleWhenQueued,false,'Stale event must not replace newer PG task');
+    const remains=await db.query(
+      'SELECT source_revision::text AS revision,document FROM animaxia_shadow_tasks WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(Number(remains.rows[0].revision),newerRevision);
+    assert.equal(remains.rows[0].document.title,'Newer than replay '+nonce);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+
+    // REPLAY B: after the newer task was already acknowledged and removed,
+    // an old event may be queued again, but the PG high-water ledger must
+    // discard it without reverting the newer content.
+    assert.equal(await publishDistributedShadowSnapshot(
+      {contentid:candidate,revision:previousRevision},savedOlder,{db}
+    ),true);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    const afterOldReplay=await db.query(
+      'SELECT title FROM animaxia_shadow_content WHERE id=$1',[candidate]
+    );
+    assert.equal(afterOldReplay.rows[0].title,'Newer than replay '+nonce);
+    const appliedAfterReplay=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(Number(appliedAfterReplay.rows[0].revision),newerRevision);
+
+    // REPLAY C: the same ledger must protect tombstones. An old UP SERT
+    // cannot resurrect content already deleted and acknowledged.
+    const tombstoneId=records[5];
+    const beforeDeletion=projectPgShadow(
+      localDb.prepare('SELECT * FROM Content WHERE id=?').get(tombstoneId)
+    );
+    const lastLive=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [tombstoneId]
+    );
+    await deleteContent(tombstoneId);
+    assert.ok((await stageDistributedShadow({limit:40})).staged>=1);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    assert.equal((await db.query(
+      'SELECT id FROM animaxia_shadow_content WHERE id=$1',[tombstoneId]
+    )).rowCount,0);
+    assert.equal(await publishDistributedShadowSnapshot(
+      {contentid:tombstoneId,revision:Number(lastLive.rows[0].revision)},
+      beforeDeletion,{db}
+    ),true);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    assert.equal((await db.query(
+      'SELECT id FROM animaxia_shadow_content WHERE id=$1',[tombstoneId]
+    )).rowCount,0,'Stale UPSERT must not resurrect a PG tombstone');
 
     // A completely separate Node process uses ONLY PostgreSQL and applies
     // queued tasks. No SQLite Content import or shared SQLite volume needed.
