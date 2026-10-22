@@ -157,6 +157,42 @@ respinse.
 Nu schimbă comportamentul scrierilor publice în SQLite și nu dovedește
 scalarea la 1 miliard de titluri.
 
+### Etapa 23 — revizii persistente după ștergere și recreare
+
+Un `expectedRevision` protejează o actualizare numai dacă reviziile
+rămân unice pentru fiecare `externalid`. Până acum, după ștergerea unui
+rând, recrearea lui putea porni din nou la revizia 1 și un editor vechi
+putea confunda cele două incarnări (**problema ABA**).
+
+În schema pilot există acum `animaxia_pilot_revision_ledger`, un registru
+durabil cu `externalid` unic și ultima revizie acordată. Fiecare creare
+sau actualizare rezervă următoarea revizie în **aceeași tranzacție** cu
+salvarea în catalog și evenimentul din jurnal, sub aceeași blocare
+tranzacțională `externalid`.
+
+- `create` → revizia 1, `update` → 2, `delete` → păstrează 2 în registru;
+- `re-create` → revizia **3**, nu 1;
+- o încercare veche de update/delete cu `expectedRevision: 1` sau `2`
+  primește `409 Conflict` și nu scrie niciun eveniment;
+- o ștergere ulterioară și o nouă recreare continuă cu revizia **4**;
+- dacă inserarea evenimentului eșuează, întreaga tranzacție (inclusiv
+  rezervarea reviziei) este anulată.
+
+La `POST /api/migration/postgres/pilot/setup`, registrul este creat
+idempotent și completat din cea mai mare revizie găsită atât în
+`animaxia_pilot_catalog`, cât și în istoricul
+`animaxia_pilot_events`. Acest pas facilitează actualizarea bazelor
+existente. **Nu șterge registrul în producție:** el trebuie păstrat
+chiar dacă un titlu este șters definitiv din catalog. Backfillul
+istoric poate necesita resurse dacă jurnalul de evenimente este mare;
+recomandă o fereastră operațională pentru prima migrare.
+
+`tests/pg-catalog-pilot-live.test.mjs` testează cu PostgreSQL 16 real:
+două cicluri de ștergere/recreare, respingerea reviziilor vechi,
+reconstruirea registrului din jurnal și rollbackul la o eroare a
+jurnalizării. Niciuna dintre aceste operații nu schimbă sursa SQLite
+a catalogului public.
+
 ### Citește catalogul pilot
 
 ```http
