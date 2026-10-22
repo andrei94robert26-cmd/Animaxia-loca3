@@ -165,6 +165,52 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
       ['upsert','1'],['upsert','2'],['delete','2'],
     ]);
 
+    // ABA regression: a re-created external ID must never recycle the
+    // revision of its previous incarnation. Old optimistic editors must
+    // not be allowed to update or delete a fresh incarnation.
+    const reborn=await upsertPgCatalogPilot({
+      ...itemForVersion,expectedRevision:0,title:'Recreated with durable revision',
+    });
+    assert.equal(reborn.data.revision,3);
+    await assert.rejects(
+      upsertPgCatalogPilot({...itemForVersion,expectedRevision:1,
+        title:'Stale editor from old incarnation'}),
+      (err)=>err?.status===409
+    );
+    await assert.rejects(
+      deletePgCatalogPilot(versioned,{expectedRevision:2}),
+      (err)=>err?.status===409
+    );
+    const secondDelete=await deletePgCatalogPilot(versioned,{expectedRevision:3});
+    assert.equal(secondDelete.deleted,true);
+    // Simulate upgrading a Stage-22 database with a missing ledger. Setup
+    // rebuilds the highest previous revision from append-only events.
+    await pool.query(
+      'DELETE FROM animaxia_pilot_revision_ledger WHERE externalid=$1',[versioned]);
+    await setupPgCatalogPilot();
+    const rebuilt=await pool.query(
+      'SELECT revision::text AS revision FROM animaxia_pilot_revision_ledger WHERE externalid=$1',
+      [versioned]
+    );
+    assert.equal(rebuilt.rows[0].revision,'3');
+    const rebornAgain=await upsertPgCatalogPilot({
+      ...itemForVersion,expectedRevision:0,title:'Recreated after migration',
+    });
+    assert.equal(rebornAgain.data.revision,4);
+    await assert.rejects(
+      deletePgCatalogPilot(versioned,{expectedRevision:3}),
+      (err)=>err?.status===409
+    );
+    assert.equal((await deletePgCatalogPilot(versioned,{expectedRevision:4})).deleted,true);
+    const permanentHistory=await pool.query(
+      'SELECT operation,revision::text AS revision FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid',
+      [versioned]
+    );
+    assert.deepEqual(permanentHistory.rows.map(x=>[x.operation,x.revision]),[
+      ['upsert','1'],['upsert','2'],['delete','2'],
+      ['upsert','3'],['delete','3'],['upsert','4'],['delete','4'],
+    ]);
+
     const allEvents=await pool.query(
       'SELECT operation,revision FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid',
       [first]);
@@ -194,6 +240,9 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
     assert.equal((await pool.query(
       'SELECT id FROM animaxia_pilot_catalog WHERE externalid=$1',[blocked]
     )).rowCount,0);
+    assert.equal((await pool.query(
+      'SELECT externalid FROM animaxia_pilot_revision_ledger WHERE externalid=$1',[blocked]
+    )).rowCount,0,'Failed audit event must roll back revision allocation');
 
     const deleted=await deletePgCatalogPilot(first);
     assert.equal(deleted.deleted,true);
@@ -214,6 +263,7 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
       'ALTER TABLE animaxia_pilot_events DROP CONSTRAINT IF EXISTS pilot_ci_block_event');
     await pool.query('DELETE FROM animaxia_pilot_events WHERE externalid LIKE $1',[prefix+'%']);
     await pool.query('DELETE FROM animaxia_pilot_catalog WHERE externalid LIKE $1',[prefix+'%']);
+    await pool.query('DELETE FROM animaxia_pilot_revision_ledger WHERE externalid LIKE $1',[prefix+'%']);
     await stopPgCatalogPilot();
     await pool.end();
     if(old===undefined)delete process.env.ANIMAXIA_PG_CATALOG_PILOT;
