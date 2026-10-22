@@ -104,6 +104,35 @@ interogare periodică la circa 3 secunde. Activarea are loc pe server,
 nu prin API. **Nu o activa pe toate instanțele fără un plan pentru
 conexiuni, observabilitate și capacitate.**
 
+## Worker PostgreSQL dedicat, fără serverul web
+
+Proiectorul poate rula și ca **proces Node.js separat**, fără SQLite
+și fără pornirea aplicației Express. Folosește aceeași bază PostgreSQL
+privată, cu un număr controlat de conexiuni:
+
+```dotenv
+ANIMAXIA_PG_CATALOG_PILOT=true
+ANIMAXIA_PG_PILOT_PROJECTION=true
+ANIMAXIA_PG_PILOT_PROJECTION_WORKER=true
+ANIMAXIA_PG_SHADOW_DATABASE_URL=postgresql://pilot:<secret>@postgres.internal:5432/animaxia
+ANIMAXIA_PG_SHADOW_TLS=true
+```
+
+```bash
+cd mini-services/animaxia-backend
+npm ci
+npm run worker:postgres-pilot-projection
+```
+
+Procesul ascultă `SIGTERM` și `SIGINT`; la oprire închide conexiunile
+PostgreSQL. Evenimentele neconfirmate rămân în tabela durabilă. Pentru
+un cluster cu mai multe instanțe, workerii folosesc
+`FOR UPDATE SKIP LOCKED`, fără partajarea volumului SQLite.
+
+**Nu activa simultan un număr arbitrar de workeri** fără dimensionarea
+conexiunilor, limite de resurse și monitorizare. În etapa 19 nu s-a
+implementat încă niciun orchestrator Kubernetes pentru acești workeri.
+
 ## Validarea pe PostgreSQL 16 real
 
 GitHub Actions rulează acum:
@@ -113,7 +142,8 @@ GitHub Actions rulează acum:
 - `tests/pg-pilot-projection-live.test.mjs`: PostgreSQL 16 efemer,
   creare repetabilă de schemă, evenimente native, workeri concurenți,
   căutare FTS, izolare de date private, rollback, retry atomic,
-  actualizări succesive, ștergere și recreare a unui externalid.
+  actualizări succesive, ștergere și recreare a unui externalid,
+plus rularea unui proces Node separat și oprirea lui prin SIGTERM.
 
 Aceste teste sunt pentru **corectitudinea unui mediu mic**. Nu sunt
 teste de performanță la 1 miliard de titluri, HA regional, redare video
