@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import {
-  pgCatalogPilotEnabled,validatePgPilotItem,pgPilotExpectedRevision,
+  pgCatalogPilotEnabled,validatePgPilotItem,pgPilotExpectedRevision,pgPilotIdempotencyKey,
   buildPgCatalogPilotSearch,listPgCatalogPilot,getPgCatalogPilotByExternalId,pgCatalogPilotStatus,
   upsertPgCatalogPilot,
 } from '../modules/postgres/catalog-pilot.js';
@@ -68,6 +68,16 @@ test('pilot revision preconditions require safe integers and reject stale/unsafe
     externalid:'api:test:versioned',title:'Versioned',type:'movie',
     expectedRevision:'not-a-number',
   }),/expectedRevision/);
+});
+
+test('pilot idempotency keys reject malformed or ambiguous client values',()=>{
+  assert.equal(pgPilotIdempotencyKey(undefined),null);
+  assert.equal(pgPilotIdempotencyKey('pilot:retry:123'), 'pilot:retry:123');
+  assert.equal(pgPilotIdempotencyKey('a1234567'),'a1234567');
+  for(const bad of [null,'',1,{},[],true,'short',' contains whitespace ',
+    'x'.repeat(129),'https://bad/path','\u0000not-valid']){
+    assert.throws(()=>pgPilotIdempotencyKey(bad),/idempotencyKey/);
+  }
 });
 
 test('pilot status accepts missing schema but propagates other PG errors',async()=>{
