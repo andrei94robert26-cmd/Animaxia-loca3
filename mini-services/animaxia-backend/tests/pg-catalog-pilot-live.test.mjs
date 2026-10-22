@@ -107,6 +107,17 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
       externalid:versioned,title:'Create once '+nonce,type:'movie',
       expectedRevision:0,metadata:{genres:['Concurrency']},
     };
+    // A positive revision cannot silently create a new record.
+    const unknown=prefix+'missing-with-revision';
+    await assert.rejects(upsertPgCatalogPilot({
+      ...itemForVersion,externalid:unknown,expectedRevision:7,
+    }),(err)=>err?.status===409);
+    assert.equal((await pool.query(
+      'SELECT id FROM animaxia_pilot_catalog WHERE externalid=$1',[unknown]
+    )).rowCount,0);
+    assert.equal((await pool.query(
+      'SELECT eventid FROM animaxia_pilot_events WHERE externalid=$1',[unknown]
+    )).rowCount,0);
     const createdVersion=await upsertPgCatalogPilot(itemForVersion);
     assert.equal(createdVersion.data.revision,1);
     await assert.rejects(
