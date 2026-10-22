@@ -85,6 +85,13 @@ export async function setupPgPilotProjection(options={}){
     ON animaxia_pilot_events(projection_next_run_at,eventid)
     WHERE projection_applied_at IS NULL
   `);
+  // Repair auditing checks whether this external ID already has an
+  // outstanding native event. Index only the pending subset.
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_animaxia_pilot_projection_pending_external
+    ON animaxia_pilot_events(externalid)
+    WHERE projection_applied_at IS NULL
+  `);
   return {schemaVersion:1,projection:'postgresql-pilot-search',
     sourceOfTruth:'isolated-native-pilot',publicCatalogUnchanged:true};
 }
