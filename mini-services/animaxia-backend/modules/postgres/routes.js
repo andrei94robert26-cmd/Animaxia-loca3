@@ -1,7 +1,7 @@
 /** Administrator-only shadow PostgreSQL migration operations. */
 import express from 'express';
 import { readPgShadowCatalog } from './shadow-read.js';
-import { setupPgPilotProjection,flushPgPilotProjection,pgPilotProjectionStatus,getPgPilotProjectedItems } from './pilot-projection.js';
+import { setupPgPilotProjection,flushPgPilotProjection,pgPilotProjectionStatus,getPgPilotProjectedItems,listPgPilotQuarantine,retryPgPilotQuarantine } from './pilot-projection.js';
 import {reconcilePgPilotProjection} from './pilot-reconciliation.js';
 import { verifyPgShadow } from './shadow-verify.js';
 import {
@@ -50,6 +50,17 @@ router.post('/pilot/projection/reconcile',limiter,async(req,res,next)=>{
       dryRun:req.body?.dryRun??true,
     }));
   }catch(err){return next(err);}
+});
+router.get('/pilot/projection/quarantine',limiter,async(req,res,next)=>{
+  try{return res.json(await listPgPilotQuarantine({
+    afterEventId:req.query.afterEventId??0,
+    limit:req.query.limit??20,
+  }));}
+  catch(err){return next(err);}
+});
+router.post('/pilot/projection/quarantine/:eventid/retry',limiter,async(req,res,next)=>{
+  try{return res.json(await retryPgPilotQuarantine(req.params.eventid));}
+  catch(err){return next(err);}
 });
 router.get('/pilot/projection/status',limiter,async(_req,res,next)=>{
   try{return res.json(await pgPilotProjectionStatus());}
