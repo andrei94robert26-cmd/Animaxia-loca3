@@ -11,7 +11,7 @@ import {
 } from '../modules/postgres/catalog-pilot.js';
 import {
   setupPgPilotProjection,flushPgPilotProjection,pgPilotProjectionStatus,
-  getPgPilotProjectedItems,stopPgPilotProjection,
+  getPgPilotProjectedItems,stopPgPilotProjection,listPgPilotQuarantine,retryPgPilotQuarantine,
 } from '../modules/postgres/pilot-projection.js';
 
 test('PG16 durable event projection: concurrent claims, retries, current state, deletes',async(t)=>{
@@ -19,7 +19,8 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
     t.skip('Requires disposable PostgreSQL 16 CI service');return;
   }
   const prev={pilot:process.env.ANIMAXIA_PG_CATALOG_PILOT,
-    projection:process.env.ANIMAXIA_PG_PILOT_PROJECTION};
+    projection:process.env.ANIMAXIA_PG_PILOT_PROJECTION,
+    attempts:process.env.ANIMAXIA_PG_PILOT_MAX_ATTEMPTS};
   process.env.ANIMAXIA_PG_CATALOG_PILOT='true';
   process.env.ANIMAXIA_PG_PILOT_PROJECTION='true';
   const pool=new pg.Pool({
@@ -43,6 +44,8 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
     else process.env.ANIMAXIA_PG_CATALOG_PILOT=prev.pilot;
     if(prev.projection===undefined)delete process.env.ANIMAXIA_PG_PILOT_PROJECTION;
     else process.env.ANIMAXIA_PG_PILOT_PROJECTION=prev.projection;
+    if(prev.attempts===undefined)delete process.env.ANIMAXIA_PG_PILOT_MAX_ATTEMPTS;
+    else process.env.ANIMAXIA_PG_PILOT_MAX_ATTEMPTS=prev.attempts;
   };
   try{
     assert.equal((await setupPgPilotProjection()).schemaVersion,1);
@@ -143,6 +146,7 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
       externalid:ids[3],title:blockTitle,type:'movie',
       metadata:{description:'Poison task for retry'},
     });
+    process.env.ANIMAXIA_PG_PILOT_MAX_ATTEMPTS='2';
     const failure=await flushPgPilotProjection({limit:5});
     assert.equal(failure.failed,1);
     assert.equal(failure.updated,0,'Failed transactions are not successful updates');
@@ -156,9 +160,32 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
     assert.equal((await pool.query(
       'SELECT externalid FROM animaxia_pilot_search_projection WHERE externalid=$1',
       [ids[3]])).rowCount,0);
+    // Fail a second time at the explicit threshold: job becomes
+    // quarantined and cannot be claimed by normal worker polling.
+    await pool.query(
+      'UPDATE animaxia_pilot_events SET projection_next_run_at=NOW() WHERE externalid=$1',
+      [ids[3]]);
+    const secondFailure=await flushPgPilotProjection({limit:5});
+    assert.equal(secondFailure.failed,1);
+    const statusAtLimit=await pgPilotProjectionStatus();
+    assert.equal(statusAtLimit.quarantined,1);
+    assert.equal(statusAtLimit.pending,0);
+    const lockedOut=await flushPgPilotProjection({limit:5});
+    assert.equal(lockedOut.processed,0);
+    assert.equal(lockedOut.failed,0);
+    const inspect=await listPgPilotQuarantine({limit:10});
+    const quarantined=inspect.data.find(x=>x.externalid===ids[3]);
+    assert.ok(quarantined);
+    assert.equal(quarantined.attempts,2);
+    assert.equal(quarantined.errorCode,'23514'); // CHECK violation only
+    assert.ok(!JSON.stringify(inspect).includes('Poison task for retry'));
     await pool.query(
       'ALTER TABLE animaxia_pilot_search_projection DROP CONSTRAINT pilot_projection_ci_block');
     constraintAdded=false;
+    const manualRetry=await retryPgPilotQuarantine(quarantined.eventid);
+    assert.equal(manualRetry.retried,true);
+    assert.equal((await retryPgPilotQuarantine(quarantined.eventid)).retried,false);
+    assert.equal((await pgPilotProjectionStatus()).quarantined,0);
     await pool.query(
       'UPDATE animaxia_pilot_events SET projection_next_run_at=NOW() WHERE externalid=$1',
       [ids[3]]);
