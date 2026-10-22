@@ -125,6 +125,7 @@ export async function flushPgPilotProjection({limit=20,db}={}){
           }
           const event=claimed.rows[0];
           await client.query('SAVEPOINT project_event');
+          let mutation='none';
           try{
             // Serialize projection of a given external ID across PG workers;
             // take the lock BEFORE reading the current native catalog.
@@ -143,13 +144,13 @@ export async function flushPgPilotProjection({limit=20,db}={}){
                 d.externalid,d.id,d.title,d.type,d.year,d.thumbnail,
                 JSON.stringify(d.metadata),d.revision,
               ]);
-              updated++;
+              mutation='updated';
             }else if(latest.rows.length===0){
               await client.query(
                 'DELETE FROM animaxia_pilot_search_projection WHERE externalid=$1',
                 [event.externalid]
               );
-              deleted++;
+              mutation='deleted';
             }else throw new Error('Invalid native pilot lookup');
             await client.query(`
               UPDATE animaxia_pilot_events SET projection_applied_at=NOW()
@@ -157,6 +158,8 @@ export async function flushPgPilotProjection({limit=20,db}={}){
             `,[event.eventid]);
             await client.query('RELEASE SAVEPOINT project_event');
             await client.query('COMMIT');active=false;processed++;
+            if(mutation==='updated')updated++;
+            if(mutation==='deleted')deleted++;
           }catch(err){
             // Roll back all side effects, but persist a retry delay.
             await client.query('ROLLBACK TO SAVEPOINT project_event');
