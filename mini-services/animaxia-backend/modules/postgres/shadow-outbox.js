@@ -116,7 +116,15 @@ export function seedPgShadowOutbox({afterId=0,limit=500}={}) {
   // SQLite's BEGIN IMMEDIATE / COMMIT ensures a bounded, atomic backfill.
   localDb.exec('BEGIN IMMEDIATE');
   try {
-    for(const row of rows)insert.run(row.id);
+    const advance=localDb.prepare(
+      'UPDATE pg_shadow_change_clock SET revision=revision+1 WHERE singleton=1'
+    );
+    for(const row of rows) {
+      // Rebuild requests must carry a NEW revision even after the last
+      // published task was consumed and no outbox row remains.
+      advance.run();
+      insert.run(row.id);
+    }
     localDb.exec('COMMIT');
   } catch(err) {
     localDb.exec('ROLLBACK');
@@ -144,7 +152,13 @@ export function queuePgShadowRepair(ids) {
   let queued=0;
   localDb.exec('BEGIN IMMEDIATE');
   try{
-    for(const id of distinct)queued+=statement.run(id).changes;
+    const advance=localDb.prepare(
+      'UPDATE pg_shadow_change_clock SET revision=revision+1 WHERE singleton=1'
+    );
+    for(const id of distinct) {
+      advance.run();
+      queued+=statement.run(id).changes;
+    }
     localDb.exec('COMMIT');
   }catch(err){localDb.exec('ROLLBACK');throw err;}
   return {requested:distinct.length,queued,alreadyPendingOrMissing:distinct.length-queued};
