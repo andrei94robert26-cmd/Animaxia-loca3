@@ -19,12 +19,14 @@ const positive=(v,max,name)=>{
   return n;
 };
 const INSERT_TASK=`
-  INSERT INTO animaxia_shadow_tasks(contentid,operation,document)
-  VALUES($1,$2,$3::jsonb)
+  INSERT INTO animaxia_shadow_tasks(contentid,operation,document,source_revision)
+  VALUES($1,$2,$3::jsonb,$4)
   ON CONFLICT(contentid) DO UPDATE SET
     operation=EXCLUDED.operation,document=EXCLUDED.document,
     generation=animaxia_shadow_tasks.generation+1,
+    source_revision=EXCLUDED.source_revision,
     attempts=0,next_run_at=NOW(),updated_at=NOW()
+  WHERE animaxia_shadow_tasks.source_revision < EXCLUDED.source_revision
 `;
 const APPLY_UPSERT=`
   INSERT INTO animaxia_shadow_content(id,externalid,title,type,year,thumbnail,metadata)
@@ -44,11 +46,24 @@ export async function setupDistributedShadow({db}={}){
       operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
       document JSONB,
       generation BIGINT NOT NULL DEFAULT 1,
+      source_revision BIGINT NOT NULL DEFAULT 0,
       attempts INTEGER NOT NULL DEFAULT 0,
       next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       CHECK((operation='upsert' AND document IS NOT NULL) OR
         (operation='delete' AND document IS NULL))
+    )
+  `,[],{db});
+  // Existing Stage-17 queues are migrated in-place; previously published
+  // tasks start at revision 0 and must be reconciled from SQLite.
+  await shadowPgQuery(`
+    ALTER TABLE animaxia_shadow_tasks
+    ADD COLUMN IF NOT EXISTS source_revision BIGINT NOT NULL DEFAULT 0
+  `,[],{db});
+  await shadowPgQuery(`
+    CREATE TABLE IF NOT EXISTS animaxia_shadow_applied_versions(
+      contentid BIGINT PRIMARY KEY,
+      source_revision BIGINT NOT NULL
     )
   `,[],{db});
   await shadowPgQuery(`
@@ -67,17 +82,20 @@ export async function stageDistributedShadow({limit=40,db}={}){
   staging=true;
   try{
     const jobs=pgShadowPending(positive(limit,100,'stage limit'));
-    let staged=0,failed=0,stale=0;
+    let staged=0,failed=0,stale=0,skippedOlder=0;
     for(const job of jobs){
       const row=localDb.prepare('SELECT * FROM Content WHERE id=?').get(job.contentid);
       const doc=row?projectPgShadow(row):null;
       try{
         // Commit in PostgreSQL BEFORE acknowledgement in SQLite. On crash,
         // SQLite repeats the same snapshot (idempotent PG one-row queue).
-        await shadowPgQuery(INSERT_TASK,[
+        const published=await shadowPgQuery(INSERT_TASK,[
           job.contentid,doc?'upsert':'delete',doc?JSON.stringify(doc):null,
+          job.revision,
         ],{db});
-        staged++;
+        // Do not replace a newer queued snapshot with an older replay.
+        if(published.rowCount>0)staged++;
+        else skippedOlder++;
         if(pgShadowAck(job)===0)stale++; // newer local event retained
       }catch(err){
         failed++;
@@ -85,7 +103,7 @@ export async function stageDistributedShadow({limit=40,db}={}){
         logger.warn('[pg-distributed] staging retry: '+String(err.message).slice(0,140));
       }
     }
-    return {staged,failed,stale,pendingLocal:pgShadowOutboxStatus().pending};
+    return {staged,failed,stale,skippedOlder,pendingLocal:pgShadowOutboxStatus().pending};
   }finally{staging=false;}
 }
 /** Apply each job and its acknowledgement in ONE PostgreSQL transaction.
