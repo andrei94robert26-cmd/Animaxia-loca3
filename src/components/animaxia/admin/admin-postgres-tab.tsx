@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { AdminPilotProjectionCard } from './admin-pilot-projection-card';
 import { AdminPilotReconciliationCard } from './admin-pilot-reconciliation-card';
+import { AdminPilotQuarantineCard } from './admin-pilot-quarantine-card';
 
 type ShadowStatus={
   configured:boolean;workerEnabled:boolean;workerActive:boolean;
@@ -529,6 +530,7 @@ export function AdminPostgresTab(){
       </Card>
       <AdminPilotProjectionCard />
       <AdminPilotReconciliationCard />
+      <AdminPilotQuarantineCard />
     </div>
   );
 }
