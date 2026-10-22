@@ -10,8 +10,11 @@ export function ensurePgShadowOutbox() {
   if (ready) return;
   // Keep change revisions monotonic even after outbox ACK. A persistent
   // SQLite clock avoids reusing revision=1 for later changes to the same ID.
-  // Recreate these triggers on startup to migrate existing stage-15 installs.
-  localDb.exec(`
+  // Recreate all three triggers atomically so a crash cannot leave a
+  // partial migration (one trigger removed but others not installed).
+  localDb.exec('BEGIN IMMEDIATE');
+  try {
+    localDb.exec(`
     CREATE TABLE IF NOT EXISTS pg_shadow_outbox (
       contentid INTEGER PRIMARY KEY,
       operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
@@ -54,7 +57,12 @@ export function ensurePgShadowOutbox() {
       ON CONFLICT(contentid) DO UPDATE SET operation='delete',
         revision=excluded.revision,attempts=0,nextattemptat=0;
     END;
-  `);
+    `);
+    localDb.exec('COMMIT');
+  } catch (error) {
+    localDb.exec('ROLLBACK');
+    throw error;
+  }
   ready = true;
 }
 const positiveInt = (v, max, field) => {
