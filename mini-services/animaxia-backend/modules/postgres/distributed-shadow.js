@@ -73,6 +73,22 @@ export async function setupDistributedShadow({db}={}){
   return {createdOrExisting:true,queue:'postgresql-shadow-tasks',
     workerCoordination:'transactional-skip-locked',sourceOfTruth:'sqlite'};
 }
+/**
+ * Publish a single canonical outbox revision. Exposed for recovery tests.
+ * The source revision is durable and must never be fabricated by callers.
+ */
+export async function publishDistributedShadowSnapshot(job,doc,{db}={}){
+  if(!Number.isSafeInteger(job?.contentid)||job.contentid<=0||
+    !Number.isSafeInteger(job?.revision)||job.revision<1)
+    throw Object.assign(new Error('Invalid SQLite source revision'),{status:400});
+  if(doc && doc.id!==job.contentid)
+    throw Object.assign(new Error('Snapshot/content ID mismatch'),{status:400});
+  const result=await shadowPgQuery(INSERT_TASK,[
+    job.contentid,doc?'upsert':'delete',doc?JSON.stringify(doc):null,
+    job.revision,
+  ],{db});
+  return Number(result.rowCount)>0;
+}
 export async function stageDistributedShadow({limit=40,db}={}){
   if(staging)return {skipped:'already-staging'};
   if(process.env.ANIMAXIA_PG_SHADOW_WORKER==='true')throw Object.assign(
@@ -89,12 +105,9 @@ export async function stageDistributedShadow({limit=40,db}={}){
       try{
         // Commit in PostgreSQL BEFORE acknowledgement in SQLite. On crash,
         // SQLite repeats the same snapshot (idempotent PG one-row queue).
-        const published=await shadowPgQuery(INSERT_TASK,[
-          job.contentid,doc?'upsert':'delete',doc?JSON.stringify(doc):null,
-          job.revision,
-        ],{db});
+        const published=await publishDistributedShadowSnapshot(job,doc,{db});
         // Do not replace a newer queued snapshot with an older replay.
-        if(published.rowCount>0)staged++;
+        if(published)staged++;
         else skippedOlder++;
         if(pgShadowAck(job)===0)stale++; // newer local event retained
       }catch(err){
