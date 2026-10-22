@@ -6,7 +6,7 @@ import {reconcilePgPilotProjection} from './pilot-reconciliation.js';
 import { verifyPgShadow } from './shadow-verify.js';
 import {
   setupPgCatalogPilot,upsertPgCatalogPilot,deletePgCatalogPilot,
-  listPgCatalogPilot,pgCatalogPilotStatus,
+  listPgCatalogPilot,getPgCatalogPilotByExternalId,pgCatalogPilotStatus,
 } from './catalog-pilot.js';
 import {setupDistributedShadow,stageDistributedShadow,workDistributedShadow,distributedShadowStatus} from './distributed-shadow.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
@@ -88,6 +88,10 @@ router.post('/pilot/setup',limiter,async(_req,res,next)=>{
 });
 router.get('/pilot/items',limiter,async(req,res,next)=>{
   try{return res.json(await listPgCatalogPilot(req.query));}
+  catch(err){return next(err);}
+});
+router.get('/pilot/items/:externalid',limiter,async(req,res,next)=>{
+  try{return res.json(await getPgCatalogPilotByExternalId(req.params.externalid));}
   catch(err){return next(err);}
 });
 router.post('/pilot/items',limiter,async(req,res,next)=>{
