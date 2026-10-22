@@ -101,6 +101,7 @@ router.post('/pilot/items',limiter,async(req,res,next)=>{
 router.delete('/pilot/items/:externalid',limiter,async(req,res,next)=>{
   try{return res.json(await deletePgCatalogPilot(req.params.externalid,{
     expectedRevision:req.query.expectedRevision,
+    idempotencyKey:req.query.idempotencyKey,
   }));}
   catch(err){return next(err);}
 });
