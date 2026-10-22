@@ -2,6 +2,7 @@
 import express from 'express';
 import { readPgShadowCatalog } from './shadow-read.js';
 import { setupPgPilotProjection,flushPgPilotProjection,pgPilotProjectionStatus,getPgPilotProjectedItems } from './pilot-projection.js';
+import {reconcilePgPilotProjection} from './pilot-reconciliation.js';
 import { verifyPgShadow } from './shadow-verify.js';
 import {
   setupPgCatalogPilot,upsertPgCatalogPilot,deletePgCatalogPilot,
@@ -39,6 +40,17 @@ router.post('/distributed/process',limiter,async(req,res,next)=>{
   catch(err){return next(err);}
 });
 // All pilot routes inherit requireAuth+requireAdmin from this router.
+router.post('/pilot/projection/reconcile',limiter,async(req,res,next)=>{
+  try{
+    return res.json(await reconcilePgPilotProjection({
+      scope:req.body?.scope??'catalog',
+      afterId:req.body?.afterId??0,
+      afterExternalId:req.body?.afterExternalId??'',
+      limit:req.body?.limit??25,
+      dryRun:req.body?.dryRun??true,
+    }));
+  }catch(err){return next(err);}
+});
 router.get('/pilot/projection/status',limiter,async(_req,res,next)=>{
   try{return res.json(await pgPilotProjectionStatus());}
   catch(err){return next(err);}
