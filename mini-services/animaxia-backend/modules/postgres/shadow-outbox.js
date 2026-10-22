@@ -8,6 +8,9 @@ import { localDb } from '../local/sqlite.js';
 let ready = false;
 export function ensurePgShadowOutbox() {
   if (ready) return;
+  // Keep change revisions monotonic even after outbox ACK. A persistent
+  // SQLite clock avoids reusing revision=1 for later changes to the same ID.
+  // Recreate these triggers on startup to migrate existing stage-15 installs.
   localDb.exec(`
     CREATE TABLE IF NOT EXISTS pg_shadow_outbox (
       contentid INTEGER PRIMARY KEY,
@@ -16,25 +19,40 @@ export function ensurePgShadowOutbox() {
       attempts INTEGER NOT NULL DEFAULT 0,
       nextattemptat INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS pg_shadow_change_clock (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+      revision INTEGER NOT NULL CHECK(revision >= 0)
+    );
+    INSERT OR IGNORE INTO pg_shadow_change_clock(singleton,revision)
+      VALUES(1,0);
+    UPDATE pg_shadow_change_clock SET revision=MAX(
+      revision,(SELECT COALESCE(MAX(revision),0) FROM pg_shadow_outbox)
+    ) WHERE singleton=1;
     CREATE INDEX IF NOT EXISTS idx_pg_shadow_due
       ON pg_shadow_outbox(nextattemptat, contentid);
-    CREATE TRIGGER IF NOT EXISTS pg_shadow_content_ai AFTER INSERT ON Content BEGIN
+    DROP TRIGGER IF EXISTS pg_shadow_content_ai;
+    DROP TRIGGER IF EXISTS pg_shadow_content_au;
+    DROP TRIGGER IF EXISTS pg_shadow_content_ad;
+    CREATE TRIGGER pg_shadow_content_ai AFTER INSERT ON Content BEGIN
+      UPDATE pg_shadow_change_clock SET revision=revision+1 WHERE singleton=1;
       INSERT INTO pg_shadow_outbox(contentid,operation,revision)
-      VALUES(new.id,'upsert',1)
+      VALUES(new.id,'upsert',(SELECT revision FROM pg_shadow_change_clock WHERE singleton=1))
       ON CONFLICT(contentid) DO UPDATE SET operation='upsert',
-        revision=revision+1,attempts=0,nextattemptat=0;
+        revision=excluded.revision,attempts=0,nextattemptat=0;
     END;
-    CREATE TRIGGER IF NOT EXISTS pg_shadow_content_au AFTER UPDATE ON Content BEGIN
+    CREATE TRIGGER pg_shadow_content_au AFTER UPDATE ON Content BEGIN
+      UPDATE pg_shadow_change_clock SET revision=revision+1 WHERE singleton=1;
       INSERT INTO pg_shadow_outbox(contentid,operation,revision)
-      VALUES(new.id,'upsert',1)
+      VALUES(new.id,'upsert',(SELECT revision FROM pg_shadow_change_clock WHERE singleton=1))
       ON CONFLICT(contentid) DO UPDATE SET operation='upsert',
-        revision=revision+1,attempts=0,nextattemptat=0;
+        revision=excluded.revision,attempts=0,nextattemptat=0;
     END;
-    CREATE TRIGGER IF NOT EXISTS pg_shadow_content_ad AFTER DELETE ON Content BEGIN
+    CREATE TRIGGER pg_shadow_content_ad AFTER DELETE ON Content BEGIN
+      UPDATE pg_shadow_change_clock SET revision=revision+1 WHERE singleton=1;
       INSERT INTO pg_shadow_outbox(contentid,operation,revision)
-      VALUES(old.id,'delete',1)
+      VALUES(old.id,'delete',(SELECT revision FROM pg_shadow_change_clock WHERE singleton=1))
       ON CONFLICT(contentid) DO UPDATE SET operation='delete',
-        revision=revision+1,attempts=0,nextattemptat=0;
+        revision=excluded.revision,attempts=0,nextattemptat=0;
     END;
   `);
   ready = true;
@@ -91,7 +109,8 @@ export function seedPgShadowOutbox({afterId=0,limit=500}={}) {
   ).all(cursor,cap);
   const insert=localDb.prepare(`
     INSERT INTO pg_shadow_outbox(contentid,operation,revision)
-    VALUES(?,'upsert',1) ON CONFLICT(contentid) DO NOTHING
+    VALUES(?,'upsert',(SELECT revision FROM pg_shadow_change_clock WHERE singleton=1))
+    ON CONFLICT(contentid) DO NOTHING
   `);
   // node:sqlite DatabaseSync has no transaction(fn) API.
   // SQLite's BEGIN IMMEDIATE / COMMIT ensures a bounded, atomic backfill.
@@ -119,8 +138,8 @@ export function queuePgShadowRepair(ids) {
   const distinct=[...new Set(ids)];
   const statement=localDb.prepare(
     "INSERT INTO pg_shadow_outbox(contentid,operation,revision) "+
-    "SELECT id,'upsert',1 FROM Content WHERE id=? "+
-    "ON CONFLICT(contentid) DO NOTHING"
+    "SELECT id,'upsert',(SELECT revision FROM pg_shadow_change_clock WHERE singleton=1) "+
+    "FROM Content WHERE id=? ON CONFLICT(contentid) DO NOTHING"
   );
   let queued=0;
   localDb.exec('BEGIN IMMEDIATE');
