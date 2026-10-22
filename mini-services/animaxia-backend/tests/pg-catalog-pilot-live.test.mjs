@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import pg from 'pg';
 import {
   setupPgCatalogPilot,upsertPgCatalogPilot,deletePgCatalogPilot,
-  listPgCatalogPilot,pgCatalogPilotStatus,stopPgCatalogPilot,
+  listPgCatalogPilot,getPgCatalogPilotByExternalId,pgCatalogPilotStatus,stopPgCatalogPilot,
 } from '../modules/postgres/catalog-pilot.js';
 
 test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and FTS',async t=>{
@@ -47,6 +47,13 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
     const id=inserted.data.id;
     assert.ok(id>0);
     assert.equal(inserted.data.revision,1);
+    const indexed=await getPgCatalogPilotByExternalId(first);
+    assert.equal(indexed.found,true);
+    assert.equal(indexed.data.id,id);
+    assert.equal(indexed.data.title,item.title);
+    assert.equal(indexed.data.revision,1);
+    assert.equal(indexed.data.metadata.actors[0],'Real PG Actor');
+    assert.equal((await getPgCatalogPilotByExternalId(prefix+'absent')).found,false);
     assert.equal(inserted.publicCatalogUnchanged,true);
     assert.equal(inserted.data.metadata.actors[0],'Real PG Actor');
     assert.ok(!JSON.stringify(inserted).includes('secret.mp4'));
@@ -190,6 +197,7 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
 
     const deleted=await deletePgCatalogPilot(first);
     assert.equal(deleted.deleted,true);
+    assert.equal((await getPgCatalogPilotByExternalId(first)).found,false);
     assert.equal((await deletePgCatalogPilot(first)).deleted,false);
     const log=await pool.query(
       'SELECT operation FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid DESC LIMIT 1',
