@@ -227,6 +227,39 @@ export function AdminPostgresTab(){
     }catch(err){toast.error(err instanceof Error?err.message:'Schema pilot nu a putut fi creată');}
     finally{setPilotBusy(false);}
   }
+  async function deletePilot(){
+    const externalid=pilotExternalId.trim();
+    const revision=Number(pilotExpectedRevision);
+    if(!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,219}$/.test(externalid)||
+      !/^[1-9][0-9]*$/.test(pilotExpectedRevision)||
+      !Number.isSafeInteger(revision)){
+      toast.error('Selectează un titlu existent, cu revizia curentă, înainte de ștergere');return;
+    }
+    if(!window.confirm('Ștergi definitiv acest titlu DOAR din catalogul pilot PostgreSQL, dacă revizia nu s-a schimbat?'))return;
+    setPilotBusy(true);
+    try{
+      const params=new URLSearchParams({
+        expectedRevision:String(revision),XTransformPort:'4000',
+      });
+      const result=await authRequest<{deleted:boolean}>(
+        '/api/migration/postgres/pilot/items/'+encodeURIComponent(externalid)+'?'+params,
+        {method:'DELETE'});
+      if(!result.deleted){
+        toast.error('Titlul nu mai există în catalogul pilot');
+      }else{
+        toast.success('Titlul pilot a fost șters la revizia confirmată');
+        setPilotExternalId('');
+        setPilotTitle('');
+        setPilotType('movie');
+        setPilotYear('');
+        setPilotExpectedRevision('0');
+        setPilotSelectedMetadata(null);
+      }
+    }catch(err){
+      toast.error(err instanceof Error?err.message:'Ștergerea pilot a eșuat. Verifică revizia.');
+    }finally{setPilotBusy(false);}
+    await checkPilot();
+  }
   async function savePilot(){
     const externalid=pilotExternalId.trim(),title=pilotTitle.trim();
     const year=pilotYear.trim();
@@ -540,8 +573,14 @@ export function AdminPostgresTab(){
                 placeholder="0" />
             </div>
           </div>
-          <Button disabled={pilotBusy||!pilotStatus?.enabled}
-            onClick={()=>void savePilot()}>Scrie doar în PostgreSQL pilot</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={pilotBusy||!pilotStatus?.enabled}
+              onClick={()=>void savePilot()}>Salvează cu revizia curentă</Button>
+            <Button variant="outline"
+              disabled={pilotBusy||!pilotStatus?.enabled||
+                pilotExpectedRevision==='0'||!pilotSelectedMetadata}
+              onClick={()=>void deletePilot()}>Șterge pilot cu revizie</Button>
+          </div>
           {pilotResults.length>0&&<div className="space-y-1">
             <p className="text-xs text-zinc-400">Ultimele titluri din catalogul pilot:</p>
             {pilotResults.map(item=>(
