@@ -107,6 +107,7 @@ import { startOpenSearchWorker, stopOpenSearchWorker } from './modules/search/op
 import pgShadowRouter from './modules/postgres/routes.js';
 import { startPgShadowWorker,stopPgShadowWorker } from './modules/postgres/shadow.js';
 import {stopPgCatalogPilot} from './modules/postgres/catalog-pilot.js';
+import {startPgPilotProjection,stopPgPilotProjection} from './modules/postgres/pilot-projection.js';
 import { startDistributedShadow,stopDistributedShadow } from './modules/postgres/distributed-shadow.js';
 import { startMinerAutoSync, stopMinerAutoSync } from './modules/miner/auto-sync.js';
 import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
@@ -767,6 +768,7 @@ async function main() {
     ['opensearch-outbox', startOpenSearchWorker],
     ['postgres-shadow', startPgShadowWorker],
     ['postgres-distributed', startDistributedShadow],
+    ['postgres-pilot-projection', startPgPilotProjection],
   ]) {
     try { start(); }
     catch (err) { logger.warn('[boot] '+name+' disabled: '+err.message); }
@@ -899,6 +901,7 @@ async function main() {
     await stopDistributedShadow();
     await stopPgShadowWorker();
     await stopPgCatalogPilot();
+    await stopPgPilotProjection();
     server.close(async () => {
       await closeDb();
       await closeShardPools(); // FAZA 13 (sharding): dedicated shard branch pools (main pool closed by closeDb)
