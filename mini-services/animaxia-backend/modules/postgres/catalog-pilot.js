@@ -159,6 +159,25 @@ export async function setupPgCatalogPilot(options={}){
     CREATE INDEX IF NOT EXISTS idx_animaxia_pilot_events_content
     ON animaxia_pilot_events(contentid,eventid DESC)
   `);
+  // A stable external ID must NEVER reuse an earlier content revision after
+  // DELETE + re-create. Seed from live rows AND historical events so an
+  // upgrade also protects rows deleted before the ledger existed.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS animaxia_pilot_revision_ledger (
+      externalid TEXT PRIMARY KEY,
+      revision BIGINT NOT NULL CHECK(revision>=1)
+    )
+  `);
+  await db.query(`
+    INSERT INTO animaxia_pilot_revision_ledger(externalid,revision)
+    SELECT externalid,MAX(revision) FROM (
+      SELECT externalid,revision FROM animaxia_pilot_catalog
+      UNION ALL
+      SELECT externalid,revision FROM animaxia_pilot_events
+    ) versions GROUP BY externalid
+    ON CONFLICT(externalid) DO UPDATE SET
+      revision=GREATEST(animaxia_pilot_revision_ledger.revision,EXCLUDED.revision)
+  `);
   return {schemaVersion:1,mode:'postgresql-isolated-pilot',
     authoritativeForPublicCatalog:false};
 }
@@ -197,17 +216,29 @@ export async function upsertPgCatalogPilot(input,options={}){
     await client.query('BEGIN');
     await lockPgPilotExternalId(client,d.externalid);
     await checkExpectedRevision(client,d.externalid,d.expectedRevision);
+    // Advance inside the same transaction and the same advisory lock as
+    // Content + event write. Rollback undoes this allocation as well.
+    const reserved=await client.query(`
+      INSERT INTO animaxia_pilot_revision_ledger(externalid,revision)
+      VALUES($1,1)
+      ON CONFLICT(externalid) DO UPDATE SET
+        revision=animaxia_pilot_revision_ledger.revision+1
+      RETURNING revision::text AS revision
+    `,[d.externalid]);
+    const nextRevision=reserved.rows[0]?.revision;
+    if(!Number.isSafeInteger(Number(nextRevision))||Number(nextRevision)<1)
+      throw Object.assign(new Error('Invalid pilot revision allocation'),{status:502});
     const write=await client.query(`
       INSERT INTO animaxia_pilot_catalog
-        (externalid,title,type,year,thumbnail,metadata)
-      VALUES($1,$2,$3,$4,$5,$6::jsonb)
+        (externalid,title,type,year,thumbnail,metadata,revision)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)
       ON CONFLICT(externalid) DO UPDATE SET
         title=EXCLUDED.title,type=EXCLUDED.type,year=EXCLUDED.year,
         thumbnail=EXCLUDED.thumbnail,metadata=EXCLUDED.metadata,
-        revision=animaxia_pilot_catalog.revision+1,
+        revision=EXCLUDED.revision,
         updatedat=NOW()
       RETURNING id::text,externalid,title,type,year,thumbnail,metadata,revision::text
-    `,[d.externalid,d.title,d.type,d.year,d.thumbnail,JSON.stringify(d.metadata)]);
+    `,[d.externalid,d.title,d.type,d.year,d.thumbnail,JSON.stringify(d.metadata),nextRevision]);
     const row=write.rows[0];
     await client.query(`
       INSERT INTO animaxia_pilot_events(contentid,externalid,operation,revision)
