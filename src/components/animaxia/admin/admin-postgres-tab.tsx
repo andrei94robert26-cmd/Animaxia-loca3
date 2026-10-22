@@ -229,15 +229,24 @@ export function AdminPostgresTab(){
     if(year&&!/^[12][0-9]{3}$/.test(year)){
       toast.error('Anul trebuie să conțină patru cifre');return;
     }
-    if(!window.confirm('Salvezi titlul DOAR în catalogul pilot PostgreSQL?'))return;
+    const expectedRevision=Number(pilotExpectedRevision);
+    if(!/^(0|[1-9][0-9]*)$/.test(pilotExpectedRevision)||
+      !Number.isSafeInteger(expectedRevision)){
+      toast.error('Revizia așteptată trebuie să fie 0 sau un întreg pozitiv');return;
+    }
+    if(!window.confirm('Salvezi titlul DOAR în catalogul pilot PostgreSQL, cu verificarea reviziei?'))return;
     setPilotBusy(true);
     try{
-      await action('/api/migration/postgres/pilot/items',{
-        externalid,title,type:pilotType,...(year?{year:Number(year)}:{}),
+      const saved=await action<{data:PilotItem}>('/api/migration/postgres/pilot/items',{
+        externalid,title,type:pilotType,expectedRevision,
+        ...(year?{year:Number(year)}:{}),
         metadata:{description:'Inserare controlată de administrator în pilot'},
       });
-      toast.success('Titlu salvat doar în PostgreSQL pilot (nu în biblioteca publică)');
-    }catch(err){toast.error(err instanceof Error?err.message:'Scrierea pilot a eșuat');}
+      setPilotExpectedRevision(String(saved.data.revision));
+      toast.success('Titlu salvat la revizia '+saved.data.revision+' doar în PostgreSQL pilot');
+    }catch(err){
+      toast.error(err instanceof Error?err.message:'Scrierea pilot a eșuat. Verifică revizia curentă.');
+    }
     finally{setPilotBusy(false);}
     await checkPilot();
   }
@@ -493,7 +502,7 @@ export function AdminPostgresTab(){
               <Label htmlFor="pg-pilot-externalid">ID extern stabil</Label>
               <Input id="pg-pilot-externalid" maxLength={220}
                 placeholder="api:example:movie:123" value={pilotExternalId}
-                onChange={e=>setPilotExternalId(e.target.value)}/>
+                onChange={e=>{setPilotExternalId(e.target.value);setPilotExpectedRevision('0');}}/>
             </div>
             <div className="space-y-1">
               <Label htmlFor="pg-pilot-title">Titlu</Label>
@@ -510,15 +519,30 @@ export function AdminPostgresTab(){
               <Input id="pg-pilot-year" maxLength={4} value={pilotYear}
                 inputMode="numeric" onChange={e=>setPilotYear(e.target.value)}/>
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="pg-pilot-expected-revision">Revizia așteptată (0 = creează numai dacă lipsește)</Label>
+              <Input id="pg-pilot-expected-revision" inputMode="numeric"
+                maxLength={16} value={pilotExpectedRevision}
+                onChange={e=>setPilotExpectedRevision(e.target.value)}
+                placeholder="0" />
+            </div>
           </div>
           <Button disabled={pilotBusy||!pilotStatus?.enabled}
             onClick={()=>void savePilot()}>Scrie doar în PostgreSQL pilot</Button>
           {pilotResults.length>0&&<div className="space-y-1">
             <p className="text-xs text-zinc-400">Ultimele titluri din catalogul pilot:</p>
             {pilotResults.map(item=>(
-              <p key={item.id} className="text-xs text-zinc-300">
-                {item.externalid} · {item.title} · {item.type} · revizia {item.revision}
-              </p>
+              <div key={item.id} className="flex flex-wrap items-center gap-2 text-xs text-zinc-300">
+                <span>{item.externalid} · {item.title} · {item.type} · revizia {item.revision}</span>
+                <Button type="button" size="sm" variant="outline"
+                  onClick={()=>{
+                    setPilotExternalId(item.externalid);
+                    setPilotTitle(item.title);
+                    setPilotType(item.type);
+                    setPilotYear(item.year==null?'':String(item.year));
+                    setPilotExpectedRevision(String(item.revision));
+                  }}>Editează cu revizia {item.revision}</Button>
+              </div>
             ))}
           </div>}
           <p className="text-xs text-zinc-400">
