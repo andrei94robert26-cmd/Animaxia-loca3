@@ -52,7 +52,8 @@ export async function workDistributedShadow({limit=10,db}={}){
         let active=true;
         try{
           const next=await client.query(`
-            SELECT contentid::text AS contentid,operation,document,generation
+            SELECT contentid::text AS contentid,operation,document,generation,
+              source_revision::text AS source_revision
             FROM animaxia_shadow_tasks WHERE next_run_at<=NOW()
             ORDER BY next_run_at,contentid LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -63,6 +64,26 @@ export async function workDistributedShadow({limit=10,db}={}){
           const task=next.rows[0];
           await client.query('SAVEPOINT apply_one');
           try{
+            // High-water mark remains after the task and any shadow content
+            // are deleted. A late replay cannot resurrect stale metadata.
+            const admitted=await client.query(`
+              INSERT INTO animaxia_shadow_applied_versions(contentid,source_revision)
+              VALUES($1,$2)
+              ON CONFLICT(contentid) DO UPDATE SET
+                source_revision=EXCLUDED.source_revision
+              WHERE animaxia_shadow_applied_versions.source_revision <
+                EXCLUDED.source_revision
+              RETURNING contentid
+            `,[task.contentid,task.source_revision]);
+            if(admitted.rowCount===0){
+              await client.query(
+                'DELETE FROM animaxia_shadow_tasks WHERE contentid=$1 AND generation=$2',
+                [task.contentid,task.generation]);
+              await client.query('RELEASE SAVEPOINT apply_one');
+              await client.query('COMMIT');active=false;
+              processed++;
+              continue;
+            }
             if(task.operation==='upsert'){
               const d=task.document;
               if(!d||typeof d!=='object'||String(d.id)!==task.contentid)
