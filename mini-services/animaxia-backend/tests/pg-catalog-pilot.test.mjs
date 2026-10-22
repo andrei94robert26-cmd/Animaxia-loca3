@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import {
-  pgCatalogPilotEnabled,validatePgPilotItem,
+  pgCatalogPilotEnabled,validatePgPilotItem,pgPilotExpectedRevision,
   buildPgCatalogPilotSearch,listPgCatalogPilot,pgCatalogPilotStatus,
   upsertPgCatalogPilot,
 } from '../modules/postgres/catalog-pilot.js';
@@ -48,6 +48,28 @@ test('PG catalog pilot is opt-in; metadata projection cannot leak playback/secre
     else process.env.ANIMAXIA_PG_CATALOG_PILOT=old;
   }
 });
+test('pilot revision preconditions require safe integers and reject stale/unsafe forms',()=>{
+  assert.equal(pgPilotExpectedRevision(undefined),null);
+  assert.equal(pgPilotExpectedRevision(0),0);
+  assert.equal(pgPilotExpectedRevision('0'),0);
+  assert.equal(pgPilotExpectedRevision('42'),42);
+  assert.equal(pgPilotExpectedRevision(Number.MAX_SAFE_INTEGER),Number.MAX_SAFE_INTEGER);
+  for(const value of [-1,1.2,'-1','01','1.2','1e3',' 1','',
+    '9007199254740993',null,true,{},[]]){
+    assert.throws(()=>pgPilotExpectedRevision(value),/expectedRevision/);
+  }
+  const row=validatePgPilotItem({
+    externalid:'api:test:versioned',title:'Versioned',type:'movie',
+    expectedRevision:3,
+  });
+  assert.equal(row.expectedRevision,3);
+  assert.equal(row.metadata.rating,null);
+  assert.throws(()=>validatePgPilotItem({
+    externalid:'api:test:versioned',title:'Versioned',type:'movie',
+    expectedRevision:'not-a-number',
+  }),/expectedRevision/);
+});
+
 test('pilot status accepts missing schema but propagates other PG errors',async()=>{
   const prior=process.env.ANIMAXIA_PG_CATALOG_PILOT;
   process.env.ANIMAXIA_PG_CATALOG_PILOT='true';
