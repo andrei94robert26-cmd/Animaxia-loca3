@@ -106,6 +106,14 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
     `,[poison,poisonRev.toString()]);
     const broken=await workDistributedShadow({limit:1});
     assert.equal(broken.failed,1);
+    // The attempted watermark update is rolled back with the savepoint.
+    // A retry of the SAME revision must remain eligible after fixing data.
+    const watermarkAfterFailure=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [poison]
+    );
+    assert.equal(BigInt(watermarkAfterFailure.rows[0].revision),
+      BigInt(appliedVersion.rows[0].revision));
     let stuck=await db.query(
       'SELECT attempts,next_run_at>NOW() AS later FROM animaxia_shadow_tasks WHERE contentid=$1',
       [poison]);
@@ -181,7 +189,10 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
     assert.equal(await publishDistributedShadowSnapshot(
       {contentid:candidate,revision:previousRevision},savedOlder,{db}
     ),true);
-    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    const discarded=await workDistributedShadow({limit:10});
+    assert.equal(discarded.failed,0);
+    assert.equal(discarded.staleDiscarded,1);
+    assert.equal(discarded.processed,0);
     const afterOldReplay=await db.query(
       'SELECT title FROM animaxia_shadow_content WHERE id=$1',[candidate]
     );
@@ -212,7 +223,9 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
       {contentid:tombstoneId,revision:Number(lastLive.rows[0].revision)},
       beforeDeletion,{db}
     ),true);
-    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    const discardedResurrection=await workDistributedShadow({limit:10});
+    assert.equal(discardedResurrection.failed,0);
+    assert.equal(discardedResurrection.staleDiscarded,1);
     assert.equal((await db.query(
       'SELECT id FROM animaxia_shadow_content WHERE id=$1',[tombstoneId]
     )).rowCount,0,'Stale UPSERT must not resurrect a PG tombstone');
