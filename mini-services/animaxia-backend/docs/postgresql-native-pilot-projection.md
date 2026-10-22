@@ -149,6 +149,65 @@ Aceste teste sunt pentru **corectitudinea unui mediu mic**. Nu sunt
 teste de performanță la 1 miliard de titluri, HA regional, redare video
 sau un deployment real de producție.
 
+## Etapa 21 — carantină pentru evenimentele care eșuează permanent
+
+Proiectorul nu mai reîncearcă automat fără limită evenimentele pilot.
+Operatorul configurează pragul numeric (1–100, valoarea implicită 8):
+
+```dotenv
+ANIMAXIA_PG_PILOT_MAX_ATTEMPTS=8
+```
+
+După a opta încercare eșuată, evenimentul rămâne în
+`animaxia_pilot_events`, iar `projection_quarantined_at` este setat.
+Joburile în carantină nu mai sunt selectate de workerul obișnuit. Noua
+schemă este aditivă: `projection_quarantined_at` și
+`projection_error_code` sunt create prin `ADD COLUMN IF NOT EXISTS`,
+iar indexul `idx_animaxia_pilot_projection_events_ready` exclude
+evenimentele deja carantinate.
+
+Salvăm numai un cod SQLSTATE de cinci caractere sau `WORKER_ERROR`,
+**nu** textul brut al erorii, credentiale, payloaduri video sau mesaje SQL.
+Dacă un eveniment eșuează, operația asupra proiecției se anulează la
+SAVEPOINT, dar numărul de încercări, întârzierea și eventual carantina
+sunt confirmate împreună în tranzacția PostgreSQL.
+
+Rutele necesită autentificare, rol administrator și limitare a cererilor:
+
+```http
+GET /api/migration/postgres/pilot/projection/quarantine?limit=20&afterEventId=0
+Authorization: Bearer <admin-jwt>
+```
+
+Răspunsul este o pagină cu maximum 50 de evenimente, ordonate descrescător
+după ID, fără payloadul evenimentelor. După verificarea cauzei, operatorul
+poate permite din nou procesarea unui singur eveniment:
+
+```http
+POST /api/migration/postgres/pilot/projection/quarantine/123/retry
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+
+{}
+```
+
+Retryul se aplică numai dacă acel ID este încă neconfirmat și în
+carantină. Resetează încercările și reprogramarea; proiectorul recitește
+starea **curentă** din catalogul pilot, nu un snapshot istoric.
+În **Admin → PostgreSQL** există și panoul „Carantină evenimente”.
+
+**Testare:** `pg-pilot-projection.test.mjs` verifică limitele,
+configurația, paginarea și refuzul accesului anonim.
+`pg-pilot-projection-live.test.mjs` folosește PostgreSQL 16 real:
+introduce o constrângere care face un eveniment să eșueze de două ori,
+verifică izolarea lui și faptul că workerul îl ignoră, apoi înlătură
+constrângerea și validează reluarea explicită și livrarea lui.
+
+Aceasta nu este o soluție generală de dead-letter pentru toate cozile
+Animaxia; se aplică **doar evenimentelor pilot PostgreSQL**.
+Nu s-a activat pe serverul de producție și nu demonstrează capacitatea
+de procesare a unui miliard de titluri.
+
 ## Oprire și rollback
 
 Setează pe backend:
