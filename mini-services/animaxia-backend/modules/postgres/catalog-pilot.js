@@ -5,6 +5,7 @@
  * This module intentionally imports NO SQLite database or backend Content API.
  */
 import pg from 'pg';
+import crypto from 'node:crypto';
 import {pgWorkerConfig} from './distributed-pg-worker.js';
 import {lockPgPilotExternalId} from './pilot-lock.js';
 
@@ -44,6 +45,42 @@ export function pgPilotExpectedRevision(value){
   return revision;
 }
 const staleConflict=()=>Object.assign(new Error('Pilot catalog revision conflict'),{status:409});
+/**
+ * Optional request idempotency. The receipt and native catalog/event write
+ * must COMMIT together. A key is unique across all pilot write operations.
+ */
+export function pgPilotIdempotencyKey(value){
+  if(value===undefined)return null;
+  if(typeof value!=='string'||! /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value))
+    throw invalid('Invalid pilot idempotencyKey');
+  return value;
+}
+const payloadHash=(operation,body)=>crypto.createHash('sha256')
+  .update(JSON.stringify({operation,body})).digest('hex');
+async function priorPilotReceipt(client,key,hash){
+  if(key===null)return null;
+  await client.query(
+    'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 44517))',[key]
+  );
+  const previous=await client.query(
+    'SELECT payload_hash,response FROM animaxia_pilot_request_receipts WHERE request_key=$1',
+    [key]
+  );
+  if(previous.rows.length>1)
+    throw Object.assign(new Error('Duplicate pilot idempotency receipt'),{status:502});
+  if(!previous.rows.length)return null;
+  if(previous.rows[0].payload_hash!==hash)
+    throw Object.assign(new Error('Pilot idempotencyKey reused for a different request'),{status:409});
+  return previous.rows[0].response;
+}
+async function savePilotReceipt(client,key,hash,response){
+  if(key===null)return;
+  await client.query(
+    'INSERT INTO animaxia_pilot_request_receipts(request_key,payload_hash,response) VALUES($1,$2,$3::jsonb)',
+    [key,hash,JSON.stringify(response)]
+  );
+}
+
 async function checkExpectedRevision(client,externalid,revision){
   if(revision===null)return;
   const current=await client.query(
@@ -178,6 +215,14 @@ export async function setupPgCatalogPilot(options={}){
     ON CONFLICT(externalid) DO UPDATE SET
       revision=GREATEST(animaxia_pilot_revision_ledger.revision,EXCLUDED.revision)
   `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS animaxia_pilot_request_receipts(
+      request_key TEXT PRIMARY KEY,
+      payload_hash TEXT NOT NULL,
+      response JSONB NOT NULL,
+      createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
   return {schemaVersion:1,mode:'postgresql-isolated-pilot',
     authoritativeForPublicCatalog:false};
 }
@@ -211,9 +256,16 @@ export async function getPgCatalogPilotByExternalId(externalid,options={}){
 export async function upsertPgCatalogPilot(input,options={}){
   if(!pgCatalogPilotEnabled())throw disabled();
   const d=projection(input);
+  const idem=pgPilotIdempotencyKey(input.idempotencyKey);
+  const hash=payloadHash('upsert',d);
   const client=await runner(options).connect();
   try{
     await client.query('BEGIN');
+    const receipt=await priorPilotReceipt(client,idem,hash);
+    if(receipt!==null){
+      await client.query('COMMIT');
+      return receipt;
+    }
     await lockPgPilotExternalId(client,d.externalid);
     await checkExpectedRevision(client,d.externalid,d.expectedRevision);
     // Advance inside the same transaction and the same advisory lock as
@@ -244,9 +296,11 @@ export async function upsertPgCatalogPilot(input,options={}){
       INSERT INTO animaxia_pilot_events(contentid,externalid,operation,revision)
       VALUES($1,$2,'upsert',$3)
     `,[row.id,row.externalid,row.revision]);
-    await client.query('COMMIT');
-    return {stored:true,mode:'postgresql-isolated-pilot',
+    const response={stored:true,mode:'postgresql-isolated-pilot',
       publicCatalogUnchanged:true,data:toPublic(row)};
+    await savePilotReceipt(client,idem,hash,response);
+    await client.query('COMMIT');
+    return response;
   }catch(err){try{await client.query('ROLLBACK');}catch{/* failed connection */}throw err;}
   finally{client.release();}
 }
@@ -256,9 +310,16 @@ export async function deletePgCatalogPilot(externalid,options={}){
   if(!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,219}$/.test(id))
     throw invalid('Invalid stable externalid');
   const expectedRevision=pgPilotExpectedRevision(options.expectedRevision);
+  const idem=pgPilotIdempotencyKey(options.idempotencyKey);
+  const hash=payloadHash('delete',{externalid:id,expectedRevision});
   const client=await runner(options).connect();
   try{
     await client.query('BEGIN');
+    const receipt=await priorPilotReceipt(client,idem,hash);
+    if(receipt!==null){
+      await client.query('COMMIT');
+      return receipt;
+    }
     await lockPgPilotExternalId(client,id);
     await checkExpectedRevision(client,id,expectedRevision);
     const removed=await client.query(`
@@ -272,9 +333,11 @@ export async function deletePgCatalogPilot(externalid,options={}){
         VALUES($1,$2,'delete',$3)
       `,[row.id,row.externalid,row.revision]);
     }
-    await client.query('COMMIT');
-    return {deleted:removed.rows.length===1,mode:'postgresql-isolated-pilot',
+    const response={deleted:removed.rows.length===1,mode:'postgresql-isolated-pilot',
       publicCatalogUnchanged:true};
+    await savePilotReceipt(client,idem,hash,response);
+    await client.query('COMMIT');
+    return response;
   }catch(err){try{await client.query('ROLLBACK');}catch{/* disconnected */}throw err;}
   finally{client.release();}
 }
