@@ -227,6 +227,34 @@ export function AdminPostgresTab(){
     }catch(err){toast.error(err instanceof Error?err.message:'Schema pilot nu a putut fi creată');}
     finally{setPilotBusy(false);}
   }
+  async function loadPilotByExternalId(){
+    const externalid=pilotExternalId.trim();
+    if(!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,219}$/.test(externalid)){
+      toast.error('Introdu un ID extern stabil valid');return;
+    }
+    setPilotBusy(true);
+    try{
+      const result=await authRequest<{found:boolean;data:PilotItem|null}>(
+        '/api/migration/postgres/pilot/items/'+encodeURIComponent(externalid)+
+          '?XTransformPort=4000');
+      if(!result.found||!result.data){
+        setPilotExpectedRevision('0');
+        setPilotSelectedMetadata(null);
+        toast.error('Titlul pilot nu există. Revizia 0 este pentru creare.');
+        return;
+      }
+      const item=result.data;
+      setPilotTitle(item.title);
+      setPilotType(item.type);
+      setPilotYear(item.year==null?'':String(item.year));
+      setPilotExpectedRevision(String(item.revision));
+      setPilotSelectedMetadata(item.metadata);
+      toast.success('Titlu încărcat cu revizia '+item.revision);
+    }catch(err){
+      toast.error(err instanceof Error?err.message:'Încărcarea titlului pilot a eșuat');
+    }finally{setPilotBusy(false);}
+  }
+
   async function deletePilot(){
     const externalid=pilotExternalId.trim();
     const revision=Number(pilotExpectedRevision);
@@ -538,6 +566,8 @@ export function AdminPostgresTab(){
             </Button>
             <Button variant="outline" disabled={pilotBusy||!pilotStatus?.enabled}
               onClick={()=>void setupPilot()}>Creează schema pilot</Button>
+            <Button variant="outline" disabled={pilotBusy||!pilotStatus?.initialized}
+              onClick={()=>void loadPilotByExternalId()}>Încarcă după ID extern</Button>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             <div className="space-y-1">
