@@ -32,18 +32,10 @@ const authLimiter = userRateLimit({ scope: 'ip', max: 30, windowMs: 60000, key: 
 /* --------------------------------- JWT core --------------------------------- */
 
 function authSecret() {
-  if (process.env.AUTHSECRET) return process.env.AUTHSECRET;
-  // Deterministic derived secret: stable across restarts without extra config,
-  // deterministic local SQLite fallback.
-  return crypto
-    .createHash('sha256')
-    .update('animaxia-auth:sqlite-local')
-    .digest('hex');
+  return baseAuthSecret();
 }
 
-// FAZA 11: the canonical base secret + per-tenant derivation live in
-// modules/tenant/jwt-tenant.js (same derivation as authSecret above).
-void baseAuthSecret;
+// FAZA 11: canonical base secret and per-tenant derivation share one implementation.
 const authSecretForTenant = (slug) => tenantSecretFor(slug);
 
 function b64url(input) {
@@ -101,6 +93,10 @@ function verifyPassword(password, stored) {
 
 /* ------------------------------ user serialization ---------------------------- */
 
+function isBanned(row) {
+  return row?.banned === true || row?.banned === 1 || row?.banned === '1';
+}
+
 export function publicUser(row) {
   if (!row) return null;
   return {
@@ -115,8 +111,8 @@ export function publicUser(row) {
     createdat: isoOrNull(row.createdat),
     lastloginat: isoOrNull(row.lastloginat),
     // TS3 (auth avansat): additive fields — email verification + 2FA state.
-    emailverified: row.emailverified === true,
-    twofaenabled: row.twofaenabled === true,
+    emailverified: row.emailverified === true || row.emailverified === 1,
+    twofaenabled: row.twofaenabled === true || row.twofaenabled === 1,
   };
 }
 
@@ -191,7 +187,7 @@ export async function attachUser(req, _res, next) {
       const payload = verifyJwt(token);
       if (payload?.sub) {
         const row = await getUserById(payload.sub);
-        if (row) {
+        if (row && !isBanned(row)) {
           req.user = publicUser(row);
           req.user.tenant = tenantOfPayload(payload); // FAZA 11 (additive field)
         }
@@ -213,6 +209,7 @@ export async function requireAuth(req, res, next) {
   try {
     const row = await getUserById(payload.sub);
     if (!row) return res.status(401).json({ error: 'Account no longer exists', code: 'AUTH_REQUIRED' });
+    if (isBanned(row)) return res.status(403).json({ error: 'Account suspended', code: 'ACCOUNT_BANNED' });
     req.user = publicUser(row);
     req.user.tenant = tenantOfPayload(payload); // FAZA 11 (additive field)
     return next();
@@ -266,7 +263,14 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
     const adminCount = await one(`SELECT COUNT(*) AS count FROM users WHERE role = 'admin'`);
-    const role = adminEmails.includes(String(email).toLowerCase()) || num(adminCount?.count) === 0 ? 'admin' : 'user';
+    // Production bootstrap requires an explicitly configured admin email.
+    // Never let an arbitrary first public registration become administrator.
+    const firstLocalAdmin = process.env.NODE_ENV !== 'production' && num(adminCount?.count) === 0;
+    // Public registration never provisions administrators in production,
+    // including addresses from ADMINEMAILS: email ownership is unproven here.
+    const role = process.env.NODE_ENV === 'production'
+      ? 'user'
+      : (adminEmails.includes(String(email).toLowerCase()) || firstLocalAdmin ? 'admin' : 'user');
 
     const inserted = await one(
       `INSERT INTO users (email, username, passwordhash, role, preferences)
@@ -297,10 +301,13 @@ authRouter.post('/register', authLimiter, async (req, res, next) => {
           html: `<p>Salut, <b>${inserted.username}</b>!</p><p>Confirmă adresa de email pentru contul tău Animaxia:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p style="color:#888">Link-ul expiră în 24 de ore și poate fi folosit o singură dată.</p>`,
         });
         logger.info(`[auth] Verification email sent/queued for ${inserted.email}`);
-      } else {
+      } else if (process.env.NODE_ENV !== 'production') {
         emailVerified = true;
         await rows(`UPDATE users SET emailverified = TRUE WHERE id = $1`, [Number(inserted.id)]);
         logger.info(`[auth] sandbox: auto-verified ${inserted.email} (SMTPURL unset)`);
+      } else {
+        // Production without SMTP must not claim the email address was verified.
+        logger.warn('[auth] SMTP is unconfigured in production; new email remains unverified');
       }
     } catch (verifyErr) {
       // Never block registration on the verification side-channel.
@@ -356,7 +363,7 @@ authRouter.post('/login', authLimiter, async (req, res, next) => {
     // TS2b (admin producție): suspended accounts are refused after the
     // password proves correct — the ban is an account state, not a credential
     // error, so it stays a distinct 403 (never counted as a brute-force miss).
-    if (row.banned === true) {
+    if (isBanned(row)) {
       await auditLog({ userid: Number(row.id), action: 'auth.login.banned', ip, meta: { email } });
       return res.status(403).json({ error: 'Cont suspendat', code: 'ACCOUNT_BANNED' });
     }
@@ -398,6 +405,7 @@ authRouter.post('/refresh', authLimiter, async (req, res, next) => {
     await rows(`UPDATE refreshtokens SET revoked = TRUE WHERE id = $1`, [Number(row.id)]);
     const user = await getUserById(row.userid);
     if (!user) return res.status(401).json({ error: 'Account no longer exists', code: 'REFRESH_INVALID' });
+    if (isBanned(user)) return res.status(403).json({ error: 'Account suspended', code: 'ACCOUNT_BANNED' });
     const session = await issueSession(user, clientIpOf(req), row.tenantid || null);
     return res.json({ ok: true, ...session });
   } catch (err) {

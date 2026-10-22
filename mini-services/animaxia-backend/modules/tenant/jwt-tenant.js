@@ -2,8 +2,8 @@
  * modules/tenant/jwt-tenant.js — FAZA 11 tenant-aware JWT helpers (additive).
  *
  * Secret model (dual-path verification, zero breakage for existing tokens):
- *   • Base secret — exactly the derivation auth.js has always used
- *     (AUTHSECRET env, else sha256('animaxia-auth:sqlite-local')).
+ *   • Base secret — AUTHSECRET (>=32 characters); local development uses
+ *     a random per-process fallback, while production fails closed.
  *   • Tenant secret — sha256(baseSecret + ':tenant:' + slug). Tokens carrying
  *     a `tenant` claim other than 'global' are signed with their tenant
  *     secret; every other token (all pre-FAZA-11 tokens, anonymous traffic,
@@ -22,13 +22,19 @@
 
 import crypto from 'node:crypto';
 
+const developmentSecret = crypto.randomBytes(32).toString('hex');
+const compromisedLegacySecret = crypto.createHash('sha256').update('animaxia-auth:sqlite-local').digest('hex');
+
 /** Base signing secret — identical to auth.js authSecret(). */
 export function baseAuthSecret() {
-  if (process.env.AUTHSECRET) return process.env.AUTHSECRET;
-  return crypto
-    .createHash('sha256')
-    .update('animaxia-auth:sqlite-local')
-    .digest('hex');
+  const configured = process.env.AUTHSECRET;
+  if (configured && configured.length >= 32 && configured !== compromisedLegacySecret) return configured;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('AUTHSECRET must be a random secret of at least 32 characters in production');
+  }
+  // Unconfigured local development: random per-process secret. Tokens expire on restart.
+  // Never use a public/deterministic signing key, even for SQLite.
+  return developmentSecret;
 }
 
 /** Per-tenant derived signing secret (sha256, hex). */

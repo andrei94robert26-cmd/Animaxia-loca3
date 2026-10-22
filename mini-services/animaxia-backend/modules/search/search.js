@@ -58,6 +58,10 @@
  */
 
 import express from 'express';
+import metadataSearchRouter from './metadata.js';
+import { sqliteAdvancedSearch } from './sqlite-advanced.js';
+import { countFtsRows } from './content-fts.js';
+import { driverInfo } from '../../db.js';
 import { rows, one, parseJsonb } from '../platform/sql.js';
 import { requireAuth, requireAdmin } from '../users/auth.js';
 import { events } from '../platform/events.js';
@@ -68,7 +72,7 @@ import { clientIpOf } from '../security/security.js'; // FAZA 18: pipeline clien
 import pipeline, { PipelineRejection } from './pipeline.js'; // FAZA 18: 10-layer orchestration around the executors below
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-const ENGINE = 'animaxia-neon-fts';
+const ENGINE = 'animaxia-sqlite-fts5-hybrid';
 const SYNC_DEBOUNCE_MS = 3000;
 const LATENCY_WINDOW = 50;
 const SYNC_CHUNK = 25; // rows per multi-row upsert
@@ -349,7 +353,12 @@ async function forceResync() {
 
 // content:changed → dirty immediately; debounced background resync (3s).
 let resyncTimer = null;
-events.on('content:changed', () => {
+events.on('content:changed', ({ ids } = {}) => {
+  // Specific-id events are handled by the incremental searchdocs listener
+  // below. Avoid a redundant full-library rebuild after every JSON batch.
+  if (Array.isArray(ids) && ids.length && ids.every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)) {
+    return;
+  }
   dirty = true;
   if (resyncTimer) clearTimeout(resyncTimer);
   resyncTimer = setTimeout(() => {
@@ -465,83 +474,8 @@ function normalizeHit(row) {
  * SQLite minimal search.
  * Searches ONLY: id, title, year.
  */
-async function runAdvancedQuery({
-  q,
-  year,
-  limit,
-  page,
-  cursor = null,
-}) {
-  const params = [];
-  const P = (value) => {
-    params.push(value);
-    return `$${params.length}`;
-  };
-
-  const filters = [];
-
-  if (q) {
-    const text = String(q).trim();
-
-    if (/^\d+$/.test(text)) {
-      const idPh = P(Number(text));
-      const titlePh = P(`%${text}%`);
-      filters.push(`(s.contentid = ${idPh} OR s.title LIKE ${titlePh} COLLATE NOCASE)`);
-    } else {
-      const titlePh = P(`%${text}%`);
-      filters.push(`s.title LIKE ${titlePh} COLLATE NOCASE`);
-    }
-  }
-
-  if (year != null) {
-    filters.push(`s.year = ${P(Number(year))}`);
-  }
-
-  const whereSql = filters.length
-    ? `WHERE ${filters.join(' AND ')}`
-    : '';
-
-  const countRow = await one(
-    `SELECT COUNT(*) AS total FROM searchdocs s ${whereSql}`,
-    params,
-  );
-
-  const total = Number(countRow?.total ?? 0);
-
-  const dataParams = [...params];
-  dataParams.push(Number(limit));
-  const limitPh = `$${dataParams.length}`;
-
-  dataParams.push((Math.max(1, Number(page) || 1) - 1) * Number(limit));
-  const offsetPh = `$${dataParams.length}`;
-
-  const dataRows = await rows(
-    `SELECT
-       c.id,
-       c.title,
-       c.year,
-       c.url,
-       c.embedcode,
-       CASE
-         WHEN s.contentid = ${q && /^\d+$/.test(String(q).trim()) ? Number(q) : -1} THEN 2
-         ELSE 1
-       END AS _score
-     FROM searchdocs s
-     JOIN content c ON c.id = s.contentid
-     ${whereSql}
-     ORDER BY _score DESC, s.title COLLATE NOCASE ASC, s.contentid ASC
-     LIMIT ${limitPh} OFFSET ${offsetPh}`,
-    dataParams,
-  );
-
-  return {
-    total,
-    max_score: dataRows.length ? Math.max(...dataRows.map(r => Number(r._score || 0))) : 0,
-    data: dataRows.map(normalizeHit).filter(Boolean),
-    page: Math.max(1, Number(page) || 1),
-    nextCursor: null,
-    paginationMode: 'offset',
-  };
+async function runAdvancedQuery(params) {
+  return sqliteAdvancedSearch(params);
 }
 
 /* --------------------------- single-flight coalescing -------------------------- */
@@ -611,6 +545,7 @@ export async function runSearchLoad(q) {
 /* ---------------------------------- router ----------------------------------- */
 
 const router = express.Router();
+router.use(metadataSearchRouter);
 
 /** GET /api/search/advanced — Neon FTS + trigram fallback + SQL filters. Public. */
 router.get('/advanced', wrap(async (req, res) => {
@@ -622,6 +557,11 @@ router.get('/advanced', wrap(async (req, res) => {
   const actor = req.query.actor ? String(req.query.actor) : null;
   const studio = req.query.studio ? String(req.query.studio) : null;
   const category = req.query.category ? String(req.query.category) : null;
+  const franchise = req.query.franchise ? String(req.query.franchise) : null;
+  const trilogy = req.query.trilogy ? String(req.query.trilogy) : null;
+  const collection = req.query.collection ? String(req.query.collection) : null;
+  const description = req.query.description ? String(req.query.description) : null;
+  const posterId = req.query.posterId ? String(req.query.posterId) : null;
   const yearRaw = req.query.year != null && req.query.year !== '' ? String(req.query.year) : null;
   const minRatingRaw =
     req.query.minRating != null && req.query.minRating !== '' ? String(req.query.minRating) : null;
@@ -644,7 +584,8 @@ router.get('/advanced', wrap(async (req, res) => {
   const minRating = minRatingRaw != null && Number.isFinite(Number(minRatingRaw)) ? Number(minRatingRaw) : null;
 
   const hasFilters = Boolean(
-    type || genre || year != null || minRating != null || actor || studio || category,
+    type || genre || year != null || minRating != null || actor || studio || category ||
+    franchise || trilogy || collection || description || posterId,
   );
   if (!q && !hasFilters) {
     return res.status(400).json({ error: 'Missing required query parameter: q (or at least one filter)' });
@@ -671,11 +612,12 @@ router.get('/advanced', wrap(async (req, res) => {
 
   let legacyPath = true;
   const sigParams = {
-    type, genre, year, minRating, actor, studio, category, sort, fuzzyEnabled, limit, page,
+    type, genre, year, minRating, actor, studio, category,
+    franchise, trilogy, collection, description, posterId, sort, fuzzyEnabled, limit, page,
   };
   let executor;
 
-  if (searchCluster.enabled() && !cursorRaw) {
+  if (driverInfo().driver !== 'sqlite' && searchCluster.enabled() && !cursorRaw) {
     legacyPath = false;
     sigParams.shardHint = shardHint; // the hint changes the fan-out → part of the signature
     executor = async () => {
@@ -730,6 +672,7 @@ router.get('/advanced', wrap(async (req, res) => {
         actor,
         studio,
         category,
+        franchise, trilogy, collection, description, posterId,
         sort,
         fuzzyEnabled,
         limit,
@@ -798,10 +741,12 @@ router.get('/autocomplete', wrap(async (req, res) => {
   const executor = async () => {
     await ensureSynced();
     const matched = await rows(
-      `SELECT s.contentid, s.title, s.year
-       FROM searchdocs s
-       WHERE s.title LIKE $1 || '%' COLLATE NOCASE
-       ORDER BY s.title COLLATE NOCASE ASC, s.contentid ASC
+      `SELECT c.id AS contentid, c.title, c.year, c.type, c.thumbnail,
+              COALESCE(json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.rating'),
+                       json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.score')) AS rating
+       FROM Content c
+       WHERE c.title LIKE $1 || '%' COLLATE NOCASE
+       ORDER BY c.title COLLATE NOCASE ASC, c.id ASC
        LIMIT 8`,
       [q],
     );
@@ -840,19 +785,36 @@ router.get('/autocomplete', wrap(async (req, res) => {
   return res.json(out.body);
 }));
 
-/** GET /api/search/filters — distinct filter values for UI dropdowns. Public. */
-router.get('/filters', wrap(async (req, res) => {
-  await ensureSynced();
-
-  const years = await rows(
-    `SELECT DISTINCT year
-     FROM searchdocs
-     WHERE year IS NOT NULL
-     ORDER BY year DESC`
-  );
-
+/** GET /api/search/filters — actual SQLite facet values from persisted JSON. */
+router.get('/filters', wrap(async (_req, res) => {
+  // Bound each facet to prevent oversized API responses. For very large
+  // catalogs these queries must eventually move to a materialized facet index.
+  const [yearRows, typeRows] = await Promise.all([
+    rows('SELECT DISTINCT year FROM Content WHERE year IS NOT NULL ORDER BY year DESC LIMIT 150'),
+    rows("SELECT type, COUNT(*) AS n FROM Content GROUP BY type ORDER BY n DESC, type ASC LIMIT 100"),
+  ]);
+  const jsonFacets = async (path) => rows(`
+    SELECT trim(CASE WHEN j.type = 'object'
+      THEN COALESCE(json_extract(j.value, '$.name'), '')
+      ELSE CAST(j.value AS TEXT) END) AS value, COUNT(*) AS n
+    FROM Content c, json_each(
+      CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '${path}'
+    ) j
+    WHERE j.type IN ('text', 'object')
+    GROUP BY value HAVING value <> ''
+    ORDER BY n DESC, value ASC LIMIT 100
+  `);
+  const [genres, actors, studios] = await Promise.all([
+    jsonFacets('$.genres'), jsonFacets('$.actors'), jsonFacets('$.studios'),
+  ]);
   return res.json({
-    years: years.map((r) => Number(r.year)),
+    years: yearRows.map((r) => Number(r.year)),
+    categories: typeRows.map((r) => ({ value: r.type, count: Number(r.n) })),
+    types: typeRows.map((r) => ({ value: r.type, count: Number(r.n) })),
+    genres: genres.map((r) => ({ value: r.value, count: Number(r.n) })),
+    actors: actors.map((r) => ({ value: r.value, count: Number(r.n) })),
+    studios: studios.map((r) => ({ value: r.value, count: Number(r.n) })),
+    backend: 'sqlite',
   });
 }));
 
@@ -1025,21 +987,13 @@ router.post('/stress', requireAuth, requireAdmin, wrap(async (req, res) => {
 router.get('/status', wrap(async (req, res) => {
   await ensureSynced().catch((err) => logger.warn(`[search] status sync failed: ${err.message}`));
   let docs = 0;
-  let pgTrgm = false;
-  try {
-    const [docRow, extRow] = await Promise.all([
-      one('SELECT COUNT(*) AS n FROM searchdocs'),
-      one(`SELECT COUNT(*) AS n FROM pg_extension WHERE extname = 'pg_trgm'`),
-    ]);
-    docs = Number(docRow?.n ?? 0);
-    pgTrgm = Number(extRow?.n ?? 0) > 0;
-  } catch (err) {
-    logger.warn(`[search] status counts failed: ${err.message}`);
-  }
+  const docRow = await one('SELECT COUNT(*) AS n FROM searchdocs').catch(() => null);
+  docs = Number(docRow?.n ?? 0);
+  const pgTrgm = false; // SQLite: pg_trgm extension is unavailable.
   // FAZA 13 (Task 13-3): additive cluster health field — null when the
   // cluster is disabled or its health probe fails (legacy shape untouched).
   let clusterHealth = null;
-  if (searchCluster.enabled()) {
+  if (driverInfo().driver !== 'sqlite' && searchCluster.enabled()) {
     try {
       clusterHealth = await searchCluster.health();
     } catch (err) {
@@ -1050,8 +1004,9 @@ router.get('/status', wrap(async (req, res) => {
   return res.json({
     docs,
     engine: ENGINE,
-    backend: 'neon-postgresql',
-    extensions: { pg_trgm: pgTrgm },
+    backend: driverInfo().driver,
+    extensions: { pg_trgm: pgTrgm, fts5: true },
+    fullTextIndex: { indexedDocuments: countFtsRows(), engine: 'sqlite-fts5', distributed: false },
     lastSync,
     dirty,
     latency: searchLatencySnapshot(),

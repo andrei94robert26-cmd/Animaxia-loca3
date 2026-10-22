@@ -17,6 +17,7 @@ import { breakerStats } from './utils/fetcher.js';
 import { mineUrl } from './miner.js';
 import { seed } from './seed.js';
 import { playerAllowedTypes, resolvePlayer } from './modules/player/player.js';
+import { baseAuthSecret } from './modules/tenant/jwt-tenant.js';
 import animeRouter from './modules/anime/jikan.js';
 import { moviesRouter, tvRouter } from './modules/movies/tmdb.js';
 import footballRouter from './modules/sports/football.js';
@@ -96,6 +97,20 @@ import { franchiseRouter, trilogyRouter } from './modules/discover/collections.j
 /* FAZA 16 (Task 16-a): global source dedup registry (contentsources) +
  * real scale report (live measurements, honest verdicts). */
 import ingestRouter from './modules/ingest/dedup.js';
+import metadataIngestRouter from './modules/ingest/metadata.js';
+import metadataQueueRouter from './modules/ingest/queue-routes.js';
+import sourceRegistryRouter from './modules/ingest/source-routes.js';
+import providerCatalogRouter from './modules/providers/routes.js';
+import { startProviderAutoSync, stopProviderAutoSync } from './modules/providers/auto-sync.js';
+import openSearchRoutes from './modules/search/opensearch-routes.js';
+import { startOpenSearchWorker, stopOpenSearchWorker } from './modules/search/opensearch.js';
+import pgShadowRouter from './modules/postgres/routes.js';
+import { startPgShadowWorker,stopPgShadowWorker } from './modules/postgres/shadow.js';
+import {stopPgCatalogPilot} from './modules/postgres/catalog-pilot.js';
+import {startPgPilotProjection,stopPgPilotProjection} from './modules/postgres/pilot-projection.js';
+import { startDistributedShadow,stopDistributedShadow } from './modules/postgres/distributed-shadow.js';
+import { startMinerAutoSync, stopMinerAutoSync } from './modules/miner/auto-sync.js';
+import { ensureMetadataQueueSchema, startMetadataQueueWorker, stopMetadataQueueWorker } from './modules/ingest/queue.js';
 import scaleRouter from './modules/platform/scale.js';
 
 /* FAZA 17-a (Task 17-a): resilience core (per-request timeout, load shedding,
@@ -198,10 +213,10 @@ registerShardingCollectors({
  * wildcard (`|| true`). No Origin header (curl / same-origin) is always OK. */
 const CORS_ALLOWLIST = [
   ...(process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean),
-  'http://localhost:81',
-  'http://localhost:3000',
+  ...(process.env.NODE_ENV !== 'production'
+    ? ['http://localhost:81', 'http://localhost:3000'] : []),
 ];
-const CORS_MIRROR = process.env.CORSMODE === 'mirror';
+const CORS_MIRROR = process.env.NODE_ENV !== 'production' && process.env.CORSMODE === 'mirror';
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -343,6 +358,12 @@ app.use('/api/trilogies', cacheMiddleware(), trilogyRouter);
 // FAZA 16 (Task 16-a): /api/ingest MUST precede the content routes below;
 // /api/scale is independent (additive mount).
 app.use('/api/ingest', ingestRouter);
+app.use('/api/ingest', metadataIngestRouter);
+app.use('/api/ingest', metadataQueueRouter);
+app.use('/api/integrations/sources', sourceRegistryRouter);
+app.use('/api/integrations/providers', providerCatalogRouter);
+app.use('/api/search', openSearchRoutes);
+app.use('/api/migration/postgres', pgShadowRouter);
 app.use('/api/scale', scaleRouter);
 
 // FAZA 13 (Task 13-3): /api/shards — sharding model/schema/pools/cluster
@@ -690,8 +711,8 @@ async function handleMine(req, res) {
 
 // GET /api/miner also UPSERTs (explicitly uncached — every call re-mines and re-upserts).
 // TS1 (security): mining upserts content — both verbs now require authentication.
-app.get('/api/miner', wrap(handleMine));
-app.post('/api/miner', wrap(handleMine));
+app.get('/api/miner', requireAuth, requireAdmin, wrap(handleMine));
+app.post('/api/miner', requireAuth, requireAdmin, wrap(handleMine));
 
 /* TS1 (security): seeding is an admin-only mutation. */
 app.post(
@@ -728,7 +749,30 @@ app.use((err, req, res, next) => {
 /* ---------------------------------- boot ------------------------------------ */
 
 async function main() {
+  // Refuse to expose a production service without a safe, shared JWT signing key.
+  if (process.env.NODE_ENV === 'production') baseAuthSecret();
   await initDb();
+
+  // Durable JSON metadata imports: schema always available, worker opt-in.
+  // Keep this separate from miner's existing TMDB/Jikan persistent job queue.
+  try {
+    ensureMetadataQueueSchema();
+    startMetadataQueueWorker();
+  } catch (err) {
+    logger.error('[boot] JSON metadata queue unavailable: ' + err.message);
+  }
+  // Independent optional integrations must not be skipped when an unrelated
+  // miner/provider subsystem fails to initialize.
+  for (const [name, start] of [
+    ['provider-auto-sync', startProviderAutoSync],
+    ['opensearch-outbox', startOpenSearchWorker],
+    ['postgres-shadow', startPgShadowWorker],
+    ['postgres-distributed', startDistributedShadow],
+    ['postgres-pilot-projection', startPgPilotProjection],
+  ]) {
+    try { start(); }
+    catch (err) { logger.warn('[boot] '+name+' disabled: '+err.message); }
+  }
 
   // Phase-2 platform schema (users, tokens, watchlist, history, comments,
   // votes, likes, views, subscriptions, audit logs, ai chats) — idempotent.
@@ -775,6 +819,7 @@ async function main() {
   try {
     await ensureMinerSchema();
     minerBoot(); // interrupted-job recovery + metrics collector + queue resume
+    startMinerAutoSync(); // env-gated TMDB/Jikan periodic scheduling
     minerReady = true;
   } catch (err) {
     logger.warn(`[boot] Miner schema degraded (miner routes will answer 503): ${err.message}`);
@@ -849,6 +894,14 @@ async function main() {
 
   const shutdown = async (signal) => {
     logger.info(`[shutdown] ${signal} received — closing server`);
+    stopMetadataQueueWorker();
+    stopMinerAutoSync();
+    stopProviderAutoSync();
+    stopOpenSearchWorker();
+    await stopDistributedShadow();
+    await stopPgShadowWorker();
+    await stopPgCatalogPilot();
+    await stopPgPilotProjection();
     server.close(async () => {
       await closeDb();
       await closeShardPools(); // FAZA 13 (sharding): dedicated shard branch pools (main pool closed by closeDb)

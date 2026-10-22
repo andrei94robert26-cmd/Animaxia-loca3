@@ -1,0 +1,312 @@
+/** Live PostgreSQL concurrency test: multiple workers, no duplicate task claims. */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import {spawn} from 'node:child_process';
+import pg from 'pg';
+import {initDb,upsertContent,deleteContent} from '../db.js';
+import {localDb} from '../modules/local/sqlite.js';
+import {setupPgShadow,stopPgShadowWorker,projectPgShadow} from '../modules/postgres/shadow.js';
+import {setupDistributedShadow,stageDistributedShadow,workDistributedShadow,
+  distributedShadowStatus,publishDistributedShadowSnapshot} from '../modules/postgres/distributed-shadow.js';
+
+test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refresh',async(t)=>{
+  if(!process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL){
+    t.skip('Requires ephemeral PostgreSQL CI service');return;
+  }
+  const prior={
+    ANIMAXIA_PG_DISTRIBUTED_BRIDGE:process.env.ANIMAXIA_PG_DISTRIBUTED_BRIDGE,
+    ANIMAXIA_PG_SHADOW_WORKER:process.env.ANIMAXIA_PG_SHADOW_WORKER,
+  };
+  delete process.env.ANIMAXIA_PG_SHADOW_WORKER;
+  process.env.ANIMAXIA_PG_DISTRIBUTED_BRIDGE='true';
+  const db=new pg.Pool({
+    connectionString:process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL,
+    ssl:false,max:5,
+  });
+  const nonce=crypto.randomBytes(6).toString('hex');
+  const records=[];
+  try{
+    await initDb();
+    await setupPgShadow();
+    // Simulate a deployed Stage-17 queue that has NO source_revision.
+    // The new explicit setup must alter it safely in place.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS animaxia_shadow_tasks(
+        contentid BIGINT PRIMARY KEY,
+        operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
+        document JSONB,
+        generation BIGINT NOT NULL DEFAULT 1,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK((operation='upsert' AND document IS NOT NULL) OR
+          (operation='delete' AND document IS NULL))
+      )
+    `);
+    await setupDistributedShadow();
+    await setupDistributedShadow(); // idempotent upgrade
+    const columns=await db.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name='animaxia_shadow_tasks' AND column_name='source_revision'
+    `);
+    assert.equal(columns.rowCount,1,'Stage-17 task table must migrate in-place');
+    const appliedTable=await db.query(
+      "SELECT to_regclass('public.animaxia_shadow_applied_versions') AS name"
+    );
+    assert.equal(appliedTable.rows[0].name,'animaxia_shadow_applied_versions');
+    assert.equal((await distributedShadowStatus()).configured,true);
+    assert.equal((await distributedShadowStatus()).distributed,true);
+    for(let i=0;i<8;i++){
+      const added=await upsertContent({
+        externalid:'pg-distributed-'+nonce+'-'+i,
+        title:'Distributed Test '+nonce+' '+i,type:i%2?'tv':'movie',
+        metadata:{overview:'Durable PostgreSQL distributed metadata',
+          actors:['Worker CI'],sourceAttribution:'Testing',
+          privateKey:'do not mirror',
+          player:{sources:[{url:'https://secret.invalid/private.m3u8'}]}},
+      });
+      records.push(added.record.id);
+    }
+    const staged=await stageDistributedShadow({limit:100});
+    assert.ok(staged.staged>=8);
+    assert.equal(staged.failed,0);
+    assert.equal(staged.pendingLocal,0);
+
+    // A separate JS module instance simulates an independently running PG
+    // worker process; both share only their PostgreSQL task table.
+    const independent=await import('../modules/postgres/distributed-pg-worker.js?ci-worker=2');
+    const [workerA,workerB]=await Promise.all([
+      workDistributedShadow({limit:40}),
+      independent.workDistributedShadow({limit:40}),
+    ]);
+    assert.equal(workerA.failed+workerB.failed,0);
+    assert.equal(workerA.processed+workerB.processed,staged.staged);
+    const entries=await db.query(
+      'SELECT id::text,title,metadata FROM animaxia_shadow_content WHERE id=ANY($1::bigint[])',
+      [records.map(String)]);
+    assert.equal(entries.rows.length,8);
+    assert.ok(entries.rows.every(v=>!JSON.stringify(v).includes('private.m3u8')));
+    assert.ok(entries.rows.every(v=>!JSON.stringify(v).includes('do not mirror')));
+    let tasks=await db.query('SELECT contentid FROM animaxia_shadow_tasks');
+    assert.equal(tasks.rowCount,0);
+
+    // A job claimed by a different transaction is SKIPPED, not duplicated.
+    // Rolling back a crashed claimant makes it available again.
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-3',
+      title:'Locked task recovery '+nonce,type:'tv',
+      metadata:{actors:['Recovery CI']},
+    });
+    assert.ok((await stageDistributedShadow({limit:10})).staged>=1);
+    const lockClient=await db.connect();
+    try{
+      await lockClient.query('BEGIN');
+      const hold=await lockClient.query(
+        'SELECT contentid FROM animaxia_shadow_tasks WHERE contentid=$1 FOR UPDATE',
+        [records[3]]);
+      assert.equal(hold.rowCount,1);
+      const skipping=await workDistributedShadow({limit:1});
+      assert.equal(skipping.processed,0,'A locked task must not be claimed twice');
+      assert.equal(skipping.failed,0);
+      await lockClient.query('ROLLBACK'); // simulate crash before commit
+    }finally{lockClient.release();}
+    const recovery=await workDistributedShadow({limit:1});
+    assert.equal(recovery.processed,1,'Rolled-back task should be claimable again');
+    assert.equal((await db.query(
+      'SELECT title FROM animaxia_shadow_content WHERE id=$1',[records[3]]
+    )).rows[0].title,'Locked task recovery '+nonce);
+
+    // PostgreSQL transactional claim failure must preserve the task and
+    // assign backoff atomically; no competing worker acknowledges it.
+    const poison=records[0];
+    const appliedVersion=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [poison]);
+    assert.equal(appliedVersion.rowCount,1);
+    const poisonRev=BigInt(appliedVersion.rows[0].revision)+1n;
+    await db.query(`
+      INSERT INTO animaxia_shadow_tasks(contentid,operation,document,source_revision)
+      VALUES($1,'upsert','{}'::jsonb,$2)
+    `,[poison,poisonRev.toString()]);
+    const broken=await workDistributedShadow({limit:1});
+    assert.equal(broken.failed,1);
+    // The attempted watermark update is rolled back with the savepoint.
+    // A retry of the SAME revision must remain eligible after fixing data.
+    const watermarkAfterFailure=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [poison]
+    );
+    assert.equal(BigInt(watermarkAfterFailure.rows[0].revision),
+      BigInt(appliedVersion.rows[0].revision));
+    let stuck=await db.query(
+      'SELECT attempts,next_run_at>NOW() AS later FROM animaxia_shadow_tasks WHERE contentid=$1',
+      [poison]);
+    assert.equal(stuck.rows[0].attempts,1);
+    assert.equal(stuck.rows[0].later,true);
+    // Refresh the poison row with the latest authoritative snapshot.
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-0',
+      title:'Distributed Updated '+nonce,type:'movie',
+      metadata:{actors:['Updated Worker'],overview:'No stale catalog allowed'},
+    });
+    const queued=await stageDistributedShadow({limit:100});
+    assert.ok(queued.staged>=1);
+    const retry=await workDistributedShadow({limit:10});
+    assert.equal(retry.failed,0);
+    assert.ok(retry.processed>=1);
+    const updated=await db.query(
+      'SELECT title,metadata FROM animaxia_shadow_content WHERE id=$1',[poison]);
+    assert.equal(updated.rows[0].title,'Distributed Updated '+nonce);
+    assert.deepEqual(updated.rows[0].metadata.actors,['Updated Worker']);
+
+    // Canonical delete is carried through PG tasks, not applied directly
+    // by the feeder. PG workers replay the deletion transactionally.
+    await deleteContent(records[1]);
+    const deleted=await stageDistributedShadow({limit:100});
+    assert.ok(deleted.staged>=1);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    assert.equal((await db.query(
+      'SELECT id FROM animaxia_shadow_content WHERE id=$1',[records[1]]
+    )).rowCount,0);
+
+    // REPLAY A: while a newer task is waiting in the PostgreSQL queue,
+    // an older SQLite event must not overwrite that pending snapshot.
+    const candidate=records[4];
+    const savedOlder=projectPgShadow(
+      localDb.prepare('SELECT * FROM Content WHERE id=?').get(candidate)
+    );
+    const applied=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(applied.rowCount,1);
+    const previousRevision=Number(applied.rows[0].revision);
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-4',
+      title:'Newer than replay '+nonce,type:'movie',
+      metadata:{actors:['Recent Revision']},
+    });
+    const updateJob=await stageDistributedShadow({limit:100});
+    assert.ok(updateJob.staged>=1);
+    const queuedNewer=await db.query(
+      'SELECT source_revision::text AS revision,document FROM animaxia_shadow_tasks WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(queuedNewer.rowCount,1);
+    const newerRevision=Number(queuedNewer.rows[0].revision);
+    assert.ok(newerRevision>previousRevision,'SQLite revision must increase after ACK');
+    const staleWhenQueued=await publishDistributedShadowSnapshot(
+      {contentid:candidate,revision:previousRevision},savedOlder,{db}
+    );
+    assert.equal(staleWhenQueued,false,'Stale event must not replace newer PG task');
+    const remains=await db.query(
+      'SELECT source_revision::text AS revision,document FROM animaxia_shadow_tasks WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(Number(remains.rows[0].revision),newerRevision);
+    assert.equal(remains.rows[0].document.title,'Newer than replay '+nonce);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+
+    // REPLAY B: after the newer task was already acknowledged and removed,
+    // an old event may be queued again, but the PG high-water ledger must
+    // discard it without reverting the newer content.
+    assert.equal(await publishDistributedShadowSnapshot(
+      {contentid:candidate,revision:previousRevision},savedOlder,{db}
+    ),true);
+    const discarded=await workDistributedShadow({limit:10});
+    assert.equal(discarded.failed,0);
+    assert.equal(discarded.staleDiscarded,1);
+    assert.equal(discarded.processed,0);
+    const afterOldReplay=await db.query(
+      'SELECT title FROM animaxia_shadow_content WHERE id=$1',[candidate]
+    );
+    assert.equal(afterOldReplay.rows[0].title,'Newer than replay '+nonce);
+    const appliedAfterReplay=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [candidate]
+    );
+    assert.equal(Number(appliedAfterReplay.rows[0].revision),newerRevision);
+
+    // REPLAY C: the same ledger must protect tombstones. An old UP SERT
+    // cannot resurrect content already deleted and acknowledged.
+    const tombstoneId=records[5];
+    const beforeDeletion=projectPgShadow(
+      localDb.prepare('SELECT * FROM Content WHERE id=?').get(tombstoneId)
+    );
+    const lastLive=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [tombstoneId]
+    );
+    await deleteContent(tombstoneId);
+    assert.ok((await stageDistributedShadow({limit:40})).staged>=1);
+    assert.equal((await workDistributedShadow({limit:10})).failed,0);
+    assert.equal((await db.query(
+      'SELECT id FROM animaxia_shadow_content WHERE id=$1',[tombstoneId]
+    )).rowCount,0);
+    assert.equal(await publishDistributedShadowSnapshot(
+      {contentid:tombstoneId,revision:Number(lastLive.rows[0].revision)},
+      beforeDeletion,{db}
+    ),true);
+    const discardedResurrection=await workDistributedShadow({limit:10});
+    assert.equal(discardedResurrection.failed,0);
+    assert.equal(discardedResurrection.staleDiscarded,1);
+    assert.equal((await db.query(
+      'SELECT id FROM animaxia_shadow_content WHERE id=$1',[tombstoneId]
+    )).rowCount,0,'Stale UPSERT must not resurrect a PG tombstone');
+
+    // A completely separate Node process uses ONLY PostgreSQL and applies
+    // queued tasks. No SQLite Content import or shared SQLite volume needed.
+    await upsertContent({
+      externalid:'pg-distributed-'+nonce+'-2',
+      title:'Applied by standalone PG worker '+nonce,
+      type:'movie',metadata:{actors:['Standalone Worker']},
+    });
+    assert.ok((await stageDistributedShadow({limit:100})).staged>=1);
+    const child=spawn(process.execPath,['cli/postgres-shadow-worker.mjs'],{
+      cwd:process.cwd(),
+      env:{...process.env,ANIMAXIA_PG_DISTRIBUTED_WORKER:'true',
+        ANIMAXIA_PG_DISTRIBUTED_BRIDGE:'false'},
+      stdio:['ignore','pipe','pipe'],
+    });
+    let stdout='',stderr='';
+    child.stdout.on('data',chunk=>{stdout+=chunk.toString();});
+    child.stderr.on('data',chunk=>{stderr+=chunk.toString();});
+    const childExit=new Promise((resolve,reject)=>{
+      child.once('error',reject);
+      child.once('exit',(code,signal)=>resolve({code,signal}));
+    });
+    try{
+      let complete=false;
+      for(let attempt=0;attempt<48;attempt++){
+        await new Promise(resolve=>setTimeout(resolve,250));
+        const check=await db.query(
+          'SELECT title FROM animaxia_shadow_content WHERE id=$1',[records[2]]);
+        if(check.rows[0]?.title==='Applied by standalone PG worker '+nonce){
+          complete=true;break;
+        }
+      }
+      assert.equal(complete,true,'Standalone PostgreSQL-only process did not apply queued job');
+    }finally{
+      child.kill('SIGTERM');
+      const exit=await childExit;
+      assert.equal(exit.code,0,'Standalone worker exit: '+stderr);
+    }
+    assert.match(stdout,/PostgreSQL-only worker started/);
+  }finally{
+    for(const id of records){
+      try{await deleteContent(id);}catch{/* already deleted */}
+    }
+    // Fully clean disposable CI PostgreSQL shadow records and jobs.
+    await db.query('DELETE FROM animaxia_shadow_tasks WHERE contentid=ANY($1::bigint[])',
+      [records.map(String)]);
+    await db.query('DELETE FROM animaxia_shadow_content WHERE id=ANY($1::bigint[])',
+      [records.map(String)]);
+    for(const id of records)localDb.prepare(
+      'DELETE FROM pg_shadow_outbox WHERE contentid=?').run(id);
+    for(const [k,v] of Object.entries(prior)){
+      if(v===undefined)delete process.env[k];else process.env[k]=v;
+    }
+    await stopPgShadowWorker(); await db.end();
+  }
+});

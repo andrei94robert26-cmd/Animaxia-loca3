@@ -9,6 +9,7 @@ import { logger } from '../../utils/logger.js';
 function policyAllows() {
   return {
     mp4: process.env.PLAYERALLOWMP4 !== 'false',
+    mpd: process.env.PLAYERALLOWDASH === 'true',
     m3u8: process.env.PLAYERALLOWM3U8 !== 'false',
     iframe: process.env.PLAYERALLOWIFRAME !== 'false',
     youtube: process.env.PLAYERALLOWYOUTUBE !== 'false',
@@ -24,8 +25,9 @@ export function playerAllowedTypes() {
 
 function inferType(url) {
   const u = String(url || '').toLowerCase();
-  if (u.includes('.mp4')) return 'mp4';
-  if (u.includes('.m3u8')) return 'm3u8';
+  if (/\.mp4(?:[?#]|$)/.test(u)) return 'mp4';
+  if (/\.m3u8(?:[?#]|$)|[?&]r_file=chunklist\.m3u8/.test(u)) return 'm3u8';
+  if (/\.mpd(?:[?#]|$)/.test(u)) return 'mpd';
   if (/youtube\.com|youtu\.be|youtube-nocookie\.com/.test(u)) return 'youtube';
   return 'iframe';
 }
@@ -35,7 +37,7 @@ function normalizeSources(rawSources) {
   return rawSources
     .filter((s) => s && typeof s === 'object' && (s.url || s.src))
     .map((s) => ({
-      type: s.type || inferType(s.url || s.src),
+      type: !s.type || s.type === 'video' ? inferType(s.url || s.src) : s.type,
       url: s.url || s.src,
       label: s.label || s.type || 'Source',
     }));
@@ -81,7 +83,10 @@ export async function resolvePlayer(content) {
   const allowedTypes = playerAllowedTypes();
 
   const rawSources = content?.metadata?.player?.sources || content?.metadata?.sources || [];
-  const normalized = normalizeSources(rawSources);
+  const normalized = normalizeSources(rawSources).filter((s) => {
+    try { return ['http:', 'https:'].includes(new URL(s.url).protocol); }
+    catch { return false; }
+  });
   const hasAnyRaw = normalized.length > 0;
   const sources = normalized.filter((s) => policy[s.type]);
 
@@ -99,6 +104,7 @@ export async function resolvePlayer(content) {
     const primary =
       sources.find((s) => s.type === 'mp4') ||
       sources.find((s) => s.type === 'm3u8') ||
+      sources.find((s) => s.type === 'mpd') ||
       sources.find((s) => s.type === 'youtube') ||
       sources.find((s) => s.type === 'iframe') ||
       null;

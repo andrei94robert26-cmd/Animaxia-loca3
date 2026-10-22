@@ -1,4 +1,7 @@
 import { localDb } from './modules/local/sqlite.js';
+import { ensureContentFts } from './modules/search/content-fts.js';
+import { ensureOpenSearchOutbox } from './modules/search/opensearch-outbox.js';
+import { ensurePgShadowOutbox } from './modules/postgres/shadow-outbox.js';
 import { shardMap, shardBranchName } from './modules/sharding/model.js';
 import { logger } from './utils/logger.js';
 
@@ -16,37 +19,39 @@ function detectYear(title, metadata = {}) {
   return m ? Number(m[0]) : null;
 }
 
+function inferMediaType(url, embed = false) {
+  if (embed) return 'iframe';
+  const value = String(url || '').toLowerCase();
+  if (/youtube\.com|youtu\.be|youtube-nocookie\.com/.test(value)) return 'youtube';
+  if (/\.m3u8(?:[?#]|$)/.test(value)) return 'm3u8';
+  if (/\.mpd(?:[?#]|$)/.test(value)) return 'mpd';
+  if (/\.mp4(?:[?#]|$)/.test(value)) return 'mp4';
+  return 'iframe';
+}
+
 function normalizeRow(row) {
   if (!row) return null;
-
-  const sources = [];
-
-  if (row.url) {
-    sources.push({
-      url: row.url,
-      type: row.embedcode === row.url ? 'iframe' : 'video'
-    });
+  let stored = {};
+  try { stored = row.metadata ? JSON.parse(row.metadata) : {}; } catch { stored = {}; }
+  const sources = Array.isArray(stored?.player?.sources) ? [...stored.player.sources] : [];
+  const seen = new Set(sources.map((source) => source.url));
+  if (row.url && !seen.has(row.url)) {
+    sources.push({ url: row.url, type: inferMediaType(row.url, row.embedcode === row.url) });
+    seen.add(row.url);
   }
-
-  if (row.embedcode && row.embedcode !== row.url) {
-    sources.push({ url: row.embedcode, type: 'iframe' });
+  if (row.embedcode && !seen.has(row.embedcode)) {
+    sources.push({ url: row.embedcode, type: inferMediaType(row.embedcode, true) });
   }
-
+  const metadata = { ...stored, year: row.year ?? stored.year ?? null, player: { ...(stored.player || {}), sources } };
   return {
     ...row,
     id: Number(row.id),
     year: row.year == null ? null : Number(row.year),
-
-    // Compatibility fields for old modules
-    externalid: null,
-    type: 'content',
-    thumbnail: null,
-    createdat: null,
-
-    metadata: {
-      year: row.year ?? null,
-      player: { sources }
-    }
+    externalid: row.externalid || null,
+    type: row.type || stored.mediaType || 'content',
+    thumbnail: row.thumbnail || null,
+    createdat: row.createdat || null,
+    metadata
   };
 }
 
@@ -107,7 +112,12 @@ export async function initDb() {
       title TEXT NOT NULL,
       year INTEGER,
       url TEXT,
-      embedcode TEXT
+      embedcode TEXT,
+      externalid TEXT,
+      type TEXT NOT NULL DEFAULT 'content',
+      thumbnail TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      createdat TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
@@ -123,6 +133,11 @@ export async function initDb() {
 
   if (!columns.has("embedcode"))
     localDb.exec("ALTER TABLE Content ADD COLUMN embedcode TEXT");
+  if (!columns.has('externalid')) localDb.exec('ALTER TABLE Content ADD COLUMN externalid TEXT');
+  if (!columns.has('type')) localDb.exec("ALTER TABLE Content ADD COLUMN type TEXT NOT NULL DEFAULT 'content'");
+  if (!columns.has('thumbnail')) localDb.exec('ALTER TABLE Content ADD COLUMN thumbnail TEXT');
+  if (!columns.has('metadata')) localDb.exec("ALTER TABLE Content ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'");
+  if (!columns.has('createdat')) localDb.exec('ALTER TABLE Content ADD COLUMN createdat TEXT');
 
   localDb.exec(`
     CREATE INDEX IF NOT EXISTS idx_content_title
@@ -131,14 +146,46 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_content_year
       ON Content(year);
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_content_unique_media
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_content_externalid
+      ON Content(externalid) WHERE externalid IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_content_type
+      ON Content(type);
+
+    -- ID-bearing API/addon records may legitimately share title/year/media
+    -- with different episodes/editions/providers. Keep legacy-url dedupe only
+    -- for manual rows that lack a stable externalid.
+    DROP INDEX IF EXISTS idx_content_unique_media;
+    CREATE UNIQUE INDEX idx_content_unique_media
       ON Content(
         lower(trim(title)),
         ifnull(year, -1),
         ifnull(url, ''),
         ifnull(embedcode, '')
-      );
+      ) WHERE externalid IS NULL;
   `);
+
+  // Build the native full-text index only on first installation; all later
+  // INSERT/UPDATE/DELETE mutations stay synchronized through SQLite triggers.
+  ensureContentFts();
+  // Search outbox is opt-in; no extra write amplification on installations
+  // that have not configured OpenSearch. Existing rows use manual backfill.
+  if (process.env.ANIMAXIA_OPENSEARCH_URL) ensureOpenSearchOutbox();
+  // Separate, opt-in PostgreSQL shadow migration queue. SQLite stays primary.
+  if (process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL) ensurePgShadowOutbox();
+
+  // Auth must not depend on optional AI/tenant migrations completing.
+  // Fresh SQLite installs can lack vectorembeddings, which used to abort the
+  // tenant migration before the refresh-token tenantid column was added.
+  for (const [table, column, ddl] of [
+    ['refreshtokens', 'tenantid', 'TEXT'],
+    ['users', 'emailverified', 'INTEGER NOT NULL DEFAULT 0'],
+    ['users', 'twofaenabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ]) {
+    const found = localDb.prepare(`PRAGMA table_info(${table})`).all()
+      .some((entry) => entry.name.toLowerCase() === column);
+    if (!found) localDb.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
 
   touch();
   logger.info('[DB] SQLite minimal database ready');
@@ -184,8 +231,7 @@ export async function listContent({
   const where = [];
   const params = [];
 
-  // type retained for API compatibility, intentionally ignored.
-  void type;
+  if (type) { where.push('type = ? COLLATE NOCASE'); params.push(String(type)); }
 
   if (search) {
     where.push('title LIKE ? COLLATE NOCASE');
@@ -211,7 +257,7 @@ export async function listContent({
   const offset = (safePage - 1) * safeLimit;
 
   const data = localDb.prepare(`
-    SELECT id,title,year,url,embedcode
+    SELECT *
     FROM Content
     ${clause}
     ORDER BY ${order}
@@ -235,7 +281,7 @@ export async function getContentById(id, opts = {}) {
   void opts;
 
   const row = localDb.prepare(`
-    SELECT id,title,year,url,embedcode
+    SELECT *
     FROM Content
     WHERE id=?
     LIMIT 1
@@ -246,90 +292,52 @@ export async function getContentById(id, opts = {}) {
 }
 
 export async function getContentByExternalId(externalid) {
-  const source = localDb.prepare(`
-    SELECT contentId
-    FROM contentsources
-    WHERE originalUrl=? OR url=?
-    ORDER BY id DESC
-    LIMIT 1
-  `).get(String(externalid), String(externalid));
-
-  if (!source?.contentId) return null;
-
-  return getContentById(source.contentId);
+  const key = String(externalid || '');
+  let row = localDb.prepare('SELECT * FROM Content WHERE externalid=? LIMIT 1').get(key);
+  if (!row) {
+    const source = localDb.prepare(`
+      SELECT contentId FROM contentsources
+      WHERE originalUrl=? OR url=? ORDER BY id DESC LIMIT 1
+    `).get(key, key);
+    if (source?.contentId) row = localDb.prepare('SELECT * FROM Content WHERE id=?').get(source.contentId);
+  }
+  return normalizeRow(row);
 }
 
-export async function upsertContent({
-  externalid,
-  type,
-  title,
-  metadata = {},
-  thumbnail
-}) {
-  void type;
-  void thumbnail;
-
-  if (!title) {
-    throw new Error('upsertContent requires title');
+export async function upsertContent({ externalid, type, title, metadata = {}, thumbnail }) {
+  if (!title) throw new Error('upsertContent requires title');
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw new Error('Content metadata must be a JSON object');
   }
-
-  const existing = externalid
-    ? await getContentByExternalId(externalid)
-    : null;
-
-  const sources = Array.isArray(metadata?.player?.sources)
-    ? metadata.player.sources
-    : [];
-
-  const first = sources[0] ?? null;
-
-  const embed = sources.find((s) =>
-    ['iframe', 'youtube'].includes(
-      String(s?.type || '').toLowerCase()
-    )
-  );
-
-  const year = detectYear(title, metadata);
-  const url = first?.url ?? existing?.url ?? null;
-  const embedcode = embed?.url ?? existing?.embedcode ?? null;
-
+  const existing = externalid ? await getContentByExternalId(externalid) : null;
+  const savedMeta = existing?.metadata || {};
+  const mergedMeta = { ...savedMeta, ...metadata, player: {
+    ...(savedMeta.player || {}), ...(metadata.player || {}),
+    sources: Array.isArray(metadata.player?.sources) ? metadata.player.sources : (savedMeta.player?.sources || [])
+  }};
+  const sources = mergedMeta.player.sources;
+  const first = sources[0] || null;
+  const embed = sources.find((source) => ['iframe', 'youtube'].includes(String(source?.type || '').toLowerCase()));
+  const year = detectYear(title, mergedMeta);
+  const url = first?.url || existing?.url || null;
+  const embedcode = embed?.url || existing?.embedcode || null;
+  const mediaType = type || existing?.type || mergedMeta.mediaType || 'content';
+  const artwork = thumbnail || existing?.thumbnail || null;
+  const key = externalid == null ? existing?.externalid || null : String(externalid);
   if (existing) {
     localDb.prepare(`
-      UPDATE Content
-      SET title=?,year=?,url=?,embedcode=?
+      UPDATE Content SET title=?, year=?, url=?, embedcode=?, externalid=?, type=?, thumbnail=?, metadata=?
       WHERE id=?
-    `).run(
-      title,
-      year,
-      url,
-      embedcode,
-      existing.id
-    );
-
+    `).run(title, year, url, embedcode, key, mediaType, artwork, JSON.stringify(mergedMeta), existing.id);
     touch();
-
-    return {
-      record: await getContentById(existing.id),
-      created: false
-    };
+    return { record: await getContentById(existing.id), created: false };
   }
-
   const result = localDb.prepare(`
-    INSERT INTO Content(title,year,url,embedcode)
-    VALUES(?,?,?,?)
-  `).run(
-    title,
-    year,
-    url,
-    embedcode
-  );
-
+    INSERT INTO Content (title, year, url, embedcode, externalid, type, thumbnail, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(title, year, url, embedcode, key, mediaType, artwork, JSON.stringify(mergedMeta));
   touch();
-
-  return {
-    record: await getContentById(Number(result.lastInsertRowid)),
-    created: true
-  };
+  return { record: await getContentById(Number(result.lastInsertRowid)), created: true };
 }
 
 export async function deleteContent(id) {
@@ -356,10 +364,8 @@ export async function countContent() {
 export async function countsByType() {
   const total = await countContent();
 
-  // Compatibility response for code still expecting a type map.
-  return {
-    content: total
-  };
+  const rows = localDb.prepare('SELECT type, COUNT(*) AS n FROM Content GROUP BY type').all();
+  return Object.fromEntries(rows.map((row) => [row.type || 'content', Number(row.n)]));
 }
 
 export function createPoolForBranch(name, url) {

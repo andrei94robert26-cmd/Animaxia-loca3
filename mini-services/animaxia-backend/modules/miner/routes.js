@@ -35,10 +35,16 @@ import {
 } from './core.js';
 import { pushToSearchIndex, searchIndexBackend } from './search-index.js';
 import { listContent } from '../../db.js';
+import { autoSyncProviderStatus } from './auto-sync.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 const router = express.Router();
+/** Explicit current provider sync status (requires admin). */
+router.get('/auto-sync', requireAuth, requireAdmin, wrap(async (_req, res) =>
+  res.json(await autoSyncProviderStatus())
+));
+
 
 /** Resolve the target tenant slug from the body / query / request context. */
 function tenantFromRequest(req, body = {}) {

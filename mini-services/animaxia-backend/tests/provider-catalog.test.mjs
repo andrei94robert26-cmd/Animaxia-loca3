@@ -1,0 +1,248 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import express from 'express';
+import { initDb, query, getContentByExternalId, deleteContent } from '../db.js';
+import { ensurePlatformSchema } from '../modules/platform/migrations.js';
+import { ensureAdminUsersSchema } from '../modules/users/admin-users.js';
+import { PROVIDER_CATALOG, DRIVER_IDS, providerReadiness } from '../modules/providers/catalog.js';
+import { fetchProviderMetadata, buildProviderRequest, mapProviderItems } from '../modules/providers/fetch.js';
+import { installSourceManifest, setSourceEnabled } from '../modules/ingest/source-registry.js';
+import { signTenantJwt } from '../modules/tenant/jwt-tenant.js';
+import { processNextMetadataJob, getMetadataJob } from '../modules/ingest/queue.js';
+import { sqliteAdvancedSearch } from '../modules/search/sqlite-advanced.js';
+import providerRoutes from '../modules/providers/routes.js';
+import { getProviderFetchHealth } from '../modules/providers/health.js';
+
+test('88 API inventory has 22 implemented, separately enabled drivers', () => {
+  assert.equal(PROVIDER_CATALOG.length, 88);
+  assert.equal(new Set(PROVIDER_CATALOG.map((x) => x.id)).size, 88);
+  assert.deepEqual(DRIVER_IDS, ['tmdb','jikan','tvmaze','itunes','cheapshark','gdelt',
+    'omdb','kitsu','rickmorty','freetogame','swapi','scryfall',
+    'musicbrainz','pokeapi','openligadb','jolpica','opendota',
+    'deezer','radiobrowser','hackernews','openf1','nhl']);
+  assert.ok(PROVIDER_CATALOG.some((x) => x.id === 'spotify' && !x.driverImplemented));
+  assert.equal(providerReadiness('not-a-provider'), null);
+  assert.throws(() => buildProviderRequest('spotify', { q: 'music' }), /No verified fetch driver/);
+  assert.throws(() => buildProviderRequest('itunes', { q: '' }), /at least 2/);
+  const request = buildProviderRequest('jikan', { q: 'naruto', page: 1 });
+  assert.equal(request.url.hostname, 'api.jikan.moe');
+  assert.equal(request.url.pathname, '/v4/anime');
+  assert.equal(request.url.searchParams.get('q'), 'naruto');
+});
+
+test('22 provider JSON mappers are explicit, bounded, media metadata only', async () => {
+  const originalKey = process.env.TMDB_API_KEY;
+  process.env.TMDB_API_KEY = 'unit-test-key-no-network';
+  const priorOmdbKey = process.env.OMDB_API_KEY;
+  process.env.OMDB_API_KEY = 'test-key-no-network';
+  const mockData = {
+    tmdb: { results: [
+      { id: 101, media_type: 'movie', title: 'Synthetic Movie', release_date: '2020-02-02', overview: 'Test film' },
+      { id: 102, media_type: 'tv', name: 'Synthetic Series', first_air_date: '2022-07-02' },
+      { id: 103, media_type: 'person', name: 'Not a title' },
+    ] },
+    jikan: { data: [
+      { mal_id: 200, title: 'Synthetic Anime', year: 2019,
+        genres: [{ name: 'Fantasy' }], studios: [{ name: 'Studio Unit' }] },
+    ] },
+    tvmaze: [{ score: 0.8, show: { id: 300, name: 'Synthetic Show', premiered: '2018-06-01', genres: ['Drama'] } }],
+    itunes: { results: [{ trackId: 400, trackName: 'Synthetic Song', artistName: 'Unit Artist',
+      releaseDate: '2021-03-11', primaryGenreName: 'Rock' }] },
+    cheapshark: [{ gameID: '500', external: 'Synthetic Game', thumb: 'https://example.org/thumb.jpg' }],
+    gdelt: { articles: [{ url: 'https://news.example.org/item/a', title: 'Synthetic News',
+      seendate: '20261020T010000Z', domain: 'news.example.org' }] },
+    omdb: { Response: 'True', Search: [
+      { imdbID: 'tt0000111', Title: 'Synthetic Movie OMDb', Year: '2023', Type: 'movie', Poster: 'N/A' },
+      { imdbID: 'tt0000112', Title: 'Synthetic Series OMDb', Year: '2020–', Type: 'series' },
+    ] },
+    kitsu: { data: [{ type: 'anime', id: '1000', attributes: {
+      canonicalTitle: 'Synthetic Anime Kitsu', synopsis: 'Adventure anime',
+      averageRating: '85.4', startDate: '2022-08-19', posterImage: { medium: 'https://img.example/1' },
+    } }] },
+    rickmorty: { info: { pages: 1 }, results: [
+      { id: 21, name: 'Synthetic Cartoon Episode', episode: 'S02E01',
+        air_date: 'July 26, 2015' },
+    ] },
+    freetogame: [{ id: 401, title: 'Synthetic Free Game', genre: 'MMO',
+      publisher: 'Example Studio', release_date: '2021-01-01',
+      thumbnail: 'https://img.example/401.jpg', short_description: 'Description' }],
+    swapi: { count: 1, results: [
+      { episode_id: 4, title: 'Synthetic Space Film', release_date: '1977-05-25',
+        opening_crawl: 'In a galaxy far away', producer: 'Sample Studio' },
+    ] },
+    scryfall: { object: 'list', data: [
+      { id: 'card-uuid-123', name: 'Synthetic Magic Card', set_name: 'Magic Test',
+        type_line: 'Creature', oracle_text: 'Draw a card', released_at: '2022-01-01' },
+    ] },
+    musicbrainz: { recordings: [{
+      id: '027fa041-3917-4c73-9079-ed16e36f20f8', title: 'Synthetic Recording',
+      'first-release-date': '2020-09-12', 'artist-credit': [{ artist: { name: 'CI Singer' } }],
+    }] },
+    pokeapi: { count: 1500, results: [{ name: 'pikachu', url: 'https://pokeapi.co/api/v2/pokemon/25/' }] },
+    openligadb: [{
+      matchID: 5012, matchDateTime: '2026-09-28T18:00:00',
+      leagueName: 'Bundesliga', team1: { teamName: 'Example Dortmund' },
+      team2: { teamName: 'Example München' },
+      group: { groupOrderID: 6 },
+    }],
+    jolpica: { MRData: { RaceTable: { Races: [{
+      season: '2026', round: '4', raceName: 'Synthetic Grand Prix',
+      date: '2026-04-02',
+      Circuit: { circuitName: 'CI Circuit', Location: { locality: 'CI City' } },
+    }] } } },
+    opendota: [{ match_id: 567890123, start_time: 1790000000,
+      radiant_name: 'Team One', dire_name: 'Team Two', league_name: 'Synthetic League' }],
+    deezer: { data: [{ id: 2201, title: 'Synthetic Deezer Track',
+      artist: { name: 'Sample Artist' }, album: { title: 'Sample Album', cover_medium: 'https://example.org/cover.jpg' },
+      link: 'https://www.deezer.com/track/2201' }] },
+    radiobrowser: [{ stationuuid: 'uuid-radio-01', name: 'Synthetic Radio Station',
+      tags: 'jazz,pop', country: 'Romania',
+      homepage: 'https://radio.example.org/', favicon: 'https://radio.example.org/logo.png' }],
+    hackernews: { hits: [{ objectID: '56789', title: 'Synthetic Hacker News Story',
+      created_at: '2026-10-20T12:00:00Z', author: 'devexample',
+      url: 'https://example.org/story' }] },
+    openf1: [{ meeting_key: 1968, meeting_name: 'Synthetic Grand Prix',
+      year: 2026, date_start: '2026-10-20T08:00:00Z',
+      circuit_short_name: 'Test Circuit', location: 'Somewhere' }],
+    nhl: { gameWeek: [{ date: '2026-10-20', games: [{
+      id: 2026021234, startTimeUTC: '2026-10-20T22:00:00Z',
+      season: 20262027, awayTeam: { commonName: { default: 'Away Team' } },
+      homeTeam: { commonName: { default: 'Home Team' } },
+    }] }] },
+  };
+  try {
+    for (const id of DRIVER_IDS) {
+      const captured = [];
+      const mock = async (url, options) => {
+        captured.push({ url, options });
+        return new Response(JSON.stringify(mockData[id]), {
+          headers: { 'content-type': 'application/json' }, status: 200,
+        });
+      };
+      const result = await fetchProviderMetadata(id,
+        { q: ['freetogame','pokeapi','openligadb','jolpica','opendota','openf1','nhl'].includes(id) ? '' : 'synthetic', page: 1 }, mock);
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0].options.redirect, 'error');
+      assert.equal(new URL(captured[0].url).protocol, 'https:');
+      assert.equal(result.source.id, id);
+      assert.ok(result.count >= 1);
+      assert.ok(result.items.every((item) => item.id && item.title && item.category));
+      assert.ok(result.items.length <= 25);
+    }
+    assert.deepEqual(mapProviderItems('tmdb', mockData.tmdb).map((x) => x.category),
+      ['filme', 'seriale']);
+    assert.deepEqual(mapProviderItems('itunes', mockData.itunes)[0].genres, ['Rock']);
+    const oversized = async () => new Response('x'.repeat(1_100_000), {
+      headers: { 'content-type': 'application/json' }, status: 200,
+    });
+    await assert.rejects(() => fetchProviderMetadata('jikan', { q: 'test' }, oversized),
+      /too large/);
+    const nonJson = async () => new Response('<html>bad</html>', {
+      headers: { 'content-type': 'text/html' }, status: 200,
+    });
+    await assert.rejects(() => fetchProviderMetadata('jikan', { q: 'test' }, nonJson),
+      /non-JSON/);
+  } finally {
+    if (originalKey === undefined) delete process.env.TMDB_API_KEY;
+    else process.env.TMDB_API_KEY = originalKey;
+    if (priorOmdbKey === undefined) delete process.env.OMDB_API_KEY;
+    else process.env.OMDB_API_KEY = priorOmdbKey;
+  }
+});
+
+test('admin sync queues real-mapped mock provider payload into persisted searchable catalog', async () => {
+  await initDb();
+  await ensurePlatformSchema();
+  await ensureAdminUsersSchema();
+  const nonce = crypto.randomBytes(6).toString('hex');
+  const fixtureTitle = 'Provider CI ' + nonce;
+  const source = { type: 'api', id: 'jikan' };
+  // Existing source installations are considered shared operator state.
+  const prior = providerReadiness('jikan');
+  if (prior.installed) {
+    // Ensure test doesn't mutate a real integration if CI isn't isolated.
+    assert.fail('Provider test needs a disposable SQLite database');
+  }
+  installSourceManifest({ source, name: 'Jikan CI JSON source' });
+  setSourceEnabled(source, true);
+  const admin = await query(
+    'INSERT INTO users(email,username,passwordhash,role) VALUES(?,?,?,?) RETURNING id',
+    ['providerci' + nonce + '@example.invalid', 'providerci' + nonce, 'testonly', 'admin'],
+  );
+  const userId = Number(admin.rows[0].id);
+  const token = signTenantJwt({ sub: userId, typ: 'access', tenant: 'global' });
+  const app = express();
+  app.use(express.json());
+  app.use('/api/integrations/providers', providerRoutes);
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.listening ? resolve() : server.once('listening', resolve));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const original = globalThis.fetch;
+  let providerCalls = 0;
+  let mockUpstreamStatus = 200;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith('https://api.jikan.moe/')) {
+      providerCalls += 1;
+      if (mockUpstreamStatus !== 200) {
+        return new Response(JSON.stringify({ error: 'simulated error' }), {
+          status: mockUpstreamStatus, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ data: [{
+        mal_id: 866272, title: fixtureTitle, year: 2023,
+        synopsis: 'A synthetic test result', genres: [{ name: 'Adventure' }],
+      }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return original(url, init);
+  };
+  let jobId;
+  try {
+    const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const anonymous = await original(base + '/api/integrations/providers');
+    assert.equal(anonymous.status, 401);
+    const catalog = await original(base + '/api/integrations/providers', { headers });
+    assert.equal(catalog.status, 200);
+    assert.equal((await catalog.json()).catalogCount, 88);
+    const unsupported = await original(base + '/api/integrations/providers/spotify/sync', {
+      method: 'POST', headers, body: JSON.stringify({ q: 'pop' }),
+    });
+    assert.equal(unsupported.status, 501);
+    const accepted = await original(base + '/api/integrations/providers/jikan/sync', {
+      method: 'POST', headers, body: JSON.stringify({ q: 'naruto', page: 1 }),
+    });
+    assert.equal(accepted.status, 202);
+    const enqueued = await accepted.json();
+    jobId = enqueued.jobId;
+    assert.equal(enqueued.fetched, 1);
+    assert.equal(getMetadataJob(jobId).status, 'queued');
+    assert.equal(providerCalls, 1);
+    assert.equal(getProviderFetchHealth('jikan').lastStatus, 'success');
+    assert.equal(providerReadiness('jikan').liveVerified, true);
+    const processed = await processNextMetadataJob();
+    assert.equal(processed.id, jobId);
+    assert.equal(processed.status, 'done');
+    const record = await getContentByExternalId('api:jikan:anime:866272');
+    assert.equal(record.title, fixtureTitle);
+    const found = await sqliteAdvancedSearch({ q: nonce, type: 'anime' });
+    assert.ok(found.data.some((x) => x.id === record.id));
+    // The last real HTTP attempt, including upstream failures, is recorded.
+    mockUpstreamStatus = 503;
+    const failed = await original(base + '/api/integrations/providers/jikan/sync', {
+      method: 'POST', headers, body: JSON.stringify({ q: 'retry', page: 1 }),
+    });
+    assert.equal(failed.status, 502);
+    assert.equal(getProviderFetchHealth('jikan').lastStatus, 'error');
+    assert.equal(providerReadiness('jikan').liveVerified, false);
+    assert.match(getProviderFetchHealth('jikan').lastError, /503/);
+  } finally {
+    globalThis.fetch = original;
+    await new Promise((resolve) => server.close(resolve));
+    const record = await getContentByExternalId('api:jikan:anime:866272');
+    if (record && record.title === fixtureTitle) await deleteContent(record.id);
+    if (jobId) await query('DELETE FROM metadata_sync_jobs WHERE id=?', [jobId]);
+    await query('DELETE FROM metadata_ingest_sources WHERE sourcetype=? AND sourceid=?', ['api','jikan']);
+    await query('DELETE FROM provider_fetch_health WHERE providerid=?', ['jikan']);
+    await query('DELETE FROM users WHERE id=?', [userId]);
+  }
+});
