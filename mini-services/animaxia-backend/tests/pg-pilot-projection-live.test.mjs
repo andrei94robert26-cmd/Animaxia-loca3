@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import {spawn} from 'node:child_process';
 import pg from 'pg';
 import {
   setupPgCatalogPilot,upsertPgCatalogPilot,deletePgCatalogPilot,
@@ -189,6 +190,49 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
       [ids[1]]);
     assert.equal(refreshed.rows[0].id,String(recreated.data.id));
     assert.equal(refreshed.rows[0].title,'Recreated identity '+nonce);
+    assert.equal((await pgPilotProjectionStatus()).pending,0);
+
+    // The next event is applied by a totally separate Node process:
+    // no SQLite backend imports and no in-process manual flush.
+    await upsertPgCatalogPilot({
+      externalid:ids[2],title:'Standalone pilot projection '+nonce,
+      type:'movie',metadata:{description:'Worker process canary'},
+    });
+    const child=spawn(process.execPath,['cli/postgres-pilot-projection-worker.mjs'],{
+      cwd:process.cwd(),
+      env:{
+        ...process.env,ANIMAXIA_PG_CATALOG_PILOT:'true',
+        ANIMAXIA_PG_PILOT_PROJECTION:'true',
+        ANIMAXIA_PG_PILOT_PROJECTION_WORKER:'true',
+      },
+      stdio:['ignore','pipe','pipe'],
+    });
+    let stdout='',stderr='';
+    child.stdout.on('data',data=>{stdout+=String(data);});
+    child.stderr.on('data',data=>{stderr+=String(data);});
+    const childExit=new Promise((resolve,reject)=>{
+      child.once('error',reject);
+      child.once('exit',(code,signal)=>resolve({code,signal}));
+    });
+    try{
+      let ready=false;
+      for(let attempt=0;attempt<48;attempt++){
+        await new Promise(resolve=>setTimeout(resolve,250));
+        const query=await pool.query(
+          'SELECT title FROM animaxia_pilot_search_projection WHERE externalid=$1',
+          [ids[2]]
+        );
+        if(query.rows[0]?.title==='Standalone pilot projection '+nonce){
+          ready=true;break;
+        }
+      }
+      assert.equal(ready,true,'Standalone pilot projector failed to deliver native event');
+    }finally{
+      child.kill('SIGTERM');
+      const result=await childExit;
+      assert.equal(result.code,0,'Standalone pilot projector exit: '+stderr);
+    }
+    assert.match(stdout,/PostgreSQL-only native pilot projection worker started/);
     assert.equal((await pgPilotProjectionStatus()).pending,0);
   }finally{await restore();}
 });
