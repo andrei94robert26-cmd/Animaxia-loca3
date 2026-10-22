@@ -95,7 +95,9 @@ router.post('/pilot/items',limiter,async(req,res,next)=>{
   catch(err){return next(err);}
 });
 router.delete('/pilot/items/:externalid',limiter,async(req,res,next)=>{
-  try{return res.json(await deletePgCatalogPilot(req.params.externalid));}
+  try{return res.json(await deletePgCatalogPilot(req.params.externalid,{
+    expectedRevision:req.query.expectedRevision,
+  }));}
   catch(err){return next(err);}
 });
 router.get('/status',(_req,res,next)=>{
