@@ -29,6 +29,33 @@ const allowedNameList=(input)=>{
     return name;
   }))];
 };
+// Optional optimistic concurrency precondition. Missing means legacy
+// last-write-wins; 0 means create-only; a positive revision means update
+// exactly that revision. All checks run under the per-externalid PG lock.
+export function pgPilotExpectedRevision(value){
+  if(value===undefined)return null;
+  if(typeof value!=='number'&&typeof value!=='string')
+    throw invalid('Invalid expectedRevision');
+  if(typeof value==='string'&&!/^(0|[1-9][0-9]*)$/.test(value))
+    throw invalid('Invalid expectedRevision');
+  const revision=Number(value);
+  if(!Number.isSafeInteger(revision)||revision<0)
+    throw invalid('Invalid expectedRevision');
+  return revision;
+}
+const staleConflict=()=>Object.assign(new Error('Pilot catalog revision conflict'),{status:409});
+async function checkExpectedRevision(client,externalid,revision){
+  if(revision===null)return;
+  const current=await client.query(
+    'SELECT revision::text AS revision FROM animaxia_pilot_catalog WHERE externalid=$1',
+    [externalid]);
+  if(!Array.isArray(current.rows)||current.rows.length>1)
+    throw Object.assign(new Error('Invalid pilot revision lookup'),{status:502});
+  const currentRevision=current.rows.length?Number(current.rows[0].revision):0;
+  if(!Number.isSafeInteger(currentRevision)||currentRevision<0)
+    throw Object.assign(new Error('Invalid pilot revision value'),{status:502});
+  if(currentRevision!==revision)throw staleConflict();
+}
 const projection=(input)=>{
   if(!input||typeof input!=='object'||Array.isArray(input))
     throw invalid('Invalid catalog item');
@@ -68,6 +95,7 @@ const projection=(input)=>{
   }
   // Whitelist: source URLs, embeds, auth headers, arbitrary JSON are ignored.
   return {externalid,title,type,year,thumbnail,
+    expectedRevision:pgPilotExpectedRevision(input.expectedRevision),
     metadata:{...names,...strings,rating}};
 };
 export {projection as validatePgPilotItem};
@@ -149,6 +177,7 @@ export async function upsertPgCatalogPilot(input,options={}){
   try{
     await client.query('BEGIN');
     await lockPgPilotExternalId(client,d.externalid);
+    await checkExpectedRevision(client,d.externalid,d.expectedRevision);
     const write=await client.query(`
       INSERT INTO animaxia_pilot_catalog
         (externalid,title,type,year,thumbnail,metadata)
@@ -176,10 +205,12 @@ export async function deletePgCatalogPilot(externalid,options={}){
   const id=safeText(externalid,220);
   if(!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,219}$/.test(id))
     throw invalid('Invalid stable externalid');
+  const expectedRevision=pgPilotExpectedRevision(options.expectedRevision);
   const client=await runner(options).connect();
   try{
     await client.query('BEGIN');
     await lockPgPilotExternalId(client,id);
+    await checkExpectedRevision(client,id,expectedRevision);
     const removed=await client.query(`
       DELETE FROM animaxia_pilot_catalog WHERE externalid=$1
       RETURNING id::text,externalid,revision::text
