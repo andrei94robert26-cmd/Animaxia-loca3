@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import {
   pgCatalogPilotEnabled,validatePgPilotItem,pgPilotExpectedRevision,
-  buildPgCatalogPilotSearch,listPgCatalogPilot,pgCatalogPilotStatus,
+  buildPgCatalogPilotSearch,listPgCatalogPilot,getPgCatalogPilotByExternalId,pgCatalogPilotStatus,
   upsertPgCatalogPilot,
 } from '../modules/postgres/catalog-pilot.js';
 import pgRoutes from '../modules/postgres/routes.js';
@@ -88,6 +88,37 @@ test('pilot status accepts missing schema but propagates other PG errors',async(
     else process.env.ANIMAXIA_PG_CATALOG_PILOT=prior;
   }
 });
+test('pilot lookup is indexed, bound, safe and never exposes player data',async()=>{
+  const before=process.env.ANIMAXIA_PG_CATALOG_PILOT;
+  process.env.ANIMAXIA_PG_CATALOG_PILOT='true';
+  try{
+    await assert.rejects(getPgCatalogPilotByExternalId('invalid / path'),/externalid/);
+    const item=await getPgCatalogPilotByExternalId('api:test:movie:123',{
+      db:{query:async(sql,values)=>{
+        assert.match(sql,/WHERE externalid=\$1 LIMIT 1/);
+        assert.deepEqual(values,['api:test:movie:123']);
+        return {rows:[{
+          id:'33',externalid:'api:test:movie:123',
+          title:'Indexed Film',type:'movie',year:2026,thumbnail:null,
+          metadata:{actors:['Tester'],rating:8.4},revision:'5',
+        }]};
+      }},
+    });
+    assert.equal(item.found,true);
+    assert.equal(item.data.id,33);
+    assert.equal(item.data.revision,5);
+    assert.equal(item.publicCatalogUnchanged,true);
+    const absent=await getPgCatalogPilotByExternalId('api:test:movie:123',{
+      db:{query:async()=>({rows:[]})},
+    });
+    assert.equal(absent.found,false);
+    assert.equal(absent.data,null);
+  }finally{
+    if(before===undefined)delete process.env.ANIMAXIA_PG_CATALOG_PILOT;
+    else process.env.ANIMAXIA_PG_CATALOG_PILOT=before;
+  }
+});
+
 test('PG pilot queries use bound FTS/category/year and keyset pagination',()=>{
   const q=buildPgCatalogPilotSearch({
     q:'Adventure',type:'movie',year:'2026',afterId:'120',limit:10,
@@ -117,6 +148,7 @@ test('PG pilot HTTP routes reject anonymous reads, writes and setup',async()=>{
     const calls=[
       fetch(base+'status'),
       fetch(base+'items?q=movie'),
+      fetch(base+'items/api%3Atest%3Amovie%3A123'),
       fetch(base+'setup',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),
       fetch(base+'items',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),
       fetch(base+'items/api%3Atest%3Amovie%3A1',{method:'DELETE'}),
