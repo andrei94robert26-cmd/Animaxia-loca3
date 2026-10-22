@@ -92,6 +92,66 @@ Sunt ignorate câmpurile JSON arbitrare, tokenurile, embedcode,
 player.sources și URL-urile video. Thumbnail este acceptat numai ca
 URL HTTPS fără credențiale. Acest API nu descarcă fișiere video.
 
+### Etapa 22 — actualizări protejate prin revizie
+
+Catalogul PostgreSQL nativ oferă acum o **precondiție opțională**
+`expectedRevision` pentru actualizare și ștergere. Aceasta împiedică
+*lost updates* când doi administratori modifică același conținut.
+
+- `expectedRevision: 0` permite doar **crearea** unui titlu inexistent.
+  Dacă `externalid` există, serverul răspunde `409 Conflict`.
+- `expectedRevision: N` (număr întreg pozitiv) permite modificarea
+  numai dacă rândul are exact revizia `N`. Altfel răspunde `409`.
+- Câmpul absent păstrează compatibilitatea veche (**last-write-wins**).
+  Pentru operațiuni administrative, trimite întotdeauna revizia.
+- Valorile negative, fracționare, invalide sau peste limita întregilor
+  siguri sunt respinse cu eroare de validare `400`.
+
+Exemplu de actualizare condiționată:
+
+```http
+POST /api/migration/postgres/pilot/items
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "externalid": "api:example:movie:123",
+  "title": "Film actualizat",
+  "type": "movie",
+  "year": 2026,
+  "expectedRevision": 3,
+  "metadata": { "genres": ["Adventure"] }
+}
+```
+
+Ștergere condiționată:
+
+```http
+DELETE /api/migration/postgres/pilot/items/api%3Aexample%3Amovie%3A123?expectedRevision=4
+Authorization: Bearer <admin-token>
+```
+
+Verificarea se face **în tranzacția PostgreSQL după obținerea aceleiași
+blocări consultative pe `externalid`** pe care o folosesc deja
+scrierile și proiecția de căutare. O încercare respinsă nu creează
+eveniment `animaxia_pilot_events` și nu schimbă catalogul.
+
+În **Admin → PostgreSQL**, formularul pornește cu revizia `0`
+(creare-only). Butonul „Editează cu revizia N” de lângă titlurile
+afișate încarcă ID-ul, titlul, categoria, anul și revizia curentă.
+După salvare, revizia din formular este actualizată cu versiunea
+confirmată de PostgreSQL.
+
+Testele reale PostgreSQL 16 verifică două scrieri simultane cu aceeași
+revizie, actualizări refuzate și ștergeri stale. Numai un scriitor
+câștigă, iar jurnalul de evenimente nu primește intrări pentru cereri
+respinse.
+
+**Limită:** aceasta este protecție împotriva suprascrierii în
+**catalogul pilot izolat**, nu tranzacționalizarea întregii platforme.
+Nu schimbă comportamentul scrierilor publice în SQLite și nu dovedește
+scalarea la 1 miliard de titluri.
+
 ### Citește catalogul pilot
 
 ```http
