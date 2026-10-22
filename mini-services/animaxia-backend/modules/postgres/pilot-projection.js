@@ -15,6 +15,15 @@ import { pgCatalogPilotEnabled, setupPgCatalogPilot } from './catalog-pilot.js';
 const { Pool }=pg;
 let pool=null,working=false,timer=null;
 const invalid=(message)=>Object.assign(new Error(message),{status:400});
+/** Maximum retries before an operator must inspect the quarantined event. */
+export function pgPilotMaxAttempts(env=process.env){
+  const raw=env.ANIMAXIA_PG_PILOT_MAX_ATTEMPTS??'8';
+  if(!/^[1-9][0-9]?$|^100$/.test(String(raw)))
+    throw new Error('ANIMAXIA_PG_PILOT_MAX_ATTEMPTS must be between 1 and 100');
+  return Number(raw);
+}
+const safeErrorCode=(error)=>/^[A-Z0-9]{5}$/.test(String(error?.code||''))
+  ?String(error.code):'WORKER_ERROR';
 const disabled=()=>Object.assign(new Error('PostgreSQL pilot projection is disabled'),{status:503});
 const requireConfig=()=>{
   if(!pgCatalogPilotEnabled()||process.env.ANIMAXIA_PG_PILOT_PROJECTION!=='true')
@@ -81,9 +90,23 @@ export async function setupPgPilotProjection(options={}){
     ADD COLUMN IF NOT EXISTS projection_next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   `);
   await db.query(`
+    ALTER TABLE animaxia_pilot_events
+    ADD COLUMN IF NOT EXISTS projection_quarantined_at TIMESTAMPTZ
+  `);
+  await db.query(`
+    ALTER TABLE animaxia_pilot_events
+    ADD COLUMN IF NOT EXISTS projection_error_code TEXT
+  `);
+  await db.query(`
     CREATE INDEX IF NOT EXISTS idx_animaxia_pilot_projection_events_due
     ON animaxia_pilot_events(projection_next_run_at,eventid)
     WHERE projection_applied_at IS NULL
+  `);
+  // Keep a smaller due-only index that excludes operator-quarantined jobs.
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_animaxia_pilot_projection_events_ready
+    ON animaxia_pilot_events(projection_next_run_at,eventid)
+    WHERE projection_applied_at IS NULL AND projection_quarantined_at IS NULL
   `);
   // Repair auditing checks whether this external ID already has an
   // outstanding native event. Index only the pending subset.
@@ -122,7 +145,8 @@ export async function flushPgPilotProjection({limit=20,db}={}){
           const claimed=await client.query(`
             SELECT eventid::text AS eventid,externalid
             FROM animaxia_pilot_events
-            WHERE projection_applied_at IS NULL AND projection_next_run_at<=NOW()
+            WHERE projection_applied_at IS NULL AND projection_quarantined_at IS NULL
+              AND projection_next_run_at<=NOW()
             ORDER BY projection_next_run_at,eventid LIMIT 1
             FOR UPDATE SKIP LOCKED
           `);
@@ -175,9 +199,13 @@ export async function flushPgPilotProjection({limit=20,db}={}){
               SET projection_attempts=projection_attempts+1,
                 projection_next_run_at=NOW()+
                   LEAST(3600,5*POWER(2,LEAST(projection_attempts,9)))*
-                  INTERVAL '1 second'
+                  INTERVAL '1 second',
+                projection_quarantined_at=CASE
+                  WHEN projection_attempts+1 >= $2 THEN NOW()
+                  ELSE NULL END,
+                projection_error_code=$3
               WHERE eventid=$1 AND projection_applied_at IS NULL
-            `,[event.eventid]);
+            `,[event.eventid,pgPilotMaxAttempts(),safeErrorCode(err)]);
             await client.query('COMMIT');active=false;failed++;
             console.warn('[pg-pilot-projection] retry:',String(err.message).slice(0,140));
           }
@@ -193,15 +221,69 @@ export async function flushPgPilotProjection({limit=20,db}={}){
 export async function pgPilotProjectionStatus({db}={}){
   requireConfig();
   const result=await runner({db}).query(`
-    SELECT COUNT(*) FILTER (WHERE projection_applied_at IS NULL)::text AS pending,
-      COUNT(*) FILTER (WHERE projection_applied_at IS NULL AND projection_attempts>0)::text AS retrying,
+    SELECT COUNT(*) FILTER (
+        WHERE projection_applied_at IS NULL AND projection_quarantined_at IS NULL
+      )::text AS pending,
+      COUNT(*) FILTER (
+        WHERE projection_applied_at IS NULL AND projection_quarantined_at IS NULL
+          AND projection_attempts>0
+      )::text AS retrying,
+      COUNT(*) FILTER (WHERE projection_quarantined_at IS NOT NULL AND projection_applied_at IS NULL)::text AS quarantined,
       COUNT(*) FILTER (WHERE projection_applied_at IS NOT NULL)::text AS completed
     FROM animaxia_pilot_events
   `);
   const row=result.rows[0];
   return {enabled:true,mode:'isolated-native-pilot',publicCatalogUnchanged:true,
     pending:Number(row.pending),retrying:Number(row.retrying),
+    quarantined:Number(row.quarantined),maxAttempts:pgPilotMaxAttempts(),
     completed:Number(row.completed)};
+}
+/**
+ * Bounded administrative review. Error messages and event payloads are
+ * deliberately excluded; only safe SQLSTATE/fixed error codes are returned.
+ */
+export async function listPgPilotQuarantine({afterEventId=0,limit=20}={},options={}){
+  requireConfig();
+  const cursor=Number(afterEventId),cap=Number(limit);
+  if(!Number.isSafeInteger(cursor)||cursor<0)throw invalid('Invalid quarantined event cursor');
+  if(!Number.isSafeInteger(cap)||cap<1||cap>50)throw invalid('Quarantine limit must be 1..50');
+  const result=await runner(options).query(`
+    SELECT eventid::text AS eventid,externalid,operation,projection_attempts AS attempts,
+      projection_error_code AS errorcode,projection_quarantined_at AS quarantinedat
+    FROM animaxia_pilot_events
+    WHERE projection_applied_at IS NULL AND projection_quarantined_at IS NOT NULL
+      AND ($1::bigint=0 OR eventid<$1::bigint)
+    ORDER BY eventid DESC LIMIT $2
+  `,[cursor,cap+1]);
+  if(!Array.isArray(result.rows)||result.rows.length>cap+1)
+    throw Object.assign(new Error('Invalid PostgreSQL quarantine result'),{status:502});
+  const data=result.rows.slice(0,cap).map(row=>{
+    const eventid=Number(row.eventid);
+    if(!Number.isSafeInteger(eventid)||eventid<=0)
+      throw Object.assign(new Error('Invalid PostgreSQL event ID'),{status:502});
+    return {eventid,externalid:row.externalid,operation:row.operation,
+      attempts:Number(row.attempts),errorCode:row.errorcode||null,
+      quarantinedAt:row.quarantinedat};
+  });
+  return {data,hasMore:result.rows.length>cap,
+    nextAfterEventId:result.rows.length>cap?data.at(-1).eventid:null,
+    sourceOfTruth:'isolated-native-pilot',publicCatalogUnchanged:true};
+}
+/** Explicit operator retry; cannot replay an already acknowledged event. */
+export async function retryPgPilotQuarantine(eventid,options={}){
+  requireConfig();
+  const id=Number(eventid);
+  if(!Number.isSafeInteger(id)||id<=0)throw invalid('Invalid quarantined event ID');
+  const result=await runner(options).query(`
+    UPDATE animaxia_pilot_events
+    SET projection_quarantined_at=NULL,projection_attempts=0,
+      projection_error_code=NULL,projection_next_run_at=NOW()
+    WHERE eventid=$1 AND projection_applied_at IS NULL
+      AND projection_quarantined_at IS NOT NULL
+    RETURNING eventid
+  `,[id]);
+  return {retried:result.rows.length===1,eventid:id,
+    publicCatalogUnchanged:true};
 }
 export async function getPgPilotProjectedItems({q='',limit=20,afterId=0}={},options={}){
   requireConfig();
