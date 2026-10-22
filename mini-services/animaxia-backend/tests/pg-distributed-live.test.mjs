@@ -95,10 +95,15 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
     // PostgreSQL transactional claim failure must preserve the task and
     // assign backoff atomically; no competing worker acknowledges it.
     const poison=records[0];
+    const appliedVersion=await db.query(
+      'SELECT source_revision::text AS revision FROM animaxia_shadow_applied_versions WHERE contentid=$1',
+      [poison]);
+    assert.equal(appliedVersion.rowCount,1);
+    const poisonRev=BigInt(appliedVersion.rows[0].revision)+1n;
     await db.query(`
-      INSERT INTO animaxia_shadow_tasks(contentid,operation,document)
-      VALUES($1,'upsert','{}'::jsonb)
-    `,[poison]);
+      INSERT INTO animaxia_shadow_tasks(contentid,operation,document,source_revision)
+      VALUES($1,'upsert','{}'::jsonb,$2)
+    `,[poison,poisonRev.toString()]);
     const broken=await workDistributedShadow({limit:1});
     assert.equal(broken.failed,1);
     let stuck=await db.query(
