@@ -211,6 +211,56 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
       ['upsert','3'],['delete','3'],['upsert','4'],['delete','4'],
     ]);
 
+    // Network retry safety: the SAME request key replays the first
+    // committed response. It must not allocate another revision or event.
+    const idemId=prefix+'idempotent:5';
+    const idemPrefix='ci:'+nonce+':idem:';
+    const createPayload={
+      externalid:idemId,title:'Native idempotency canary',type:'movie',
+      expectedRevision:0,idempotencyKey:idemPrefix+'create',
+      metadata:{genres:['QA']},
+    };
+    const [newOne,newTwo]=await Promise.all([
+      upsertPgCatalogPilot(createPayload),
+      upsertPgCatalogPilot(createPayload),
+    ]);
+    assert.deepEqual(newOne,newTwo);
+    assert.equal(newOne.data.revision,1);
+    assert.equal((await pool.query(
+      'SELECT COUNT(*)::integer AS count FROM animaxia_pilot_events WHERE externalid=$1',
+      [idemId]
+    )).rows[0].count,1);
+    await assert.rejects(upsertPgCatalogPilot({
+      ...createPayload,title:'Conflicting payload reusing key',
+    }),(err)=>err?.status===409);
+    // Duplicate UPDATE after the first succeeds would normally fail its
+    // original expectedRevision. The stored receipt must win instead.
+    const updatePayload={...createPayload,title:'Single logical update',
+      expectedRevision:1,idempotencyKey:idemPrefix+'update'};
+    const updatedOnce=await upsertPgCatalogPilot(updatePayload);
+    const updatedTwice=await upsertPgCatalogPilot(updatePayload);
+    assert.deepEqual(updatedOnce,updatedTwice);
+    assert.equal(updatedOnce.data.revision,2);
+    const deleteOpts={expectedRevision:2,idempotencyKey:idemPrefix+'delete'};
+    const deletedOnce=await deletePgCatalogPilot(idemId,deleteOpts);
+    const deletedAgain=await deletePgCatalogPilot(idemId,deleteOpts);
+    assert.deepEqual(deletedOnce,deletedAgain);
+    assert.equal(deletedAgain.deleted,true);
+    const operations=await pool.query(
+      'SELECT operation,revision::text AS revision FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid',
+      [idemId]
+    );
+    assert.deepEqual(operations.rows.map(x=>[x.operation,x.revision]),[
+      ['upsert','1'],['upsert','2'],['delete','2'],
+    ]);
+    await assert.rejects(upsertPgCatalogPilot({
+      ...createPayload,idempotencyKey:idemPrefix+'delete',
+    }),(err)=>err?.status===409);
+    assert.equal((await pool.query(
+      'SELECT COUNT(*)::integer AS count FROM animaxia_pilot_request_receipts WHERE request_key LIKE $1',
+      [idemPrefix+'%']
+    )).rows[0].count,3);
+
     const allEvents=await pool.query(
       'SELECT operation,revision FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid',
       [first]);
@@ -235,6 +285,7 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
     constraintAdded=true;
     await assert.rejects(upsertPgCatalogPilot({
       externalid:blocked,title:'Should Roll Back',type:'movie',
+      idempotencyKey:'ci:'+nonce+':idem:failed',
       metadata:{description:'blocked transaction'},
     }));
     assert.equal((await pool.query(
@@ -243,6 +294,10 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
     assert.equal((await pool.query(
       'SELECT externalid FROM animaxia_pilot_revision_ledger WHERE externalid=$1',[blocked]
     )).rowCount,0,'Failed audit event must roll back revision allocation');
+    assert.equal((await pool.query(
+      'SELECT request_key FROM animaxia_pilot_request_receipts WHERE request_key=$1',
+      ['ci:'+nonce+':idem:failed']
+    )).rowCount,0,'Failed write must not consume idempotency key');
 
     const deleted=await deletePgCatalogPilot(first);
     assert.equal(deleted.deleted,true);
@@ -264,6 +319,8 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
     await pool.query('DELETE FROM animaxia_pilot_events WHERE externalid LIKE $1',[prefix+'%']);
     await pool.query('DELETE FROM animaxia_pilot_catalog WHERE externalid LIKE $1',[prefix+'%']);
     await pool.query('DELETE FROM animaxia_pilot_revision_ledger WHERE externalid LIKE $1',[prefix+'%']);
+    await pool.query('DELETE FROM animaxia_pilot_request_receipts WHERE request_key LIKE $1',
+      ['ci:'+nonce+':idem:%']);
     await stopPgCatalogPilot();
     await pool.end();
     if(old===undefined)delete process.env.ANIMAXIA_PG_CATALOG_PILOT;
