@@ -42,7 +42,12 @@ type DistributedProcess={processed:number;failed:number};
 type PilotStatus={enabled:boolean;initialized?:boolean;publicCatalogUnchanged:boolean;documents?:number;events?:number};
 type PilotItem={
   id:number;externalid:string;title:string;type:string;year:number|null;
-  revision:number;metadata:{actors?:string[];genres?:string[];description?:string};
+  revision:number;metadata:{
+    actors?:string[];genres?:string[];studios?:string[];
+    description?:string;franchise?:string;trilogy?:string;
+    collection?:string;posterId?:string;sourceAttribution?:string;
+    rating?:number|null;
+  };
 };
 type PilotPage={data:PilotItem[];hasMore:boolean;nextAfterId:number|null};
 type ShadowAudit={
@@ -76,6 +81,8 @@ export function AdminPostgresTab(){
   const [pilotTitle,setPilotTitle]=useState('');
   const [pilotType,setPilotType]=useState('movie');
   const [pilotYear,setPilotYear]=useState('');
+  const [pilotExpectedRevision,setPilotExpectedRevision]=useState('0');
+  const [pilotSelectedMetadata,setPilotSelectedMetadata]=useState<PilotItem['metadata']|null>(null);
   const [pilotResults,setPilotResults]=useState<PilotItem[]>([]);
   const [pilotBusy,setPilotBusy]=useState(false);
 
@@ -240,7 +247,9 @@ export function AdminPostgresTab(){
       const saved=await action<{data:PilotItem}>('/api/migration/postgres/pilot/items',{
         externalid,title,type:pilotType,expectedRevision,
         ...(year?{year:Number(year)}:{}),
-        metadata:{description:'Inserare controlată de administrator în pilot'},
+        metadata:pilotSelectedMetadata??{
+          description:'Inserare controlată de administrator în pilot',
+        },
       });
       setPilotExpectedRevision(String(saved.data.revision));
       toast.success('Titlu salvat la revizia '+saved.data.revision+' doar în PostgreSQL pilot');
@@ -502,7 +511,11 @@ export function AdminPostgresTab(){
               <Label htmlFor="pg-pilot-externalid">ID extern stabil</Label>
               <Input id="pg-pilot-externalid" maxLength={220}
                 placeholder="api:example:movie:123" value={pilotExternalId}
-                onChange={e=>{setPilotExternalId(e.target.value);setPilotExpectedRevision('0');}}/>
+                onChange={e=>{
+                  setPilotExternalId(e.target.value);
+                  setPilotExpectedRevision('0');
+                  setPilotSelectedMetadata(null);
+                }}/>
             </div>
             <div className="space-y-1">
               <Label htmlFor="pg-pilot-title">Titlu</Label>
@@ -541,6 +554,7 @@ export function AdminPostgresTab(){
                     setPilotType(item.type);
                     setPilotYear(item.year==null?'':String(item.year));
                     setPilotExpectedRevision(String(item.revision));
+                    setPilotSelectedMetadata(item.metadata);
                   }}>Editează cu revizia {item.revision}</Button>
               </div>
             ))}
