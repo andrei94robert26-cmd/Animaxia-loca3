@@ -4,6 +4,7 @@ import express from 'express';
 import {
   setupPgPilotProjection,flushPgPilotProjection,pgPilotProjectionStatus,
   getPgPilotProjectedItems,startPgPilotProjection,
+  pgPilotMaxAttempts,listPgPilotQuarantine,retryPgPilotQuarantine,
 } from '../modules/postgres/pilot-projection.js';
 import pgRoutes from '../modules/postgres/routes.js';
 
@@ -67,6 +68,54 @@ test('native pilot projection filters are parameterized and metadata does not le
     assert.equal(result.publicCatalogUnchanged,true);
   }finally{restore(old);}
 });
+test('pilot projection quarantine is opt-in, bounded, paginated and manually replayed',async()=>{
+  const old=save();
+  try{
+    assert.equal(pgPilotMaxAttempts({}),8);
+    assert.equal(pgPilotMaxAttempts({ANIMAXIA_PG_PILOT_MAX_ATTEMPTS:'100'}),100);
+    for(const value of ['0','101','1.5','-1','abc','01']){
+      assert.throws(()=>pgPilotMaxAttempts({
+        ANIMAXIA_PG_PILOT_MAX_ATTEMPTS:value,
+      }),/between 1 and 100/);
+    }
+    delete process.env.ANIMAXIA_PG_PILOT_PROJECTION;
+    await assert.rejects(listPgPilotQuarantine(),/disabled/);
+    await assert.rejects(retryPgPilotQuarantine(10),/disabled/);
+    process.env.ANIMAXIA_PG_CATALOG_PILOT='true';
+    process.env.ANIMAXIA_PG_PILOT_PROJECTION='true';
+    process.env.ANIMAXIA_PG_SHADOW_DATABASE_URL='postgresql://test:pass@127.0.0.1/ci';
+    await assert.rejects(listPgPilotQuarantine({limit:51}),/limit/);
+    await assert.rejects(listPgPilotQuarantine({afterEventId:-1}),/cursor/);
+    await assert.rejects(retryPgPilotQuarantine('abc'),/event ID/);
+    let calls=0;
+    const db={query:async(sql,values)=>{
+      calls++;
+      if(sql.includes('SELECT eventid::text')){
+        assert.ok(sql.includes('projection_quarantined_at IS NOT NULL'));
+        assert.deepEqual(values,[12,2]);
+        return {rows:[
+          {eventid:'11',externalid:'native:test:11',operation:'upsert',
+            attempts:8,errorcode:'23514',quarantinedat:'2026-01-01T00:00:00Z'},
+          {eventid:'10',externalid:'native:test:10',operation:'delete',
+            attempts:8,errorcode:'WORKER_ERROR',quarantinedat:'2026-01-01T00:00:00Z'},
+        ]};
+      }
+      assert.ok(sql.includes('projection_quarantined_at IS NOT NULL'));
+      assert.deepEqual(values,[11]);
+      return {rows:[{eventid:'11'}]};
+    }};
+    const page=await listPgPilotQuarantine({afterEventId:12,limit:1},{db});
+    assert.equal(page.data.length,1);
+    assert.equal(page.data[0].eventid,11);
+    assert.equal(page.data[0].errorCode,'23514');
+    assert.equal(page.hasMore,true);
+    assert.equal(page.nextAfterEventId,11);
+    const retry=await retryPgPilotQuarantine(11,{db});
+    assert.equal(retry.retried,true);
+    assert.equal(retry.publicCatalogUnchanged,true);
+    assert.equal(calls,2);
+  }finally{restore(old);}
+});
 test('native PostgreSQL pilot projection routes reject anonymous operations',async()=>{
   const app=express();
   app.use(express.json());
@@ -80,6 +129,8 @@ test('native PostgreSQL pilot projection routes reject anonymous operations',asy
       fetch(url+'/items?q=movie'),
       fetch(url+'/setup',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),
       fetch(url+'/flush',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),
+      fetch(url+'/quarantine'),
+      fetch(url+'/quarantine/12/retry',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),
     ]);
     for(const response of responses)assert.equal(response.status,401);
   }finally{await new Promise(resolve=>server.close(resolve));}
