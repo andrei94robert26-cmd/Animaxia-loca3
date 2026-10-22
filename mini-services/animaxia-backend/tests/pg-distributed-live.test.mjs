@@ -29,7 +29,32 @@ test('PostgreSQL 16 queue: feeder, SKIP LOCKED concurrency, retry, snapshot refr
   try{
     await initDb();
     await setupPgShadow();
+    // Simulate a deployed Stage-17 queue that has NO source_revision.
+    // The new explicit setup must alter it safely in place.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS animaxia_shadow_tasks(
+        contentid BIGINT PRIMARY KEY,
+        operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
+        document JSONB,
+        generation BIGINT NOT NULL DEFAULT 1,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK((operation='upsert' AND document IS NOT NULL) OR
+          (operation='delete' AND document IS NULL))
+      )
+    `);
     await setupDistributedShadow();
+    await setupDistributedShadow(); // idempotent upgrade
+    const columns=await db.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name='animaxia_shadow_tasks' AND column_name='source_revision'
+    `);
+    assert.equal(columns.rowCount,1,'Stage-17 task table must migrate in-place');
+    const appliedTable=await db.query(
+      "SELECT to_regclass('public.animaxia_shadow_applied_versions') AS name"
+    );
+    assert.equal(appliedTable.rows[0].name,'animaxia_shadow_applied_versions');
     assert.equal((await distributedShadowStatus()).configured,true);
     assert.equal((await distributedShadowStatus()).distributed,true);
     for(let i=0;i<8;i++){
