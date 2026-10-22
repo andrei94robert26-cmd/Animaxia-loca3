@@ -169,6 +169,24 @@ Rezultatele se ordonează după ID descrescător și se paginează prin
 `afterId=<nextAfterId>`, fără `OFFSET`. Se acceptă între 1 și 50
 înregistrări pe pagină.
 
+### Încarcă direct un titlu după ID-ul extern
+
+```http
+GET /api/migration/postgres/pilot/items/api%3Aexample%3Amovie%3A123
+Authorization: Bearer <admin-token>
+```
+
+Ruta administrativă caută un singur document în indexul unic PostgreSQL
+`externalid` și întoarce `{ "found": true, "data": { ... } }` cu
+revizia curentă, ori `{ "found": false, "data": null }` dacă lipsește.
+Această funcție nu folosește SQLite și nu citește surse video.
+
+În interfața **Admin → PostgreSQL**, introdu ID-ul stabil și folosește
+„Încarcă după ID extern”. Formularul va prelua titlul, categoria, anul,
+revizia și metadatele necesare pentru editarea condiționată, inclusiv
+pentru titluri care nu se află între ultimele cinci rezultate.
+Cererea necesită JWT de administrator și respectă limitarea ratei.
+
 ### Ștergere explicită
 
 ```http
