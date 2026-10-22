@@ -173,6 +173,18 @@ test('PG16 durable event projection: concurrent claims, retries, current state, 
     const lockedOut=await flushPgPilotProjection({limit:5});
     assert.equal(lockedOut.processed,0);
     assert.equal(lockedOut.failed,0);
+    // A quarantined poison job must not block unrelated healthy events.
+    await upsertPgCatalogPilot({
+      externalid:ids[2],title:'Healthy while poison quarantined '+nonce,
+      type:'movie',metadata:{description:'Other events still make progress'},
+    });
+    const otherWork=await flushPgPilotProjection({limit:10});
+    assert.equal(otherWork.failed,0);
+    assert.equal(otherWork.processed,1);
+    assert.equal((await pool.query(
+      'SELECT title FROM animaxia_pilot_search_projection WHERE externalid=$1',
+      [ids[2]]
+    )).rows[0].title,'Healthy while poison quarantined '+nonce);
     const inspect=await listPgPilotQuarantine({limit:10});
     const quarantined=inspect.data.find(x=>x.externalid===ids[3]);
     assert.ok(quarantined);
