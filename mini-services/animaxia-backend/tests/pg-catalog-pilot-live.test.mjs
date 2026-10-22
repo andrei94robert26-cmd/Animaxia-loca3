@@ -100,6 +100,53 @@ test('PostgreSQL native catalog pilot: writes, concurrent upsert, rollback and F
       q:'PilotStageEighteen',type:'tv',year:'2026',
     })).data.length,1);
 
+    // Revision-aware native pilot writes protect against lost updates.
+    // Two writers using the same previously read revision must not both win.
+    const versioned=prefix+'versioned:4';
+    const itemForVersion={
+      externalid:versioned,title:'Create once '+nonce,type:'movie',
+      expectedRevision:0,metadata:{genres:['Concurrency']},
+    };
+    const createdVersion=await upsertPgCatalogPilot(itemForVersion);
+    assert.equal(createdVersion.data.revision,1);
+    await assert.rejects(
+      upsertPgCatalogPilot({...itemForVersion,title:'Stale create '+nonce}),
+      (err)=>err?.status===409
+    );
+    const attempts=await Promise.allSettled([
+      upsertPgCatalogPilot({...itemForVersion,expectedRevision:1,title:'Version writer A'}),
+      upsertPgCatalogPilot({...itemForVersion,expectedRevision:1,title:'Version writer B'}),
+    ]);
+    assert.equal(attempts.filter(x=>x.status==='fulfilled').length,1);
+    assert.equal(attempts.filter(x=>x.status==='rejected').length,1);
+    assert.equal(attempts.find(x=>x.status==='rejected').reason.status,409);
+    const winner=await pool.query(
+      'SELECT revision::text AS revision,title FROM animaxia_pilot_catalog WHERE externalid=$1',
+      [versioned]
+    );
+    assert.equal(winner.rows[0].revision,'2');
+    assert.match(winner.rows[0].title,/^Version writer [AB]$/);
+    await assert.rejects(
+      upsertPgCatalogPilot({...itemForVersion,expectedRevision:1,
+        title:'Must not replace winner'}),
+      (err)=>err?.status===409
+    );
+    const loserDelete=await assert.rejects(
+      deletePgCatalogPilot(versioned,{expectedRevision:1}),
+      (err)=>err?.status===409
+    );
+    void loserDelete;
+    const winnerDelete=await deletePgCatalogPilot(versioned,{expectedRevision:2});
+    assert.equal(winnerDelete.deleted,true);
+    assert.equal((await deletePgCatalogPilot(versioned,{expectedRevision:0})).deleted,false);
+    const versionEvents=await pool.query(
+      'SELECT operation,revision::text AS revision FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid',
+      [versioned]
+    );
+    assert.deepEqual(versionEvents.rows.map(x=>[x.operation,x.revision]),[
+      ['upsert','1'],['upsert','2'],['delete','2'],
+    ]);
+
     const allEvents=await pool.query(
       'SELECT operation,revision FROM animaxia_pilot_events WHERE externalid=$1 ORDER BY eventid',
       [first]);
