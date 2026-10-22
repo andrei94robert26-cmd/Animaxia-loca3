@@ -139,8 +139,13 @@ eveniment `animaxia_pilot_events` și nu schimbă catalogul.
 În **Admin → PostgreSQL**, formularul pornește cu revizia `0`
 (creare-only). Butonul „Editează cu revizia N” de lângă titlurile
 afișate încarcă ID-ul, titlul, categoria, anul și revizia curentă.
+**Câmpurile de metadate existente sunt păstrate** la actualizarea
+titlului — nu sunt suprascrise accidental cu text generic.
 După salvare, revizia din formular este actualizată cu versiunea
-confirmată de PostgreSQL.
+confirmată de PostgreSQL. Butonul „Șterge pilot cu revizie” necesită
+selectarea unui titlu, o revizie pozitivă și confirmare explicită.
+Dacă între timp titlul s-a schimbat, ștergerea primește `409` și
+nu afectează datele actuale.
 
 Testele reale PostgreSQL 16 verifică două scrieri simultane cu aceeași
 revizie, actualizări refuzate și ștergeri stale. Numai un scriitor
