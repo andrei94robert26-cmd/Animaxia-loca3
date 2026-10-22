@@ -10,7 +10,7 @@ import {Card,CardHeader,CardTitle,CardDescription,CardContent} from '@/component
 
 type PilotProjectionStatus={
   enabled:boolean;mode:string;publicCatalogUnchanged:boolean;
-  pending:number;retrying:number;completed:number;
+  pending:number;retrying:number;quarantined:number;maxAttempts:number;completed:number;
 };
 type PilotProjectionBatch={processed:number;failed:number;updated:number;deleted:number};
 type ProjectedItem={
@@ -91,6 +91,8 @@ export function AdminPilotProjectionCard(){
     <CardContent className="space-y-3 text-sm">
       {status&&<p role="status" className="text-zinc-300">
         Evenimente restante: {status.pending} · Retry: {status.retrying}
+        {' · '}În carantină: {status.quarantined}
+        {' · '}Prag: {status.maxAttempts}
         {' · '}Procesate: {status.completed}
       </p>}
       <div className="flex flex-wrap gap-2">
