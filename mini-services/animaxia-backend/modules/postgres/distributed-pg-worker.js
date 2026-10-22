@@ -44,7 +44,7 @@ export async function workDistributedShadow({limit=10,db}={}){
   if(!pgWorkerConfig().configured)throw Object.assign(new Error('PostgreSQL worker not configured'),{status:503});
   busy=true;
   try{
-    let processed=0,failed=0;
+    let processed=0,failed=0,staleDiscarded=0;
     for(let i=0;i<cap;i++){
       const client=await (db||connected()).connect();
       try{
@@ -81,7 +81,7 @@ export async function workDistributedShadow({limit=10,db}={}){
                 [task.contentid,task.generation]);
               await client.query('RELEASE SAVEPOINT apply_one');
               await client.query('COMMIT');active=false;
-              processed++;
+              staleDiscarded++;
               continue;
             }
             if(task.operation==='upsert'){
@@ -116,7 +116,7 @@ export async function workDistributedShadow({limit=10,db}={}){
         }
       }finally{client.release();}
     }
-    return {processed,failed};
+    return {processed,failed,staleDiscarded};
   }finally{busy=false;}
 }
 export function startPgDistributedWorker({keepAlive=false}={}){
