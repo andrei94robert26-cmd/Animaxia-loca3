@@ -154,6 +154,7 @@ jobs:
           node --check modules/postgres/shadow-verify.js
           node --check modules/postgres/catalog-pilot.js
           node --check modules/postgres/pilot-projection.js
+          node --check modules/postgres/pilot-reconciliation.js
           node --check cli/postgres-pilot-projection-worker.mjs
           node --check modules/postgres/distributed-shadow.js
           node --check modules/postgres/distributed-pg-worker.js
@@ -173,7 +174,7 @@ jobs:
           node --check modules/ingest/service-auth.js
           node --check modules/miner/auto-sync.js
           node --check db.js
-          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs tests/miner-auto-sync.test.mjs tests/source-registry.test.mjs tests/content-fts.test.mjs tests/provider-catalog.test.mjs tests/provider-auto-sync.test.mjs tests/community-providers.test.mjs tests/expansion-providers.test.mjs tests/opensearch.test.mjs tests/opensearch-reconcile.test.mjs tests/opensearch-orphans.test.mjs tests/pg-shadow.test.mjs tests/pg-shadow-read.test.mjs tests/pg-shadow-verify.test.mjs tests/pg-catalog-pilot.test.mjs tests/pg-pilot-projection.test.mjs
+          node --test --test-concurrency=1 tests/metadata-search.test.mjs tests/sqlite-advanced.test.mjs tests/ingest-admin-security.test.mjs tests/metadata-batch-import.test.mjs tests/admin-bootstrap.test.mjs tests/metadata-queue.test.mjs tests/miner-auto-sync.test.mjs tests/source-registry.test.mjs tests/content-fts.test.mjs tests/provider-catalog.test.mjs tests/provider-auto-sync.test.mjs tests/community-providers.test.mjs tests/expansion-providers.test.mjs tests/opensearch.test.mjs tests/opensearch-reconcile.test.mjs tests/opensearch-orphans.test.mjs tests/pg-shadow.test.mjs tests/pg-shadow-read.test.mjs tests/pg-shadow-verify.test.mjs tests/pg-catalog-pilot.test.mjs tests/pg-pilot-projection.test.mjs tests/pg-pilot-reconciliation.test.mjs
 
       - name: Live PostgreSQL 16 shadow integration test
         env:
@@ -202,6 +203,13 @@ jobs:
           ANIMAXIA_PG_SHADOW_TLS: 'false'
           NODE_ENV: test
         run: node --test tests/pg-pilot-projection-live.test.mjs
+
+      - name: PostgreSQL 16 native projection drift, missing rows and orphan repair
+        env:
+          ANIMAXIA_PG_SHADOW_DATABASE_URL: postgresql://animaxia:ephemeral-ci-only@127.0.0.1:5432/animaxia_ci
+          ANIMAXIA_PG_SHADOW_TLS: 'false'
+          NODE_ENV: test
+        run: node --test tests/pg-pilot-reconciliation-live.test.mjs
 
   integration:
     name: Final Integration
